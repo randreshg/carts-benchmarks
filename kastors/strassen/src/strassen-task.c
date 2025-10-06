@@ -1,7 +1,8 @@
 /**********************************************************************************************/
-/*  This program is part of the Barcelona OpenMP Tasks Suite                                  */
-/*  Copyright (C) 2009 Barcelona Supercomputing Center - Centro Nacional de Supercomputacion  */
-/*  Copyright (C) 2009 Universitat Politecnica de Catalunya                                   */
+/*  This program is part of the Barcelona OpenMP Tasks Suite */
+/*  Copyright (C) 2009 Barcelona Supercomputing Center - Centro Nacional de
+ * Supercomputacion  */
+/*  Copyright (C) 2009 Universitat Politecnica de Catalunya */
 /*                                                                                            */
 /**********************************************************************************************/
 
@@ -34,9 +35,8 @@
  *
  */
 
-#include <stdlib.h>
 #include "strassen.h"
-
+#include <stdlib.h>
 
 /*****************************************************************************
  **
@@ -58,11 +58,10 @@
  **    C = (*C WRITE) Matrix C contains A x B. (Initial value of *C undefined.)
  **
  *****************************************************************************/
-static void OptimizedStrassenMultiply_par(double *C, double *A, double *B,
-    unsigned MatrixSize, unsigned RowWidthC, unsigned RowWidthA,
-    unsigned RowWidthB, unsigned int Depth, unsigned int cutoff_depth,
-    unsigned cutoff_size)
-{
+static void OptimizedStrassenMultiply_par(
+    double *C, double *A, double *B, unsigned MatrixSize, unsigned RowWidthC,
+    unsigned RowWidthA, unsigned RowWidthB, unsigned int Depth,
+    unsigned int cutoff_depth, unsigned cutoff_size) {
   unsigned QuadrantSize = MatrixSize >> 1; /* MatixSize / 2 */
   unsigned QuadrantSizeInBytes = sizeof(double) * QuadrantSize * QuadrantSize;
   unsigned Column, Row;
@@ -76,10 +75,9 @@ static void OptimizedStrassenMultiply_par(double *C, double *A, double *B,
    **  | A21  A22 |
    **  --        --
    ************************************************************************/
-  double /* *A, *B, *C, */ *A12, *B12, *C12,
-         *A21, *B21, *C21, *A22, *B22, *C22;
+  double /* *A, *B, *C, */ *A12, *B12, *C12, *A21, *B21, *C21, *A22, *B22, *C22;
 
-  double *S1,*S2,*S3,*S4,*S5,*S6,*S7,*S8,*M2,*M5,*T1sMULT;
+  double *S1, *S2, *S3, *S4, *S5, *S6, *S7, *S8, *M2, *M5, *T1sMULT;
 #define T2sMULT C22
 #define NumberOfVariables 11
 
@@ -87,7 +85,8 @@ static void OptimizedStrassenMultiply_par(double *C, double *A, double *B,
   void *StartHeap;
 
   if (MatrixSize <= cutoff_size) {
-    MultiplyByDivideAndConquer(C, A, B, MatrixSize, RowWidthC, RowWidthA, RowWidthB, 0);
+    MultiplyByDivideAndConquer(C, A, B, MatrixSize, RowWidthC, RowWidthA,
+                               RowWidthB, 0);
     return;
   }
 
@@ -103,171 +102,238 @@ static void OptimizedStrassenMultiply_par(double *C, double *A, double *B,
   C22 = C21 + QuadrantSize;
 
   /* Allocate Heap Space Here */
-  StartHeap = Heap = malloc(QuadrantSizeInBytes * NumberOfVariables);
+  StartHeap = Heap = (char *)malloc(QuadrantSizeInBytes * NumberOfVariables);
 
   /* Distribute the heap space over the variables */
-  S1 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S2 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S3 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S4 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S5 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S6 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S7 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  S8 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  M2 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  M5 = (double*) Heap; Heap += QuadrantSizeInBytes;
-  T1sMULT = (double*) Heap; Heap += QuadrantSizeInBytes;
+  S1 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S2 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S3 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S4 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S5 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S6 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S7 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  S8 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  M2 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  M5 = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
+  T1sMULT = (double *)Heap;
+  Heap += QuadrantSizeInBytes;
 
-  if (Depth < cutoff_depth)
-  {
+  if (Depth < cutoff_depth) {
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S1[Row * QuadrantSize + Column] = A21[RowWidthA * Row + Column] + A22[RowWidthA * Row + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S1[Row * QuadrantSize + Column] =
+            A21[RowWidthA * Row + Column] + A22[RowWidthA * Row + Column];
 
 #pragma omp taskwait
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S2[Row * QuadrantSize + Column] = S1[Row * QuadrantSize + Column] - A[RowWidthA * Row + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S2[Row * QuadrantSize + Column] =
+            S1[Row * QuadrantSize + Column] - A[RowWidthA * Row + Column];
 
 #pragma omp taskwait
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S4[Row * QuadrantSize + Column] = A12[Row * RowWidthA + Column] - S2[QuadrantSize * Row + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S4[Row * QuadrantSize + Column] =
+            A12[Row * RowWidthA + Column] - S2[QuadrantSize * Row + Column];
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S5[Row * QuadrantSize + Column] = B12[Row * RowWidthB + Column] - B[Row * RowWidthB + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S5[Row * QuadrantSize + Column] =
+            B12[Row * RowWidthB + Column] - B[Row * RowWidthB + Column];
 
 #pragma omp taskwait
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S6[Row * QuadrantSize + Column] = B22[Row * RowWidthB + Column] - S5[Row * QuadrantSize + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S6[Row * QuadrantSize + Column] =
+            B22[Row * RowWidthB + Column] - S5[Row * QuadrantSize + Column];
 
 #pragma omp taskwait
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S8[Row * QuadrantSize + Column] = S6[Row * QuadrantSize + Column] - B21[Row * RowWidthB + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S8[Row * QuadrantSize + Column] =
+            S6[Row * QuadrantSize + Column] - B21[Row * RowWidthB + Column];
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S3[Row * QuadrantSize + Column] = A[RowWidthA * Row + Column] - A21[RowWidthA * Row + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S3[Row * QuadrantSize + Column] =
+            A[RowWidthA * Row + Column] - A21[RowWidthA * Row + Column];
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column++)
-      S7[Row * QuadrantSize + Column] = B22[Row * RowWidthB + Column] - B12[Row * RowWidthB + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column++)
+        S7[Row * QuadrantSize + Column] =
+            B22[Row * RowWidthB + Column] - B12[Row * RowWidthB + Column];
 
 #pragma omp taskwait
 
     /* M2 = A x B */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(M2, A, B, QuadrantSize, QuadrantSize, RowWidthA, RowWidthB, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(M2, A, B, QuadrantSize, QuadrantSize,
+                                  RowWidthA, RowWidthB, Depth + 1, cutoff_depth,
+                                  cutoff_size);
 
     /* M5 = S1 * S5 */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(M5, S1, S5, QuadrantSize, QuadrantSize, QuadrantSize, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(M5, S1, S5, QuadrantSize, QuadrantSize,
+                                  QuadrantSize, QuadrantSize, Depth + 1,
+                                  cutoff_depth, cutoff_size);
 
     /* Step 1 of T1 = S2 x S6 + M2 */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(T1sMULT, S2, S6,  QuadrantSize, QuadrantSize, QuadrantSize, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(T1sMULT, S2, S6, QuadrantSize, QuadrantSize,
+                                  QuadrantSize, QuadrantSize, Depth + 1,
+                                  cutoff_depth, cutoff_size);
 
     /* Step 1 of T2 = T1 + S3 x S7 */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(C22, S3, S7, QuadrantSize, RowWidthC /*FIXME*/, QuadrantSize, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(
+        C22, S3, S7, QuadrantSize, RowWidthC /*FIXME*/, QuadrantSize,
+        QuadrantSize, Depth + 1, cutoff_depth, cutoff_size);
 
     /* Step 1 of C = M2 + A12 * B21 */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(C, A12, B21, QuadrantSize, RowWidthC, RowWidthA, RowWidthB, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(C, A12, B21, QuadrantSize, RowWidthC,
+                                  RowWidthA, RowWidthB, Depth + 1, cutoff_depth,
+                                  cutoff_size);
 
     /* Step 1 of C12 = S4 x B22 + T1 + M5 */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(C12, S4, B22, QuadrantSize, RowWidthC, QuadrantSize, RowWidthB, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(C12, S4, B22, QuadrantSize, RowWidthC,
+                                  QuadrantSize, RowWidthB, Depth + 1,
+                                  cutoff_depth, cutoff_size);
 
     /* Step 1 of C21 = T2 - A22 * S8 */
 #pragma omp task untied
-    OptimizedStrassenMultiply_par(C21, A22, S8, QuadrantSize, RowWidthC, RowWidthA, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(C21, A22, S8, QuadrantSize, RowWidthC,
+                                  RowWidthA, QuadrantSize, Depth + 1,
+                                  cutoff_depth, cutoff_size);
 
 #pragma omp taskwait
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column += 1)
-      C[RowWidthC * Row + Column] += M2[Row * QuadrantSize + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column += 1)
+        C[RowWidthC * Row + Column] += M2[Row * QuadrantSize + Column];
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column += 1)
-      C12[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] + T1sMULT[Row * QuadrantSize + Column] + M2[Row * QuadrantSize + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column += 1)
+        C12[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] +
+                                         T1sMULT[Row * QuadrantSize + Column] +
+                                         M2[Row * QuadrantSize + Column];
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column += 1)
-      C21[RowWidthC * Row + Column] = -C21[RowWidthC * Row + Column] + C22[RowWidthC * Row + Column] + T1sMULT[Row * QuadrantSize + Column] + M2[Row * QuadrantSize + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column += 1)
+        C21[RowWidthC * Row + Column] = -C21[RowWidthC * Row + Column] +
+                                        C22[RowWidthC * Row + Column] +
+                                        T1sMULT[Row * QuadrantSize + Column] +
+                                        M2[Row * QuadrantSize + Column];
 
 #pragma omp taskwait
 
 #pragma omp task private(Row, Column)
-  for (Row = 0; Row < QuadrantSize; Row++)
-    for (Column = 0; Column < QuadrantSize; Column += 1)
-      C22[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] + T1sMULT[Row * QuadrantSize + Column] + M2[Row * QuadrantSize + Column];
+    for (Row = 0; Row < QuadrantSize; Row++)
+      for (Column = 0; Column < QuadrantSize; Column += 1)
+        C22[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] +
+                                         T1sMULT[Row * QuadrantSize + Column] +
+                                         M2[Row * QuadrantSize + Column];
 
 #pragma omp taskwait
-  }
-  else
-  {
+  } else {
     for (Row = 0; Row < QuadrantSize; Row++)
       for (Column = 0; Column < QuadrantSize; Column++) {
-        S1[Row * QuadrantSize + Column] = A21[RowWidthA * Row + Column] + A22[RowWidthA * Row + Column];
-        S2[Row * QuadrantSize + Column] = S1[Row * QuadrantSize + Column] - A[RowWidthA * Row + Column];
-        S4[Row * QuadrantSize + Column] = A12[Row * RowWidthA + Column] - S2[QuadrantSize * Row + Column];
-        S5[Row * QuadrantSize + Column] = B12[Row * RowWidthB + Column] - B[Row * RowWidthB + Column];
-        S6[Row * QuadrantSize + Column] = B22[Row * RowWidthB + Column] - S5[Row * QuadrantSize + Column];
-        S8[Row * QuadrantSize + Column] = S6[Row * QuadrantSize + Column] - B21[Row * RowWidthB + Column];
-        S3[Row * QuadrantSize + Column] = A[RowWidthA * Row + Column] - A21[RowWidthA * Row + Column];
-        S7[Row * QuadrantSize + Column] = B22[Row * RowWidthB + Column] - B12[Row * RowWidthB + Column];
+        S1[Row * QuadrantSize + Column] =
+            A21[RowWidthA * Row + Column] + A22[RowWidthA * Row + Column];
+        S2[Row * QuadrantSize + Column] =
+            S1[Row * QuadrantSize + Column] - A[RowWidthA * Row + Column];
+        S4[Row * QuadrantSize + Column] =
+            A12[Row * RowWidthA + Column] - S2[QuadrantSize * Row + Column];
+        S5[Row * QuadrantSize + Column] =
+            B12[Row * RowWidthB + Column] - B[Row * RowWidthB + Column];
+        S6[Row * QuadrantSize + Column] =
+            B22[Row * RowWidthB + Column] - S5[Row * QuadrantSize + Column];
+        S8[Row * QuadrantSize + Column] =
+            S6[Row * QuadrantSize + Column] - B21[Row * RowWidthB + Column];
+        S3[Row * QuadrantSize + Column] =
+            A[RowWidthA * Row + Column] - A21[RowWidthA * Row + Column];
+        S7[Row * QuadrantSize + Column] =
+            B22[Row * RowWidthB + Column] - B12[Row * RowWidthB + Column];
       }
     /* M2 = A x B */
-    OptimizedStrassenMultiply_par(M2, A, B, QuadrantSize, QuadrantSize, RowWidthA, RowWidthB, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(M2, A, B, QuadrantSize, QuadrantSize,
+                                  RowWidthA, RowWidthB, Depth + 1, cutoff_depth,
+                                  cutoff_size);
     /* M5 = S1 * S5 */
-    OptimizedStrassenMultiply_par(M5, S1, S5, QuadrantSize, QuadrantSize, QuadrantSize, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(M5, S1, S5, QuadrantSize, QuadrantSize,
+                                  QuadrantSize, QuadrantSize, Depth + 1,
+                                  cutoff_depth, cutoff_size);
     /* Step 1 of T1 = S2 x S6 + M2 */
-    OptimizedStrassenMultiply_par(T1sMULT, S2, S6,  QuadrantSize, QuadrantSize, QuadrantSize, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(T1sMULT, S2, S6, QuadrantSize, QuadrantSize,
+                                  QuadrantSize, QuadrantSize, Depth + 1,
+                                  cutoff_depth, cutoff_size);
     /* Step 1 of T2 = T1 + S3 x S7 */
-    OptimizedStrassenMultiply_par(C22, S3, S7, QuadrantSize, RowWidthC /*FIXME*/, QuadrantSize, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(
+        C22, S3, S7, QuadrantSize, RowWidthC /*FIXME*/, QuadrantSize,
+        QuadrantSize, Depth + 1, cutoff_depth, cutoff_size);
     /* Step 1 of C = M2 + A12 * B21 */
-    OptimizedStrassenMultiply_par(C, A12, B21, QuadrantSize, RowWidthC, RowWidthA, RowWidthB, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(C, A12, B21, QuadrantSize, RowWidthC,
+                                  RowWidthA, RowWidthB, Depth + 1, cutoff_depth,
+                                  cutoff_size);
     /* Step 1 of C12 = S4 x B22 + T1 + M5 */
-    OptimizedStrassenMultiply_par(C12, S4, B22, QuadrantSize, RowWidthC, QuadrantSize, RowWidthB, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(C12, S4, B22, QuadrantSize, RowWidthC,
+                                  QuadrantSize, RowWidthB, Depth + 1,
+                                  cutoff_depth, cutoff_size);
     /* Step 1 of C21 = T2 - A22 * S8 */
-    OptimizedStrassenMultiply_par(C21, A22, S8, QuadrantSize, RowWidthC, RowWidthA, QuadrantSize, Depth+1, cutoff_depth, cutoff_size);
+    OptimizedStrassenMultiply_par(C21, A22, S8, QuadrantSize, RowWidthC,
+                                  RowWidthA, QuadrantSize, Depth + 1,
+                                  cutoff_depth, cutoff_size);
 
     for (Row = 0; Row < QuadrantSize; Row++) {
       for (Column = 0; Column < QuadrantSize; Column += 1) {
         C[RowWidthC * Row + Column] += M2[Row * QuadrantSize + Column];
-        C12[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] + T1sMULT[Row * QuadrantSize + Column] + M2[Row * QuadrantSize + Column];
-        C21[RowWidthC * Row + Column] = -C21[RowWidthC * Row + Column] + C22[RowWidthC * Row + Column] + T1sMULT[Row * QuadrantSize + Column] + M2[Row * QuadrantSize + Column];
-        C22[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] + T1sMULT[Row * QuadrantSize + Column] + M2[Row * QuadrantSize + Column];
+        C12[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] +
+                                         T1sMULT[Row * QuadrantSize + Column] +
+                                         M2[Row * QuadrantSize + Column];
+        C21[RowWidthC * Row + Column] = -C21[RowWidthC * Row + Column] +
+                                        C22[RowWidthC * Row + Column] +
+                                        T1sMULT[Row * QuadrantSize + Column] +
+                                        M2[Row * QuadrantSize + Column];
+        C22[RowWidthC * Row + Column] += M5[Row * QuadrantSize + Column] +
+                                         T1sMULT[Row * QuadrantSize + Column] +
+                                         M2[Row * QuadrantSize + Column];
       }
     }
   }
   free(StartHeap);
 }
 
-void strassen_main_par(double *A, double *B, double *C, int n, unsigned int cutoff_size, unsigned int cutoff_depth)
-{
+void strassen_main_par(double *A, double *B, double *C, int n,
+                       unsigned int cutoff_size, unsigned int cutoff_depth) {
 #pragma omp parallel
 #pragma omp master
-  OptimizedStrassenMultiply_par(C, A, B, n, n, n, n, 1, cutoff_depth, cutoff_size);
+  OptimizedStrassenMultiply_par(C, A, B, n, n, n, n, 1, cutoff_depth,
+                                cutoff_size);
 }

@@ -1,3 +1,4 @@
+
 ## Run
 
 `$ make`
@@ -26,3 +27,10 @@ There are 3 included scripts:
 ### Other Codes
 
 The directory `other_codes` contains codes developed but not discussed in paper.
+
+
+### Original Code:
+https://github.com/avcourt/task-parallelism-omp/tree/master
+
+### Modified by:
+Rafael A. Herrera Guaitero
