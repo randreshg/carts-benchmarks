@@ -4,7 +4,7 @@
 #include "correlation.h"
 
 static void print_array(int m, int n,
-                        DATA_TYPE POLYBENCH_2D(corr, M, M, m, n),
+                        DATA_TYPE **corr,
                         const char *name) {
   (void)name;
   for (int i = 0; i < m; i++) {
@@ -19,7 +19,7 @@ static void print_array(int m, int n,
 }
 
 static void init_array(int m, int n,
-                       DATA_TYPE POLYBENCH_2D(data, M, N, m, n)) {
+                       DATA_TYPE **data) {
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < n; j++) {
       data[i][j] = (DATA_TYPE)(i * j) / (DATA_TYPE)M + (DATA_TYPE)i / (j + 1);
@@ -28,10 +28,10 @@ static void init_array(int m, int n,
 }
 
 static void kernel_correlation(
-    int m, int n, DATA_TYPE POLYBENCH_2D(data, M, N, m, n),
-    DATA_TYPE POLYBENCH_2D(corr, M, M, m, m),
-    DATA_TYPE POLYBENCH_1D(mean, M, m),
-    DATA_TYPE POLYBENCH_1D(stddev, M, m)) {
+    int m, int n, DATA_TYPE **data,
+    DATA_TYPE **corr,
+    DATA_TYPE *mean,
+    DATA_TYPE *stddev) {
   /* Step 1: compute mean of each row. */
   for (int i = 0; i < m; i++) {
     mean[i] = 0.0;
@@ -80,22 +80,39 @@ int main(int argc, char **argv) {
   int m = M;
   int n = N;
 
-  POLYBENCH_2D_ARRAY_DECL(data, DATA_TYPE, M, N, m, n);
-  POLYBENCH_2D_ARRAY_DECL(corr, DATA_TYPE, M, M, m, m);
-  POLYBENCH_1D_ARRAY_DECL(mean, DATA_TYPE, M, m);
-  POLYBENCH_1D_ARRAY_DECL(stddev, DATA_TYPE, M, m);
+  DATA_TYPE **data = (DATA_TYPE **)malloc(m * sizeof(DATA_TYPE *));
+  DATA_TYPE **corr = (DATA_TYPE **)malloc(m * sizeof(DATA_TYPE *));
+  DATA_TYPE *mean = (DATA_TYPE *)malloc(m * sizeof(DATA_TYPE));
+  DATA_TYPE *stddev = (DATA_TYPE *)malloc(m * sizeof(DATA_TYPE));
+  
+  if (!data || !corr || !mean || !stddev) {
+    fprintf(stderr, "Memory allocation failed\n");
+    return 1;
+  }
+  
+  for (int i = 0; i < m; i++) {
+    data[i] = (DATA_TYPE *)malloc(n * sizeof(DATA_TYPE));
+    corr[i] = (DATA_TYPE *)malloc(m * sizeof(DATA_TYPE));
+    if (!data[i] || !corr[i]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+  }
 
-  init_array(m, n, POLYBENCH_ARRAY(data));
+  init_array(m, n, data);
 
-  kernel_correlation(m, n, POLYBENCH_ARRAY(data), POLYBENCH_ARRAY(corr),
-                     POLYBENCH_ARRAY(mean), POLYBENCH_ARRAY(stddev));
+  kernel_correlation(m, n, data, corr, mean, stddev);
 
-  polybench_prevent_dce(print_array(m, m, POLYBENCH_ARRAY(corr), "corr"));
+  polybench_prevent_dce(print_array(m, m, corr, "corr"));
 
-  POLYBENCH_FREE_ARRAY(data);
-  POLYBENCH_FREE_ARRAY(corr);
-  POLYBENCH_FREE_ARRAY(mean);
-  POLYBENCH_FREE_ARRAY(stddev);
+  for (int i = 0; i < m; i++) {
+    free(data[i]);
+    free(corr[i]);
+  }
+  free(data);
+  free(corr);
+  free(mean);
+  free(stddev);
 
   return 0;
 }

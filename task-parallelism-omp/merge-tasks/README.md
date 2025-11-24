@@ -116,9 +116,9 @@ This benchmark uses **OpenMP task-based parallelism** with several key features:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ Command-line argument handling
-- ✅ OpenMP task parallelism
-- ✅ Nested parallelism support
-- ✅ Dynamic thread management
+- No global variables
+- Clean parameter passing
+- Command-line argument handling
+- OpenMP task parallelism
+- Nested parallelism support
+- Dynamic thread management

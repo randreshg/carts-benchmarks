@@ -12,7 +12,7 @@ Computational kernels extracted from SeisSol, a high-order discontinuous Galerki
 
 | Example | Description | Source File | Status |
 |---------|-------------|-------------|--------|
-| **volume-integral** | Element-local volume integral | `volume_integral.c` | ✅ Complete |
+| **volume-integral** | Element-local volume integral | `volume_integral.c` | Complete |
 
 ### volume-integral
 Element-local ADER-DG volume integral computation extracted from SeisSol-generated kernels. Performs dense tensor contractions and matrix-matrix multiplies typical of high-order DG solvers.
@@ -76,8 +76,8 @@ make clean            # Remove build artifacts
 
 ## CARTS Compatibility
 
-- ✅ No global variables - clean parameter passing
-- ✅ OpenMP parallelization with parallel-for
-- ✅ Self-contained implementations
-- ✅ Well-documented with upstream attribution
-- ✅ Multiple problem sizes for scaling studies
+- No global variables - clean parameter passing
+- OpenMP parallelization with parallel-for
+- Self-contained implementations
+- Well-documented with upstream attribution
+- Multiple problem sizes for scaling studies

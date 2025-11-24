@@ -21,6 +21,7 @@
 *.ll
 
 # Stages output directories from dump-carts-stages.sh
+.docs/**
 stages/
 */stages/
 **/stages/

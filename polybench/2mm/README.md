@@ -104,10 +104,10 @@ Two chained matrix multiplications are common in:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ OpenMP parallel for
-- ✅ Static functions
+- No global variables
+- Clean parameter passing
+- OpenMP parallel for
+- Static functions
 
 ## References
 

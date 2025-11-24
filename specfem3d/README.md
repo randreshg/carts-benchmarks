@@ -12,8 +12,8 @@ Computational kernels extracted from SPECFEM3D, a spectral-element method code f
 
 | Example | Description | Source File | Status |
 |---------|-------------|-------------|--------|
-| **stress** | Stress tensor update | `stress_update.c` | ✅ Complete |
-| **velocity** | Velocity update | `velocity_update.c` | ✅ Complete |
+| **stress** | Stress tensor update | `stress_update.c` | Complete |
+| **velocity** | Velocity update | `velocity_update.c` | Complete |
 
 ### stress
 Stress tensor update derived from SPECFEM3D's isotropic Hooke-law implementation. Computes six-component stress tensor updates using mixed derivatives and Lamé parameters.
@@ -80,8 +80,8 @@ make clean            # Remove build artifacts
 
 ## CARTS Compatibility
 
-- ✅ No global variables - clean parameter passing
-- ✅ OpenMP parallelization with parallel-for
-- ✅ Self-contained implementations
-- ✅ Well-documented with upstream attribution
-- ✅ Multiple problem sizes for scaling studies
+- No global variables - clean parameter passing
+- OpenMP parallelization with parallel-for
+- Self-contained implementations
+- Well-documented with upstream attribution
+- Multiple problem sizes for scaling studies

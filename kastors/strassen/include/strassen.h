@@ -52,9 +52,9 @@
  **********************************************************************/
 typedef double REAL;
 typedef unsigned long PTR;
-void strassen_main_par(REAL *A, REAL *B, REAL *C, int n,
+void strassen_main_par(REAL **A, REAL **B, REAL **C, int n,
                        unsigned int cutoff_size, unsigned int cutoff_depth);
-void strassen_main_seq(REAL *A, REAL *B, REAL *C, int n,
+void strassen_main_seq(REAL **A, REAL **B, REAL **C, int n,
                        unsigned int cutoff_size);
 
 void MultiplyByDivideAndConquer(REAL *C, REAL *A, REAL *B,

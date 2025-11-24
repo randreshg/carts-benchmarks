@@ -139,11 +139,11 @@ Strassen's algorithm influenced:
 
 ## CARTS Compatibility
 
-- ✅ No global variables (matrices passed as parameters)
-- ✅ Clean recursive structure
-- ✅ OpenMP task parallelism
-- ✅ OpenMP task dependencies (strassen-task-dep)
-- ✅ Divide-and-conquer pattern
+- No global variables (matrices passed as parameters)
+- Clean recursive structure
+- OpenMP task parallelism
+- OpenMP task dependencies (strassen-task-dep)
+- Divide-and-conquer pattern
 
 ## Key Features
 

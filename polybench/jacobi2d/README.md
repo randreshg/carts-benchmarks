@@ -101,11 +101,11 @@ Jacobi iteration patterns appear in:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ OpenMP parallel for
-- ✅ Static functions
-- ✅ 5-point stencil pattern
+- No global variables
+- Clean parameter passing
+- OpenMP parallel for
+- Static functions
+- 5-point stencil pattern
 
 ## References
 

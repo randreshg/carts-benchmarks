@@ -85,10 +85,10 @@ make clean
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ OpenMP parallel with collapse(2)
-- ✅ 27-point stencil pattern
+- No global variables
+- Clean parameter passing
+- OpenMP parallel with collapse(2)
+- 27-point stencil pattern
 
 ## References
 

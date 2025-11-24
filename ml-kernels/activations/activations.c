@@ -357,9 +357,9 @@ int main(int argc, char **argv) {
   printf("  Softmax sum (should be 1.0): %.10f\n", softmax_sum);
 
   if (fabsf(softmax_sum - 1.0) < 0.0001) {
-    printf("  ✓ Softmax validation passed\n");
+    printf("  Softmax validation passed\n");
   } else {
-    printf("  ✗ Softmax validation failed\n");
+    printf("  Softmax validation failed\n");
   }
 
   printf("\nAll activation functions completed successfully!\n");

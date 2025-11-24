@@ -270,12 +270,12 @@ This benchmark is particularly valuable for CARTS because:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Matrices passed as parameters
-- ✅ OpenMP task dependencies (OpenMP 4.0+)
-- ✅ Clean recursive structure
-- ✅ Explicit data-flow dependencies
-- ✅ Divide-and-conquer pattern
-- ✅ Rich dependency patterns for analysis
-- ✅ Demonstrates advanced task features
-- ✅ Natural pipelining opportunities
+- No global variables
+- Matrices passed as parameters
+- OpenMP task dependencies (OpenMP 4.0+)
+- Clean recursive structure
+- Explicit data-flow dependencies
+- Divide-and-conquer pattern
+- Rich dependency patterns for analysis
+- Demonstrates advanced task features
+- Natural pipelining opportunities

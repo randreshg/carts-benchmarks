@@ -15,47 +15,50 @@
 #define DT 0.001f
 #endif
 
-#define IDX(i, j, k) (((i) * NY + (j)) * NZ + (k))
-
-static void init(float *vx, float *vy, float *vz, float *rho, float *sxx,
-                 float *syy, float *szz, float *sxy, float *sxz, float *syz) {
-  for (int i = 0; i < NX * NY * NZ; ++i) {
-    vx[i] = 0.0f;
-    vy[i] = 0.0f;
-    vz[i] = 0.0f;
-    rho[i] = 2300.0f + (float)(i % 11);
-    sxx[i] = 0.02f * (float)((i * 2) % 17);
-    syy[i] = 0.02f * (float)((i * 3) % 19);
-    szz[i] = 0.02f * (float)((i * 5) % 23);
-    sxy[i] = 0.01f * (float)((i * 7) % 13);
-    sxz[i] = 0.01f * (float)((i * 11) % 29);
-    syz[i] = 0.01f * (float)((i * 13) % 31);
+static void init(float ***vx, float ***vy, float ***vz, float ***rho, float ***sxx,
+                 float ***syy, float ***szz, float ***sxy, float ***sxz, float ***syz) {
+  int idx = 0;
+  for (int i = 0; i < NX; ++i) {
+    for (int j = 0; j < NY; ++j) {
+      for (int k = 0; k < NZ; ++k) {
+        vx[i][j][k] = 0.0f;
+        vy[i][j][k] = 0.0f;
+        vz[i][j][k] = 0.0f;
+        rho[i][j][k] = 2300.0f + (float)(idx % 11);
+        sxx[i][j][k] = 0.02f * (float)((idx * 2) % 17);
+        syy[i][j][k] = 0.02f * (float)((idx * 3) % 19);
+        szz[i][j][k] = 0.02f * (float)((idx * 5) % 23);
+        sxy[i][j][k] = 0.01f * (float)((idx * 7) % 13);
+        sxz[i][j][k] = 0.01f * (float)((idx * 11) % 29);
+        syz[i][j][k] = 0.01f * (float)((idx * 13) % 31);
+        idx++;
+      }
+    }
   }
 }
 
-static inline float diff(const float *arr, int i, int j, int k, int dir) {
+static inline float diff(const float ***arr, int i, int j, int k, int dir) {
   switch (dir) {
   case 0:
-    return arr[IDX(i + 1, j, k)] - arr[IDX(i, j, k)];
+    return arr[i + 1][j][k] - arr[i][j][k];
   case 1:
-    return arr[IDX(i, j + 1, k)] - arr[IDX(i, j, k)];
+    return arr[i][j + 1][k] - arr[i][j][k];
   default:
-    return arr[IDX(i, j, k + 1)] - arr[IDX(i, j, k)];
+    return arr[i][j][k + 1] - arr[i][j][k];
   }
 }
 
 static void specfem_velocity_update(
-    float *restrict vx, float *restrict vy, float *restrict vz,
-    const float *restrict rho, const float *restrict sxx,
-    const float *restrict syy, const float *restrict szz,
-    const float *restrict sxy, const float *restrict sxz,
-    const float *restrict syz) {
+    float ***vx, float ***vy, float ***vz,
+    const float ***rho, const float ***sxx,
+    const float ***syy, const float ***szz,
+    const float ***sxy, const float ***sxz,
+    const float ***syz) {
 #pragma omp parallel for collapse(2) schedule(static)
   for (int k = 1; k < NZ - 1; ++k) {
     for (int j = 1; j < NY - 1; ++j) {
       for (int i = 1; i < NX - 1; ++i) {
-        const int idx = IDX(i, j, k);
-        const float inv_rho = 1.0f / rho[idx];
+        const float inv_rho = 1.0f / rho[i][j][k];
 
         const float dvx =
             diff(sxx, i, j, k, 0) + diff(sxy, i, j, k, 1) +
@@ -67,37 +70,78 @@ static void specfem_velocity_update(
             diff(sxz, i, j, k, 0) + diff(syz, i, j, k, 1) +
             diff(szz, i, j, k, 2);
 
-        vx[idx] += DT * inv_rho * dvx;
-        vy[idx] += DT * inv_rho * dvy;
-        vz[idx] += DT * inv_rho * dvz;
+        vx[i][j][k] += DT * inv_rho * dvx;
+        vy[i][j][k] += DT * inv_rho * dvy;
+        vz[i][j][k] += DT * inv_rho * dvz;
       }
     }
   }
 }
 
-static float checksum(const float *vx, const float *vy, const float *vz) {
+static float checksum(const float ***vx, const float ***vy, const float ***vz) {
   float s = 0.0f;
-  for (int i = 0; i < NX * NY * NZ; ++i)
-    s += vx[i] + vy[i] + vz[i];
+  for (int i = 0; i < NX; ++i) {
+    for (int j = 0; j < NY; ++j) {
+      for (int k = 0; k < NZ; ++k) {
+        s += vx[i][j][k] + vy[i][j][k] + vz[i][j][k];
+      }
+    }
+  }
   return s;
 }
 
 int main(void) {
-  const int n = NX * NY * NZ;
-  float *vx = (float *)malloc(sizeof(float) * n);
-  float *vy = (float *)malloc(sizeof(float) * n);
-  float *vz = (float *)malloc(sizeof(float) * n);
-  float *rho = (float *)malloc(sizeof(float) * n);
-  float *sxx = (float *)malloc(sizeof(float) * n);
-  float *syy = (float *)malloc(sizeof(float) * n);
-  float *szz = (float *)malloc(sizeof(float) * n);
-  float *sxy = (float *)malloc(sizeof(float) * n);
-  float *sxz = (float *)malloc(sizeof(float) * n);
-  float *syz = (float *)malloc(sizeof(float) * n);
+  // Allocate 3D arrays
+  float ***vx = (float ***)malloc(NX * sizeof(float **));
+  float ***vy = (float ***)malloc(NX * sizeof(float **));
+  float ***vz = (float ***)malloc(NX * sizeof(float **));
+  float ***rho = (float ***)malloc(NX * sizeof(float **));
+  float ***sxx = (float ***)malloc(NX * sizeof(float **));
+  float ***syy = (float ***)malloc(NX * sizeof(float **));
+  float ***szz = (float ***)malloc(NX * sizeof(float **));
+  float ***sxy = (float ***)malloc(NX * sizeof(float **));
+  float ***sxz = (float ***)malloc(NX * sizeof(float **));
+  float ***syz = (float ***)malloc(NX * sizeof(float **));
+
   if (!vx || !vy || !vz || !rho || !sxx || !syy || !szz || !sxy || !sxz ||
       !syz) {
     fprintf(stderr, "allocation failure\n");
     return 1;
+  }
+
+  for (int i = 0; i < NX; ++i) {
+    vx[i] = (float **)malloc(NY * sizeof(float *));
+    vy[i] = (float **)malloc(NY * sizeof(float *));
+    vz[i] = (float **)malloc(NY * sizeof(float *));
+    rho[i] = (float **)malloc(NY * sizeof(float *));
+    sxx[i] = (float **)malloc(NY * sizeof(float *));
+    syy[i] = (float **)malloc(NY * sizeof(float *));
+    szz[i] = (float **)malloc(NY * sizeof(float *));
+    sxy[i] = (float **)malloc(NY * sizeof(float *));
+    sxz[i] = (float **)malloc(NY * sizeof(float *));
+    syz[i] = (float **)malloc(NY * sizeof(float *));
+    if (!vx[i] || !vy[i] || !vz[i] || !rho[i] || !sxx[i] || !syy[i] || !szz[i] ||
+        !sxy[i] || !sxz[i] || !syz[i]) {
+      fprintf(stderr, "allocation failure\n");
+      return 1;
+    }
+    for (int j = 0; j < NY; ++j) {
+      vx[i][j] = (float *)malloc(NZ * sizeof(float));
+      vy[i][j] = (float *)malloc(NZ * sizeof(float));
+      vz[i][j] = (float *)malloc(NZ * sizeof(float));
+      rho[i][j] = (float *)malloc(NZ * sizeof(float));
+      sxx[i][j] = (float *)malloc(NZ * sizeof(float));
+      syy[i][j] = (float *)malloc(NZ * sizeof(float));
+      szz[i][j] = (float *)malloc(NZ * sizeof(float));
+      sxy[i][j] = (float *)malloc(NZ * sizeof(float));
+      sxz[i][j] = (float *)malloc(NZ * sizeof(float));
+      syz[i][j] = (float *)malloc(NZ * sizeof(float));
+      if (!vx[i][j] || !vy[i][j] || !vz[i][j] || !rho[i][j] || !sxx[i][j] ||
+          !syy[i][j] || !szz[i][j] || !sxy[i][j] || !sxz[i][j] || !syz[i][j]) {
+        fprintf(stderr, "allocation failure\n");
+        return 1;
+      }
+    }
   }
 
   init(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
@@ -105,6 +149,31 @@ int main(void) {
 
   printf("specfem3d_velocity checksum=%f\n", checksum(vx, vy, vz));
 
+  // Free 3D arrays
+  for (int i = 0; i < NX; ++i) {
+    for (int j = 0; j < NY; ++j) {
+      free(vx[i][j]);
+      free(vy[i][j]);
+      free(vz[i][j]);
+      free(rho[i][j]);
+      free(sxx[i][j]);
+      free(syy[i][j]);
+      free(szz[i][j]);
+      free(sxy[i][j]);
+      free(sxz[i][j]);
+      free(syz[i][j]);
+    }
+    free(vx[i]);
+    free(vy[i]);
+    free(vz[i]);
+    free(rho[i]);
+    free(sxx[i]);
+    free(syy[i]);
+    free(szz[i]);
+    free(sxy[i]);
+    free(sxz[i]);
+    free(syz[i]);
+  }
   free(vx);
   free(vy);
   free(vz);

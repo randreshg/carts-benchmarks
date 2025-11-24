@@ -19,29 +19,23 @@
 void rhs4sg_rev(int ifirst, int ilast, int jfirst, int jlast, int kfirst,
                 int klast, int nk, int *__restrict__ onesided,
                 float *__restrict__ a_acof, float *__restrict__ a_bope,
-                float *__restrict__ a_ghcof, float *__restrict__ a_lu,
-                float *__restrict__ a_u, float *__restrict__ a_mu,
-                float *__restrict__ a_lambda, float h,
+                float *__restrict__ a_ghcof, float ****a_lu,
+                float ****a_u, float ***a_mu,
+                float ***a_lambda, float h,
                 float *__restrict__ a_strx, float *__restrict__ a_stry,
                 float *__restrict__ a_strz) {
-// This would work to create multi-dimensional C arrays:
-//   float** b_ar=(float*)malloc(ni*nj*sizeof(float*));
-//   for( int j=0;j<nj;j++)
-//      b_ar[j] = &a_lu[j-1+ni*(1-1)];
-// #define ar(i,j) b_ar[j][i];
-// #include <iostream>
-// Direct reuse of fortran code by these macro definitions:
-#define mu(i, j, k) a_mu[base + i + ni * (j) + nij * (k)]
-#define la(i, j, k) a_lambda[base + i + ni * (j) + nij * (k)]
-// Reversed indexation
-#define u(c, i, j, k) a_u[base3 + i + ni * (j) + nij * (k) + nijk * (c)]
-#define lu(c, i, j, k) a_lu[base3 + i + ni * (j) + nij * (k) + nijk * (c)]
-#define strx(i) a_strx[i - ifirst0]
-#define stry(j) a_stry[j - jfirst0]
-#define strz(k) a_strz[k - kfirst0]
-#define acof(i, j, k) a_acof[(i - 1) + 6 * (j - 1) + 48 * (k - 1)]
-#define bope(i, j) a_bope[i - 1 + 6 * (j - 1)]
-#define ghcof(i) a_ghcof[i - 1]
+  // Helper macros for array access (using proper array-of-arrays)
+  // Note: arrays are passed with proper indexing, so we need to adjust for ifirst/jfirst/kfirst offsets
+  #define mu(i, j, k) a_mu[i - ifirst][j - jfirst][k - kfirst]
+  #define la(i, j, k) a_lambda[i - ifirst][j - jfirst][k - kfirst]
+  #define u(c, i, j, k) a_u[c][i - ifirst][j - jfirst][k - kfirst]
+  #define lu(c, i, j, k) a_lu[c][i - ifirst][j - jfirst][k - kfirst]
+  #define strx(i) a_strx[i - ifirst0]
+  #define stry(j) a_stry[j - jfirst0]
+  #define strz(k) a_strz[k - kfirst0]
+  #define acof(i, j, k) a_acof[(i - 1) + 6 * (j - 1) + 48 * (k - 1)]
+  #define bope(i, j) a_bope[i - 1 + 6 * (j - 1)]
+  #define ghcof(i) a_ghcof[i - 1]
 
   const float a1 = 0;
   const float i6 = 1.0 / 6;
@@ -50,10 +44,10 @@ void rhs4sg_rev(int ifirst, int ilast, int jfirst, int jlast, int kfirst,
   const float tf = 0.75;
 
   const int ni = ilast - ifirst + 1;
-  const int nij = ni * (jlast - jfirst + 1);
-  const int nijk = nij * (klast - kfirst + 1);
-  const int base = -(ifirst + ni * jfirst + nij * kfirst);
-  const int base3 = base - nijk;
+  const int nj = jlast - jfirst + 1;
+  const int nk_span = klast - kfirst + 1;
+  const int nij = ni * nj;
+  const int nijk = nij * nk_span;
   const int nic = 3 * ni;
   const int nijc = 3 * nij;
   const int ifirst0 = ifirst;
@@ -1129,31 +1123,44 @@ int main() {
   // ghcof: only ghcof(1) nonzero typical; set small value
   ghcof[0] = 1.0f;
 
-  // Material and fields
-  float *mu = (float *)malloc(nijk * sizeof(float));
-  fill_constant(mu, nijk, 2.0f);
-  float *lambda = (float *)malloc(nijk * sizeof(float));
-  fill_constant(lambda, nijk, 3.0f);
-
-  float *u = (float *)malloc(3 * nijk * sizeof(float));
-  memset(u, 0, 3 * nijk * sizeof(float));
-  // Seed u with a simple pattern
-  for (int c = 0; c < 3; c++) {
-    for (int k = kfirst; k <= klast; k++)
-      for (int j = jfirst; j <= jlast; j++)
-        for (int i = ifirst; i <= ilast; i++) {
-          int ni_loc = ni;
-          int nij_loc = ni * nj;
-          int base = -(ifirst + ni_loc * jfirst + nij_loc * kfirst);
-          int base3 = base - nij_loc * nkspan;
-          int idx =
-              base3 + i + ni_loc * (j) + nij_loc * (k) + (nij_loc * nkspan) * c;
-          u[idx] = (float)((c + 1) * 0.01f * (i + j + k));
-        }
+  // Material and fields - allocate as 3D arrays
+  float ***mu = (float ***)malloc(ni * sizeof(float **));
+  float ***lambda = (float ***)malloc(ni * sizeof(float **));
+  for (int i = 0; i < ni; i++) {
+    mu[i] = (float **)malloc(nj * sizeof(float *));
+    lambda[i] = (float **)malloc(nj * sizeof(float *));
+    for (int j = 0; j < nj; j++) {
+      mu[i][j] = (float *)malloc(nkspan * sizeof(float));
+      lambda[i][j] = (float *)malloc(nkspan * sizeof(float));
+      for (int k = 0; k < nkspan; k++) {
+        mu[i][j][k] = 2.0f;
+        lambda[i][j][k] = 3.0f;
+      }
+    }
   }
 
-  float *lu = (float *)malloc(3 * nijk * sizeof(float));
-  memset(lu, 0, 3 * nijk * sizeof(float));
+  // Allocate u and lu as 4D arrays [3][ni][nj][nkspan]
+  float ****u = (float ****)malloc(3 * sizeof(float ***));
+  float ****lu = (float ****)malloc(3 * sizeof(float ***));
+  for (int c = 0; c < 3; c++) {
+    u[c] = (float ***)malloc(ni * sizeof(float **));
+    lu[c] = (float ***)malloc(ni * sizeof(float **));
+    for (int i = 0; i < ni; i++) {
+      u[c][i] = (float **)malloc(nj * sizeof(float *));
+      lu[c][i] = (float **)malloc(nj * sizeof(float *));
+      for (int j = 0; j < nj; j++) {
+        u[c][i][j] = (float *)malloc(nkspan * sizeof(float));
+        lu[c][i][j] = (float *)malloc(nkspan * sizeof(float));
+        for (int k = 0; k < nkspan; k++) {
+          int i_abs = ifirst + i;
+          int j_abs = jfirst + j;
+          int k_abs = kfirst + k;
+          u[c][i][j][k] = (float)((c + 1) * 0.01f * (i_abs + j_abs + k_abs));
+          lu[c][i][j][k] = 0.0f;
+        }
+      }
+    }
+  }
 
   float *strx = (float *)malloc((ni + ifirst) * sizeof(float));
   float *stry = (float *)malloc((nj + jfirst) * sizeof(float));
@@ -1167,9 +1174,15 @@ int main() {
 
   // Print a checksum to validate determinism
   double sum = 0.0;
-  size_t lu_size = 3 * nijk;
-  for (size_t t = 0; t < lu_size; ++t)
-    sum += lu[t];
+  for (int c = 0; c < 3; c++) {
+    for (int i = 0; i < ni; i++) {
+      for (int j = 0; j < nj; j++) {
+        for (int k = 0; k < nkspan; k++) {
+          sum += lu[c][i][j][k];
+        }
+      }
+    }
+  }
   printf("checksum(lu)=%f\n", sum);
 
   // Free allocated memory
@@ -1177,10 +1190,33 @@ int main() {
   free(acof);
   free(bope);
   free(ghcof);
+  
+  for (int i = 0; i < ni; i++) {
+    for (int j = 0; j < nj; j++) {
+      free(mu[i][j]);
+      free(lambda[i][j]);
+    }
+    free(mu[i]);
+    free(lambda[i]);
+  }
   free(mu);
   free(lambda);
+
+  for (int c = 0; c < 3; c++) {
+    for (int i = 0; i < ni; i++) {
+      for (int j = 0; j < nj; j++) {
+        free(u[c][i][j]);
+        free(lu[c][i][j]);
+      }
+      free(u[c][i]);
+      free(lu[c][i]);
+    }
+    free(u[c]);
+    free(lu[c]);
+  }
   free(u);
   free(lu);
+  
   free(strx);
   free(stry);
   free(strz);

@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Sequential version of sweep for verification */
+// Sequential version of sweep for verification
 static void sweep_seq(int nx, int ny, double dx, double dy, double **f,
                       int itold, int itnew, double **u, double **unew) {
   for (int it = itold + 1; it <= itnew; it++) {
@@ -19,16 +19,15 @@ static void sweep_seq(int nx, int ny, double dx, double dy, double **f,
         if (i == 0 || j == 0 || i == nx - 1 || j == ny - 1) {
           unew[i][j] = f[i][j];
         } else {
-          unew[i][j] = 0.25 * (u[i - 1][j] + u[i][j + 1] +
-                               u[i][j - 1] + u[i + 1][j] +
-                               f[i][j] * dx * dy);
+          unew[i][j] = 0.25 * (u[i - 1][j] + u[i][j + 1] + u[i][j - 1] +
+                               u[i + 1][j] + f[i][j] * dx * dy);
         }
       }
     }
   }
 }
 
-/* #pragma omp task depend version of SWEEP using array-of-arrays */
+// #pragma omp task depend version of SWEEP
 void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
            int itnew, double **u, double **unew, int block_size) {
   int i, it, j;
@@ -54,9 +53,8 @@ void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
           if (i == 0 || j == 0 || i == nx - 1 || j == ny - 1) {
             unew[i][j] = f[i][j];
           } else {
-            unew[i][j] =
-                0.25 * (u[i - 1][j] + u[i][j + 1] + u[i][j - 1] +
-                        u[i + 1][j] + f[i][j] * dx * dy);
+            unew[i][j] = 0.25 * (u[i - 1][j] + u[i][j + 1] + u[i][j - 1] +
+                                 u[i + 1][j] + f[i][j] * dx * dy);
           }
         }
       }
@@ -69,7 +67,8 @@ int main(void) {
   int nx = SIZE;
   int ny = SIZE;
 #else
-  int nx = 100; // default for testing
+  // default for testing
+  int nx = 100;
   int ny = 100;
 #endif
   int itold = 0, itnew = 10;
@@ -81,7 +80,7 @@ int main(void) {
   printf("Grid size: %d x %d\n", nx, ny);
   printf("Iterations: %d\n", itnew);
 
-  /* Allocate 2D arrays using array-of-arrays pattern (CARTS-compatible) */
+  // Allocate 2D arrays
   double **f = (double **)malloc(nx * sizeof(double *));
   double **u = (double **)malloc(nx * sizeof(double *));
   double **unew = (double **)malloc(nx * sizeof(double *));
@@ -103,7 +102,7 @@ int main(void) {
     }
   }
 
-  /* Initialize arrays */
+  // Initialize arrays
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
       f[i][j] = 0.0;
@@ -116,12 +115,12 @@ int main(void) {
   printf("Running parallel version with task dependencies...\n");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
 
-  /* Save parallel result */
+  // Save parallel result
   for (int i = 0; i < nx; i++) {
     memcpy(unew_seq[i], unew[i], ny * sizeof(double));
   }
 
-  /* Re-initialize for sequential version */
+  // Re-initialize for sequential version
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
       u[i][j] = 0.0;
@@ -132,7 +131,7 @@ int main(void) {
   printf("Running sequential version for verification...\n");
   sweep_seq(nx, ny, dx, dy, f, itold, itnew, u, unew);
 
-  /* Compare results */
+  // Compare results
   double error = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
@@ -145,7 +144,7 @@ int main(void) {
   printf("Verification: %s (RMS error: %.2e)\n",
          (error < 1e-6) ? "PASS" : "FAIL", error);
 
-  /* Free 2D arrays */
+  // Free 2D arrays
   for (int i = 0; i < nx; i++) {
     free(f[i]);
     free(u[i]);

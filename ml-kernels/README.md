@@ -6,11 +6,11 @@ Machine Learning and Neural Network computational kernels extracted and adapted 
 
 This directory contains fundamental ML/AI kernels extracted from production frameworks (Darknet) and implemented for CARTS compatibility. All kernels:
 
-- ✅ **No global variables** - Clean parameter passing
-- ✅ **OpenMP parallelization** - Using `#pragma omp parallel for`
-- ✅ **Self-contained** - Minimal dependencies (stdlib, math.h)
-- ✅ **Configurable sizes** - Via compile-time macros
-- ✅ **Include validation** - Self-checking test cases
+- **No global variables** - Clean parameter passing
+- **OpenMP parallelization** - Using `#pragma omp parallel for`
+- **Self-contained** - Minimal dependencies (stdlib, math.h)
+- **Configurable sizes** - Via compile-time macros
+- **Include validation** - Self-checking test cases
 
 ## Kernels
 

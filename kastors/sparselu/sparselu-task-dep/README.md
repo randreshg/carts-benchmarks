@@ -221,11 +221,11 @@ BMOD[i,j] in iteration k can overlap with:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Matrix passed as parameter (BENCH)
-- ✅ OpenMP task dependencies (OpenMP 4.0+)
-- ✅ Clean block-based structure
-- ✅ Explicit data-flow dependencies
-- ✅ Array section depend syntax
-- ✅ Rich dependency pattern for analysis
-- ✅ Demonstrates wavefront execution
+- No global variables
+- Matrix passed as parameter (BENCH)
+- OpenMP task dependencies (OpenMP 4.0+)
+- Clean block-based structure
+- Explicit data-flow dependencies
+- Array section depend syntax
+- Rich dependency pattern for analysis
+- Demonstrates wavefront execution

@@ -14,47 +14,77 @@
 #define NK 512
 #endif
 
-static inline int id(int r, int c, int ld) { return r * ld + c; }
-
-static void init(float *restrict A, float *restrict B, float *restrict C) {
+static void init(float **A, float **B, float **C) {
   for (int i = 0; i < NI; i++)
     for (int k = 0; k < NK; k++)
-      A[id(i,k,NK)] = (float)((i + k) % 13) * 0.01f;
+      A[i][k] = (float)((i + k) % 13) * 0.01f;
   for (int k = 0; k < NK; k++)
     for (int j = 0; j < NJ; j++)
-      B[id(k,j,NJ)] = (float)((k * 3 + j) % 17) * 0.02f;
+      B[k][j] = (float)((k * 3 + j) % 17) * 0.02f;
   for (int i = 0; i < NI; i++)
     for (int j = 0; j < NJ; j++)
-      C[id(i,j,NJ)] = 0.0f;
+      C[i][j] = 0.0f;
 }
 
-static void gemm(float *restrict C, const float *restrict A, const float *restrict B, float alpha, float beta) {
+static void gemm(float **C, const float **A, const float **B, float alpha,
+                 float beta) {
 #pragma omp parallel for schedule(static)
   for (int i = 0; i < NI; i++) {
     for (int j = 0; j < NJ; j++) {
       float sum = 0.0f;
-      for (int k = 0; k < NK; k++) sum += A[id(i,k,NK)] * B[id(k,j,NJ)];
-      C[id(i,j,NJ)] = alpha * sum + beta * C[id(i,j,NJ)];
+      for (int k = 0; k < NK; k++)
+        sum += A[i][k] * B[k][j];
+      C[i][j] = alpha * sum + beta * C[i][j];
     }
   }
 }
 
-static float checksum(const float *restrict C) {
+static float checksum(float **C) {
   float s = 0.0f;
-  for (int i = 0; i < NI * NJ; i++) s += C[i];
+  for (int i = 0; i < NI; i++)
+    for (int j = 0; j < NJ; j++)
+      s += C[i][j];
   return s;
 }
 
 int main(void) {
-  float *A = (float *)malloc(sizeof(float) * NI * NK);
-  float *B = (float *)malloc(sizeof(float) * NK * NJ);
-  float *C = (float *)malloc(sizeof(float) * NI * NJ);
-  if (!A || !B || !C) { fprintf(stderr, "alloc failed\n"); return 1; }
+  float **A = (float **)malloc(NI * sizeof(float *));
+  float **B = (float **)malloc(NK * sizeof(float *));
+  float **C = (float **)malloc(NI * sizeof(float *));
+  if (!A || !B || !C) {
+    fprintf(stderr, "alloc failed\n");
+    return 1;
+  }
+
+  for (int i = 0; i < NI; i++) {
+    A[i] = (float *)malloc(NK * sizeof(float));
+    C[i] = (float *)malloc(NJ * sizeof(float));
+    if (!A[i] || !C[i]) {
+      fprintf(stderr, "alloc failed\n");
+      return 1;
+    }
+  }
+  for (int k = 0; k < NK; k++) {
+    B[k] = (float *)malloc(NJ * sizeof(float));
+    if (!B[k]) {
+      fprintf(stderr, "alloc failed\n");
+      return 1;
+    }
+  }
+
   init(A, B, C);
-  gemm(C, A, B, 1.0f, 0.0f);
+  gemm(C, (const float **)A, (const float **)B, 1.0f, 0.0f);
   printf("checksum=%.6f\n", checksum(C));
-  free(A); free(B); free(C);
+
+  for (int i = 0; i < NI; i++) {
+    free(A[i]);
+    free(C[i]);
+  }
+  for (int k = 0; k < NK; k++) {
+    free(B[k]);
+  }
+  free(A);
+  free(B);
+  free(C);
   return 0;
 }
-
-

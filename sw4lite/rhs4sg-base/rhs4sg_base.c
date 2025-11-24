@@ -16,26 +16,37 @@
 #endif
 
 #define COMP 3
-#define IDX(i, j, k) (((i) * NY + (j)) * NZ + (k))
 
-static void init_array(float *u, float *mu, float *lambda, float *rhs) {
+static void init_array(float ****u, float ***mu, float ***lambda, float ****rhs) {
+  int idx = 0;
   for (int c = 0; c < COMP; ++c) {
-    for (int i = 0; i < NX * NY * NZ; ++i) {
-      u[c * NX * NY * NZ + i] =
-          0.05f * (float)((i + 17 * c) % 23) - 0.1f * (float)c;
-      rhs[c * NX * NY * NZ + i] = 0.0f;
+    idx = 0;
+    for (int i = 0; i < NX; ++i) {
+      for (int j = 0; j < NY; ++j) {
+        for (int k = 0; k < NZ; ++k) {
+          u[c][i][j][k] = 0.05f * (float)((idx + 17 * c) % 23) - 0.1f * (float)c;
+          rhs[c][i][j][k] = 0.0f;
+          idx++;
+        }
+      }
     }
   }
-  for (int i = 0; i < NX * NY * NZ; ++i) {
-    mu[i] = 3.0f + 0.001f * (float)(i % 11);
-    lambda[i] = 2.0f + 0.0015f * (float)(i % 7);
+  idx = 0;
+  for (int i = 0; i < NX; ++i) {
+    for (int j = 0; j < NY; ++j) {
+      for (int k = 0; k < NZ; ++k) {
+        mu[i][j][k] = 3.0f + 0.001f * (float)(idx % 11);
+        lambda[i][j][k] = 2.0f + 0.0015f * (float)(idx % 7);
+        idx++;
+      }
+    }
   }
 }
 
-static void sw4lite_rhs4sg_base(float *restrict rhs,
-                                const float *restrict u,
-                                const float *restrict mu,
-                                const float *restrict lambda, float h) {
+static void sw4lite_rhs4sg_base(float ****rhs,
+                                const float ****u,
+                                const float ***mu,
+                                const float ***lambda, float h) {
   const float w[5] = {-1.0f / 12.0f, 2.0f / 3.0f, 0.0f, -2.0f / 3.0f,
                       1.0f / 12.0f};
   const float inv_h2 = 1.0f / (h * h);
@@ -44,29 +55,27 @@ static void sw4lite_rhs4sg_base(float *restrict rhs,
   for (int k = POINTS_PER_DIR; k < NZ - POINTS_PER_DIR; ++k) {
     for (int j = POINTS_PER_DIR; j < NY - POINTS_PER_DIR; ++j) {
       for (int i = POINTS_PER_DIR; i < NX - POINTS_PER_DIR; ++i) {
-        const int idx = IDX(i, j, k);
-        const float mu_c = mu[idx];
-        const float la_c = lambda[idx];
+        const float mu_c = mu[i][j][k];
+        const float la_c = lambda[i][j][k];
 
         for (int c = 0; c < COMP; ++c) {
-          const float *uc = u + c * NX * NY * NZ;
           float lap = 0.0f;
           for (int offset = -2; offset <= 2; ++offset) {
-            lap += w[offset + 2] * (uc[IDX(i + offset, j, k)] +
-                                    uc[IDX(i, j + offset, k)] +
-                                    uc[IDX(i, j, k + offset)]);
+            lap += w[offset + 2] * (u[c][i + offset][j][k] +
+                                    u[c][i][j + offset][k] +
+                                    u[c][i][j][k + offset]);
           }
 
           float div_term = 0.0f;
           if (c == 0) {
-            div_term = uc[IDX(i + 1, j, k)] - uc[IDX(i - 1, j, k)];
+            div_term = u[c][i + 1][j][k] - u[c][i - 1][j][k];
           } else if (c == 1) {
-            div_term = uc[IDX(i, j + 1, k)] - uc[IDX(i, j - 1, k)];
+            div_term = u[c][i][j + 1][k] - u[c][i][j - 1][k];
           } else {
-            div_term = uc[IDX(i, j, k + 1)] - uc[IDX(i, j, k - 1)];
+            div_term = u[c][i][j][k + 1] - u[c][i][j][k - 1];
           }
 
-          rhs[c * NX * NY * NZ + idx] =
+          rhs[c][i][j][k] =
               mu_c * lap * inv_h2 + (la_c + mu_c) * div_term * (0.5f / h);
         }
       }
@@ -74,24 +83,73 @@ static void sw4lite_rhs4sg_base(float *restrict rhs,
   }
 }
 
-static float checksum(const float *rhs) {
+static float checksum(const float ****rhs) {
   float sum = 0.0f;
   for (int c = 0; c < COMP; ++c) {
-    for (int i = 0; i < NX * NY * NZ; ++i) {
-      sum += rhs[c * NX * NY * NZ + i];
+    for (int i = 0; i < NX; ++i) {
+      for (int j = 0; j < NY; ++j) {
+        for (int k = 0; k < NZ; ++k) {
+          sum += rhs[c][i][j][k];
+        }
+      }
     }
   }
   return sum;
 }
 
 int main(void) {
-  float *u = (float *)malloc(sizeof(float) * COMP * NX * NY * NZ);
-  float *mu = (float *)malloc(sizeof(float) * NX * NY * NZ);
-  float *lambda = (float *)malloc(sizeof(float) * NX * NY * NZ);
-  float *rhs = (float *)malloc(sizeof(float) * COMP * NX * NY * NZ);
+  // Allocate 4D arrays for u and rhs [COMP][NX][NY][NZ]
+  float ****u = (float ****)malloc(COMP * sizeof(float ***));
+  float ****rhs = (float ****)malloc(COMP * sizeof(float ***));
+  // Allocate 3D arrays for mu and lambda [NX][NY][NZ]
+  float ***mu = (float ***)malloc(NX * sizeof(float **));
+  float ***lambda = (float ***)malloc(NX * sizeof(float **));
+
   if (!u || !mu || !lambda || !rhs) {
     fprintf(stderr, "allocation failure\n");
     return 1;
+  }
+
+  for (int c = 0; c < COMP; ++c) {
+    u[c] = (float ***)malloc(NX * sizeof(float **));
+    rhs[c] = (float ***)malloc(NX * sizeof(float **));
+    if (!u[c] || !rhs[c]) {
+      fprintf(stderr, "allocation failure\n");
+      return 1;
+    }
+    for (int i = 0; i < NX; ++i) {
+      u[c][i] = (float **)malloc(NY * sizeof(float *));
+      rhs[c][i] = (float **)malloc(NY * sizeof(float *));
+      if (!u[c][i] || !rhs[c][i]) {
+        fprintf(stderr, "allocation failure\n");
+        return 1;
+      }
+      for (int j = 0; j < NY; ++j) {
+        u[c][i][j] = (float *)malloc(NZ * sizeof(float));
+        rhs[c][i][j] = (float *)malloc(NZ * sizeof(float));
+        if (!u[c][i][j] || !rhs[c][i][j]) {
+          fprintf(stderr, "allocation failure\n");
+          return 1;
+        }
+      }
+    }
+  }
+
+  for (int i = 0; i < NX; ++i) {
+    mu[i] = (float **)malloc(NY * sizeof(float *));
+    lambda[i] = (float **)malloc(NY * sizeof(float *));
+    if (!mu[i] || !lambda[i]) {
+      fprintf(stderr, "allocation failure\n");
+      return 1;
+    }
+    for (int j = 0; j < NY; ++j) {
+      mu[i][j] = (float *)malloc(NZ * sizeof(float));
+      lambda[i][j] = (float *)malloc(NZ * sizeof(float));
+      if (!mu[i][j] || !lambda[i][j]) {
+        fprintf(stderr, "allocation failure\n");
+        return 1;
+      }
+    }
   }
 
   init_array(u, mu, lambda, rhs);
@@ -99,9 +157,31 @@ int main(void) {
 
   printf("sw4lite_rhs4sg_base checksum=%f\n", checksum(rhs));
 
+  // Free arrays
+  for (int c = 0; c < COMP; ++c) {
+    for (int i = 0; i < NX; ++i) {
+      for (int j = 0; j < NY; ++j) {
+        free(u[c][i][j]);
+        free(rhs[c][i][j]);
+      }
+      free(u[c][i]);
+      free(rhs[c][i]);
+    }
+    free(u[c]);
+    free(rhs[c]);
+  }
   free(u);
+  free(rhs);
+
+  for (int i = 0; i < NX; ++i) {
+    for (int j = 0; j < NY; ++j) {
+      free(mu[i][j]);
+      free(lambda[i][j]);
+    }
+    free(mu[i]);
+    free(lambda[i]);
+  }
   free(mu);
   free(lambda);
-  free(rhs);
   return 0;
 }

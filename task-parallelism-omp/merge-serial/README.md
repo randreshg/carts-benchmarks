@@ -94,8 +94,8 @@ The algorithm switches to insertion sort when subarray size drops to 64 or fewer
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ Command-line argument handling
-- ✅ Dynamic memory allocation
-- ✅ Proper validation and error checking
+- No global variables
+- Clean parameter passing
+- Command-line argument handling
+- Dynamic memory allocation
+- Proper validation and error checking

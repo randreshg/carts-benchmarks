@@ -106,8 +106,8 @@ make clean
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing via function arguments
-- ✅ OpenMP parallel-for directives
-- ✅ VLA casting for clean array indexing
-- ✅ Standard 5-point stencil pattern
+- No global variables
+- Clean parameter passing via function arguments
+- OpenMP parallel-for directives
+- VLA casting for clean array indexing
+- Standard 5-point stencil pattern

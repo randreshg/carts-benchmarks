@@ -75,7 +75,7 @@ The timing utility provides:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ Reentrant and thread-safe
-- ✅ Portable across platforms
+- No global variables
+- Clean parameter passing
+- Reentrant and thread-safe
+- Portable across platforms

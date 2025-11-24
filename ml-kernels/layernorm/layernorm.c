@@ -15,9 +15,13 @@
 #define EPS 1e-5f
 #endif
 
-static void init(float *x, float *gamma, float *beta) {
-  for (int i = 0; i < BATCH * HIDDEN; ++i) {
-    x[i] = ((float)(i % 113) - 50.0f) * 0.03125f;
+static void init(float **x, float *gamma, float *beta) {
+  int idx = 0;
+  for (int b = 0; b < BATCH; ++b) {
+    for (int h = 0; h < HIDDEN; ++h) {
+      x[b][h] = ((float)(idx % 113) - 50.0f) * 0.03125f;
+      idx++;
+    }
   }
   for (int h = 0; h < HIDDEN; ++h) {
     gamma[h] = 1.0f;
@@ -25,40 +29,41 @@ static void init(float *x, float *gamma, float *beta) {
   }
 }
 
-static void layernorm_forward(float *x, const float *gamma, const float *beta,
+static void layernorm_forward(float **x, const float *gamma, const float *beta,
                               int batch, int hidden, float eps) {
 #pragma omp parallel for
   for (int b = 0; b < batch; ++b) {
     float mean = 0.0f;
     float var = 0.0f;
-    const int offset = b * hidden;
     for (int h = 0; h < hidden; ++h) {
-      mean += x[offset + h];
+      mean += x[b][h];
     }
     mean /= hidden;
     for (int h = 0; h < hidden; ++h) {
-      float diff = x[offset + h] - mean;
+      float diff = x[b][h] - mean;
       var += diff * diff;
     }
     var = var / hidden;
     float inv_std = 1.0f / sqrtf(var + eps);
     for (int h = 0; h < hidden; ++h) {
-      float norm = (x[offset + h] - mean) * inv_std;
-      x[offset + h] = norm * gamma[h] + beta[h];
+      float norm = (x[b][h] - mean) * inv_std;
+      x[b][h] = norm * gamma[h] + beta[h];
     }
   }
 }
 
-static float checksum(const float *x) {
+static float checksum(float **x) {
   float sum = 0.0f;
-  for (int i = 0; i < BATCH * HIDDEN; ++i) {
-    sum += x[i];
+  for (int b = 0; b < BATCH; ++b) {
+    for (int h = 0; h < HIDDEN; ++h) {
+      sum += x[b][h];
+    }
   }
   return sum;
 }
 
 int main(void) {
-  float *x = (float *)malloc(sizeof(float) * BATCH * HIDDEN);
+  float **x = (float **)malloc(BATCH * sizeof(float *));
   float *gamma = (float *)malloc(sizeof(float) * HIDDEN);
   float *beta = (float *)malloc(sizeof(float) * HIDDEN);
 
@@ -67,11 +72,22 @@ int main(void) {
     return 1;
   }
 
+  for (int b = 0; b < BATCH; ++b) {
+    x[b] = (float *)malloc(HIDDEN * sizeof(float));
+    if (!x[b]) {
+      fprintf(stderr, "allocation failure\n");
+      return 1;
+    }
+  }
+
   init(x, gamma, beta);
   layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
 
   printf("layernorm checksum=%f\n", checksum(x));
 
+  for (int b = 0; b < BATCH; ++b) {
+    free(x[b]);
+  }
   free(x);
   free(gamma);
   free(beta);

@@ -23,7 +23,7 @@
 /* Array initialization. */
 static
 void init_array (int n,
-		 DATA_TYPE POLYBENCH_2D(A,N,N,n,n))
+		 DATA_TYPE **A)
 {
   int i, j;
 
@@ -37,7 +37,7 @@ void init_array (int n,
    Can be used also to check the correctness of the output. */
 static
 void print_array(int n,
-		 DATA_TYPE POLYBENCH_2D(A,N,N,n,n))
+		 DATA_TYPE **A)
 
 {
   int i, j;
@@ -56,7 +56,7 @@ void print_array(int n,
 static
 void kernel_seidel_2d(int tsteps,
 		      int n,
-		      DATA_TYPE POLYBENCH_2D(A,N,N,n,n))
+		      DATA_TYPE **A)
 {
   int t, i, j;
 
@@ -85,17 +85,29 @@ int main(int argc, char** argv)
   int tsteps = TSTEPS;
 
   /* Variable declaration/allocation. */
-  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE, N, N, n, n);
-
+  DATA_TYPE **A = (DATA_TYPE **)malloc(n * sizeof(DATA_TYPE *));
+  
+  if (!A) {
+    fprintf(stderr, "Memory allocation failed\n");
+    return 1;
+  }
+  
+  for (int i = 0; i < n; i++) {
+    A[i] = (DATA_TYPE *)malloc(n * sizeof(DATA_TYPE));
+    if (!A[i]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+  }
 
   /* Initialize array(s). */
-  init_array (n, POLYBENCH_ARRAY(A));
+  init_array (n, A);
 
   /* Start timer. */
   polybench_start_instruments;
 
   /* Run kernel. */
-  kernel_seidel_2d (tsteps, n, POLYBENCH_ARRAY(A));
+  kernel_seidel_2d (tsteps, n, A);
 
   /* Stop and print timer. */
   polybench_stop_instruments;
@@ -103,10 +115,13 @@ int main(int argc, char** argv)
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
-  polybench_prevent_dce(print_array(n, POLYBENCH_ARRAY(A)));
+  polybench_prevent_dce(print_array(n, A));
 
   /* Be clean. */
-  POLYBENCH_FREE_ARRAY(A);
+  for (int i = 0; i < n; i++) {
+    free(A[i]);
+  }
+  free(A);
 
   return 0;
 }

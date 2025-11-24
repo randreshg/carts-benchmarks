@@ -87,10 +87,10 @@ make clean
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ OpenMP with collapse(2)
-- ✅ 9-point stencil pattern
+- No global variables
+- Clean parameter passing
+- OpenMP with collapse(2)
+- 9-point stencil pattern
 
 ## References
 

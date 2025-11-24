@@ -139,9 +139,9 @@ u[i][j] = 0.25 * (u[i-1][j] + u[i+1][j] + u[i][j-1] + u[i][j+1] + f[i][j]*h²)
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing via function arguments
-- ✅ OpenMP task parallelism
-- ✅ VLA casting for clean array indexing
-- ✅ Block-based task decomposition
-- ✅ Analytical solution validation
+- No global variables
+- Clean parameter passing via function arguments
+- OpenMP task parallelism
+- VLA casting for clean array indexing
+- Block-based task decomposition
+- Analytical solution validation

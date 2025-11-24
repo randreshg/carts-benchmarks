@@ -67,22 +67,12 @@
 #define PADDING 0
 #endif
 
-static inline int flatten_nchw(int batch_idx, int channel_idx, int height_idx,
-                               int width_idx, int channels, int height,
-                               int width) {
-  return ((batch_idx * channels + channel_idx) * height + height_idx) * width +
-         width_idx;
-}
-
-static inline int flatten_bc(int batch_idx, int channel_idx, int channels) {
-  return batch_idx * channels + channel_idx;
-}
 /*
  * Max Pooling Forward Pass
  *
  * Parameters:
- *   input: Input tensor [batch, channels, in_height, in_width]
- *   output: Output tensor [batch, channels, out_height, out_width]
+ *   input: Input tensor [batch, channels, in_spatial] where in_spatial = in_height * in_width
+ *   output: Output tensor [batch, channels, out_spatial] where out_spatial = out_height * out_width
  *   batch: Batch size
  *   channels: Number of channels
  *   in_height: Input height
@@ -91,12 +81,14 @@ static inline int flatten_bc(int batch_idx, int channel_idx, int channels) {
  *   stride: Stride for pooling window
  *   padding: Padding (typically 0 for pooling)
  */
-void maxpool_forward(float *input, float *output, int batch, int channels,
+void maxpool_forward(float ***input, float ***output, int batch, int channels,
                      int in_height, int in_width, int pool_size, int stride,
                      int padding) {
   // Calculate output dimensions
   int out_height = (in_height + padding - pool_size) / stride + 1;
   int out_width = (in_width + padding - pool_size) / stride + 1;
+  int in_spatial = in_height * in_width;
+  int out_spatial = out_height * out_width;
 
   int w_offset = -padding / 2;
   int h_offset = -padding / 2;
@@ -110,9 +102,8 @@ void maxpool_forward(float *input, float *output, int batch, int channels,
     for (c = 0; c < channels; ++c) {
       for (i = 0; i < out_height; ++i) {
         for (j = 0; j < out_width; ++j) {
-          // Output index
-          int out_index =
-              flatten_nchw(b, c, i, j, channels, out_height, out_width);
+          // Output spatial index
+          int out_spatial_idx = i * out_width + j;
 
           // Find maximum in pooling window
           float max_val = -FLT_MAX;
@@ -127,9 +118,8 @@ void maxpool_forward(float *input, float *output, int batch, int channels,
                            cur_w < in_width);
 
               if (valid) {
-                int in_index = flatten_nchw(b, c, cur_h, cur_w, channels,
-                                            in_height, in_width);
-                float val = input[in_index];
+                int in_spatial_idx = cur_h * in_width + cur_w;
+                float val = input[b][c][in_spatial_idx];
                 if (val > max_val) {
                   max_val = val;
                 }
@@ -137,7 +127,7 @@ void maxpool_forward(float *input, float *output, int batch, int channels,
             }
           }
 
-          output[out_index] = max_val;
+          output[b][c][out_spatial_idx] = max_val;
         }
       }
     }
@@ -148,8 +138,8 @@ void maxpool_forward(float *input, float *output, int batch, int channels,
  * Average Pooling Forward Pass
  *
  * Parameters:
- *   input: Input tensor [batch, channels, in_height, in_width]
- *   output: Output tensor [batch, channels, out_height, out_width]
+ *   input: Input tensor [batch, channels, in_spatial] where in_spatial = in_height * in_width
+ *   output: Output tensor [batch, channels, out_spatial] where out_spatial = out_height * out_width
  *   batch: Batch size
  *   channels: Number of channels
  *   in_height: Input height
@@ -158,12 +148,14 @@ void maxpool_forward(float *input, float *output, int batch, int channels,
  *   stride: Stride for pooling window
  *   padding: Padding (typically 0 for pooling)
  */
-void avgpool_forward(float *input, float *output, int batch, int channels,
+void avgpool_forward(float ***input, float ***output, int batch, int channels,
                      int in_height, int in_width, int pool_size, int stride,
                      int padding) {
   // Calculate output dimensions
   int out_height = (in_height + padding - pool_size) / stride + 1;
   int out_width = (in_width + padding - pool_size) / stride + 1;
+  int in_spatial = in_height * in_width;
+  int out_spatial = out_height * out_width;
 
   int w_offset = -padding / 2;
   int h_offset = -padding / 2;
@@ -177,9 +169,8 @@ void avgpool_forward(float *input, float *output, int batch, int channels,
     for (c = 0; c < channels; ++c) {
       for (i = 0; i < out_height; ++i) {
         for (j = 0; j < out_width; ++j) {
-          // Output index
-          int out_index =
-              flatten_nchw(b, c, i, j, channels, out_height, out_width);
+          // Output spatial index
+          int out_spatial_idx = i * out_width + j;
 
           // Compute average in pooling window
           float sum = 0.0f;
@@ -195,15 +186,14 @@ void avgpool_forward(float *input, float *output, int batch, int channels,
                            cur_w < in_width);
 
               if (valid) {
-                int in_index = flatten_nchw(b, c, cur_h, cur_w, channels,
-                                            in_height, in_width);
-                sum += input[in_index];
+                int in_spatial_idx = cur_h * in_width + cur_w;
+                sum += input[b][c][in_spatial_idx];
                 count++;
               }
             }
           }
 
-          output[out_index] = (count > 0) ? (sum / count) : 0.0f;
+          output[b][c][out_spatial_idx] = (count > 0) ? (sum / count) : 0.0f;
         }
       }
     }
@@ -216,14 +206,14 @@ void avgpool_forward(float *input, float *output, int batch, int channels,
  * layer)
  *
  * Parameters:
- *   input: Input tensor [batch, channels, height, width]
+ *   input: Input tensor [batch, channels, spatial] where spatial = height * width
  *   output: Output tensor [batch, channels] (spatial dims averaged out)
  *   batch: Batch size
  *   channels: Number of channels
  *   height: Input height
  *   width: Input width
  */
-void global_avgpool(float *input, float *output, int batch, int channels,
+void global_avgpool(float ***input, float **output, int batch, int channels,
                     int height, int width) {
   int spatial_size = height * width;
   int b, c, h, w;
@@ -237,13 +227,12 @@ void global_avgpool(float *input, float *output, int batch, int channels,
 
       for (h = 0; h < height; ++h) {
         for (w = 0; w < width; ++w) {
-          int in_index = flatten_nchw(b, c, h, w, channels, height, width);
-          sum += input[in_index];
+          int spatial_idx = h * width + w;
+          sum += input[b][c][spatial_idx];
         }
       }
 
-      int out_index = flatten_bc(b, c, channels);
-      output[out_index] = sum / spatial_size;
+      output[b][c] = sum / spatial_size;
     }
   }
 }
@@ -251,27 +240,33 @@ void global_avgpool(float *input, float *output, int batch, int channels,
 /*
  * Initialize test data
  */
-void init_pooling_data(float *input, int size) {
-  int i;
-  for (i = 0; i < size; ++i) {
-    // Create some pattern that will show pooling effects
-    input[i] = (float)(i % 100) / 10.0f;
+void init_pooling_data(float ***input, int batch, int channels, int spatial) {
+  int idx = 0;
+  for (int b = 0; b < batch; ++b) {
+    for (int c = 0; c < channels; ++c) {
+      for (int s = 0; s < spatial; ++s) {
+        // Create some pattern that will show pooling effects
+        input[b][c][s] = (float)(idx % 100) / 10.0f;
+        idx++;
+      }
+    }
   }
 }
 
 /*
  * Print sample output for validation
  */
-void print_sample(const char *name, float *data, int batch, int channels,
+void print_sample(const char *name, float ***data, int batch, int channels,
                   int height, int width, int max_print) {
   printf("\n%s (first %d elements):\n", name, max_print);
   int count = 0;
+  int spatial = height * width;
   for (int b = 0; b < batch && count < max_print; ++b) {
     for (int c = 0; c < channels && count < max_print; ++c) {
       for (int h = 0; h < height && count < max_print; ++h) {
         for (int w = 0; w < width && count < max_print; ++w) {
-          int index = flatten_nchw(b, c, h, w, channels, height, width);
-          printf("%.2f ", data[index]);
+          int spatial_idx = h * width + w;
+          printf("%.2f ", data[b][c][spatial_idx]);
           count++;
         }
       }
@@ -292,9 +287,8 @@ int main(int argc, char **argv) {
   int out_height = (in_height + padding - pool_size) / stride + 1;
   int out_width = (in_width + padding - pool_size) / stride + 1;
 
-  int input_size = batch * channels * in_height * in_width;
-  int output_size = batch * channels * out_height * out_width;
-  int global_output_size = batch * channels;
+  int in_spatial = in_height * in_width;
+  int out_spatial = out_height * out_width;
 
   printf("Pooling Kernels (Max and Average)\n");
   printf("==================================\n");
@@ -310,19 +304,39 @@ int main(int argc, char **argv) {
          (float)(in_height * in_width) / (out_height * out_width));
   printf("\n");
 
-  // Allocate memory
-  float *input = (float *)malloc(input_size * sizeof(float));
-  float *maxpool_output = (float *)malloc(output_size * sizeof(float));
-  float *avgpool_output = (float *)malloc(output_size * sizeof(float));
-  float *global_output = (float *)malloc(global_output_size * sizeof(float));
+  // Allocate memory as 3D arrays
+  float ***input = (float ***)malloc(batch * sizeof(float **));
+  float ***maxpool_output = (float ***)malloc(batch * sizeof(float **));
+  float ***avgpool_output = (float ***)malloc(batch * sizeof(float **));
+  float **global_output = (float **)malloc(batch * sizeof(float *));
 
   if (!input || !maxpool_output || !avgpool_output || !global_output) {
     fprintf(stderr, "Memory allocation failed\n");
     return 1;
   }
 
+  for (int b = 0; b < batch; ++b) {
+    input[b] = (float **)malloc(channels * sizeof(float *));
+    maxpool_output[b] = (float **)malloc(channels * sizeof(float *));
+    avgpool_output[b] = (float **)malloc(channels * sizeof(float *));
+    global_output[b] = (float *)malloc(channels * sizeof(float));
+    if (!input[b] || !maxpool_output[b] || !avgpool_output[b] || !global_output[b]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+    for (int c = 0; c < channels; ++c) {
+      input[b][c] = (float *)malloc(in_spatial * sizeof(float));
+      maxpool_output[b][c] = (float *)malloc(out_spatial * sizeof(float));
+      avgpool_output[b][c] = (float *)malloc(out_spatial * sizeof(float));
+      if (!input[b][c] || !maxpool_output[b][c] || !avgpool_output[b][c]) {
+        fprintf(stderr, "Memory allocation failed\n");
+        return 1;
+      }
+    }
+  }
+
   // Initialize data
-  init_pooling_data(input, input_size);
+  init_pooling_data(input, batch, channels, in_spatial);
 
   // Run max pooling
   printf("Running max pooling...\n");
@@ -348,17 +362,21 @@ int main(int argc, char **argv) {
   printf(
       "\nGlobal Average Pooling Output (first 10 channels of first batch):\n");
   for (int i = 0; i < 10 && i < channels; ++i) {
-    printf("%.4f ", global_output[i]);
+    printf("%.4f ", global_output[0][i]);
   }
   printf("\n");
 
   // Validation: Check that max pool >= avg pool (element-wise)
   printf("\nValidation:\n");
   int violations = 0;
-  for (int i = 0; i < output_size; ++i) {
-    if (maxpool_output[i] <
-        avgpool_output[i] - 0.001f) { // Small tolerance for floating point
-      violations++;
+  for (int b = 0; b < batch; ++b) {
+    for (int c = 0; c < channels; ++c) {
+      for (int s = 0; s < out_spatial; ++s) {
+        if (maxpool_output[b][c][s] <
+            avgpool_output[b][c][s] - 0.001f) { // Small tolerance for floating point
+          violations++;
+        }
+      }
     }
   }
 
@@ -371,6 +389,17 @@ int main(int argc, char **argv) {
   printf("\nPooling operations completed successfully!\n");
 
   // Cleanup
+  for (int b = 0; b < batch; ++b) {
+    for (int c = 0; c < channels; ++c) {
+      free(input[b][c]);
+      free(maxpool_output[b][c]);
+      free(avgpool_output[b][c]);
+    }
+    free(input[b]);
+    free(maxpool_output[b]);
+    free(avgpool_output[b]);
+    free(global_output[b]);
+  }
   free(input);
   free(maxpool_output);
   free(avgpool_output);

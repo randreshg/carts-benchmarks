@@ -12,9 +12,9 @@ Computational kernels extracted from SW4Lite (Seismic Waves, 4th order, Lite ver
 
 | Example | Description | Source File | Status |
 |---------|-------------|-------------|--------|
-| **rhs4sg-base** | Right-hand side assembly (baseline) | `rhs4sg_base.c` | ✅ Complete |
-| **rhs4sg-revnw** | RHS assembly (revised, optimized) | `rhs4sg_revNW.c` | ✅ Complete |
-| **vel4sg-base** | Velocity update phase | `vel4sg_base.c` | ✅ Complete |
+| **rhs4sg-base** | Right-hand side assembly (baseline) | `rhs4sg_base.c` | Complete |
+| **rhs4sg-revnw** | RHS assembly (revised, optimized) | `rhs4sg_revNW.c` | Complete |
+| **vel4sg-base** | Velocity update phase | `vel4sg_base.c` | Complete |
 
 ### rhs4sg-base
 Simplified interior RHS assembly kernel with fourth-order accurate Laplacian and Lamé coefficients. No one-sided boundary handling, focusing on interior stencil convergence.
@@ -85,8 +85,8 @@ make clean            # Remove build artifacts
 
 ## CARTS Compatibility
 
-- ✅ No global variables - clean parameter passing
-- ✅ OpenMP parallelization with parallel-for
-- ✅ Self-contained implementations
-- ✅ Well-documented with upstream attribution
-- ✅ Multiple problem sizes for scaling studies
+- No global variables - clean parameter passing
+- OpenMP parallelization with parallel-for
+- Self-contained implementations
+- Well-documented with upstream attribution
+- Multiple problem sizes for scaling studies

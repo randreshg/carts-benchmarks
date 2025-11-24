@@ -127,9 +127,9 @@ void quick_sort(int p, int r, int *data, int low_limit) {
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ Command-line argument handling
-- ✅ OpenMP task parallelism
-- ✅ In-place sorting (minimal memory allocation)
-- ✅ Proper validation and error checking
+- No global variables
+- Clean parameter passing
+- Command-line argument handling
+- OpenMP task parallelism
+- In-place sorting (minimal memory allocation)
+- Proper validation and error checking

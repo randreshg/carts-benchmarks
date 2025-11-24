@@ -101,10 +101,10 @@ Libraries like cuBLAS, MKL, and OpenBLAS are heavily optimized for GEMM.
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ OpenMP parallel for
-- ✅ Static functions
+- No global variables
+- Clean parameter passing
+- OpenMP parallel for
+- Static functions
 
 ## References
 

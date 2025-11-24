@@ -145,11 +145,11 @@ Sparse LU factorization is fundamental in:
 
 ## CARTS Compatibility
 
-- ✅ No global variables (matrix passed as parameter)
-- ✅ Clean block-based structure
-- ✅ OpenMP task dependencies (sparselu-task-dep)
-- ✅ OpenMP tasks with untied (sparselu-task)
-- ✅ Rich dependency pattern for testing
+- No global variables (matrix passed as parameter)
+- Clean block-based structure
+- OpenMP task dependencies (sparselu-task-dep)
+- OpenMP tasks with untied (sparselu-task)
+- Rich dependency pattern for testing
 
 ## Key Features
 

@@ -23,7 +23,7 @@
 /* Array initialization. */
 static
 void init_array (int ni, int nj,
-		 DATA_TYPE POLYBENCH_2D(A,NI,NJ,ni,nj))
+		 DATA_TYPE **A)
 {
   int i, j;
 
@@ -39,7 +39,7 @@ void init_array (int ni, int nj,
    Can be used also to check the correctness of the output. */
 static
 void print_array(int ni, int nj,
-		 DATA_TYPE POLYBENCH_2D(B,NI,NJ,ni,nj))
+		 DATA_TYPE **B)
 
 {
   int i, j;
@@ -58,8 +58,8 @@ void print_array(int ni, int nj,
 static
 void kernel_conv2d(int ni,
 		   int nj,
-		   DATA_TYPE POLYBENCH_2D(A,NI,NJ,ni,nj),
-		   DATA_TYPE POLYBENCH_2D(B,NI,NJ,ni,nj))
+		   DATA_TYPE **A,
+		   DATA_TYPE **B)
 {
   int i, j;
   #pragma scop
@@ -84,17 +84,31 @@ int main(int argc, char** argv)
   int nj = NJ;
 
   /* Variable declaration/allocation. */
-  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE, NI, NJ, ni, nj);
-  POLYBENCH_2D_ARRAY_DECL(B, DATA_TYPE, NI, NJ, ni, nj);
+  DATA_TYPE **A = (DATA_TYPE **)malloc(ni * sizeof(DATA_TYPE *));
+  DATA_TYPE **B = (DATA_TYPE **)malloc(ni * sizeof(DATA_TYPE *));
+  
+  if (!A || !B) {
+    fprintf(stderr, "Memory allocation failed\n");
+    return 1;
+  }
+  
+  for (int i = 0; i < ni; i++) {
+    A[i] = (DATA_TYPE *)malloc(nj * sizeof(DATA_TYPE));
+    B[i] = (DATA_TYPE *)malloc(nj * sizeof(DATA_TYPE));
+    if (!A[i] || !B[i]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+  }
 
   /* Initialize array(s). */
-  init_array (ni, nj, POLYBENCH_ARRAY(A));
+  init_array (ni, nj, A);
   
   /* Start timer. */
   polybench_start_instruments;
 
   /* Run kernel. */
-  kernel_conv2d (ni, nj, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(B));
+  kernel_conv2d (ni, nj, A, B);
 
   /* Stop and print timer. */
   polybench_stop_instruments;
@@ -102,11 +116,15 @@ int main(int argc, char** argv)
   
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
-  polybench_prevent_dce(print_array(ni, nj, POLYBENCH_ARRAY(B)));
+  polybench_prevent_dce(print_array(ni, nj, B));
 
   /* Be clean. */
-  POLYBENCH_FREE_ARRAY(A);
-  POLYBENCH_FREE_ARRAY(B);
+  for (int i = 0; i < ni; i++) {
+    free(A[i]);
+    free(B[i]);
+  }
+  free(A);
+  free(B);
   
   return 0;
 }

@@ -120,9 +120,9 @@ Dependencies ensure:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing via function arguments
-- ✅ OpenMP task dependencies (OpenMP 4.0+)
-- ✅ VLA casting for clean array indexing
-- ✅ Explicit dependency specification
-- ✅ Row-level dependency granularity
+- No global variables
+- Clean parameter passing via function arguments
+- OpenMP task dependencies (OpenMP 4.0+)
+- VLA casting for clean array indexing
+- Explicit dependency specification
+- Row-level dependency granularity

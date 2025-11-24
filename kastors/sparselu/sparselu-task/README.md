@@ -175,9 +175,9 @@ for (kk = 0; kk < matrix_size; kk++) {
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Matrix passed as parameter (BENCH)
-- ✅ OpenMP untied tasks
-- ✅ Clean block-based structure
-- ✅ Fork-join task pattern
-- ✅ Suitable for testing task scheduling
+- No global variables
+- Matrix passed as parameter (BENCH)
+- OpenMP untied tasks
+- Clean block-based structure
+- Fork-join task pattern
+- Suitable for testing task scheduling

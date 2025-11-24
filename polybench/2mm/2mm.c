@@ -22,10 +22,10 @@
 /* Array initialization. */
 static void init_array(int ni, int nj, int nk, int nl, DATA_TYPE *alpha,
                        DATA_TYPE *beta,
-                       DATA_TYPE POLYBENCH_2D(A, NI, NK, ni, nl),
-                       DATA_TYPE POLYBENCH_2D(B, NK, NJ, nk, nj),
-                       DATA_TYPE POLYBENCH_2D(C, NL, NJ, nl, nj),
-                       DATA_TYPE POLYBENCH_2D(D, NI, NL, ni, nl)) {
+                       DATA_TYPE **A,
+                       DATA_TYPE **B,
+                       DATA_TYPE **C,
+                       DATA_TYPE **D) {
   int i, j;
 
   *alpha = 32412;
@@ -47,7 +47,7 @@ static void init_array(int ni, int nj, int nk, int nl, DATA_TYPE *alpha,
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
 static void print_array(int ni, int nl,
-                        DATA_TYPE POLYBENCH_2D(D, NI, NL, ni, nl)) {
+                        DATA_TYPE **D) {
   int i, j;
 
   for (i = 0; i < ni; i++)
@@ -63,11 +63,11 @@ static void print_array(int ni, int nl,
    including the call and return. */
 static void kernel_2mm(int ni, int nj, int nk, int nl, DATA_TYPE alpha,
                        DATA_TYPE beta,
-                       DATA_TYPE POLYBENCH_2D(tmp, NI, NJ, ni, nj),
-                       DATA_TYPE POLYBENCH_2D(A, NI, NK, ni, nk),
-                       DATA_TYPE POLYBENCH_2D(B, NK, NJ, nk, nj),
-                       DATA_TYPE POLYBENCH_2D(C, NL, NJ, nl, nj),
-                       DATA_TYPE POLYBENCH_2D(D, NI, NL, ni, nl)) {
+                       DATA_TYPE **tmp,
+                       DATA_TYPE **A,
+                       DATA_TYPE **B,
+                       DATA_TYPE **C,
+                       DATA_TYPE **D) {
   int i, j, k;
 #pragma scop
 /* D := alpha*A*B*C + beta*D */
@@ -101,23 +101,49 @@ int main(int argc, char **argv) {
   /* Variable declaration/allocation. */
   DATA_TYPE alpha;
   DATA_TYPE beta;
-  POLYBENCH_2D_ARRAY_DECL(tmp, DATA_TYPE, NI, NJ, ni, nj);
-  POLYBENCH_2D_ARRAY_DECL(A, DATA_TYPE, NI, NK, ni, nk);
-  POLYBENCH_2D_ARRAY_DECL(B, DATA_TYPE, NK, NJ, nk, nj);
-  POLYBENCH_2D_ARRAY_DECL(C, DATA_TYPE, NL, NJ, nl, nj);
-  POLYBENCH_2D_ARRAY_DECL(D, DATA_TYPE, NI, NL, ni, nl);
+  DATA_TYPE **tmp = (DATA_TYPE **)malloc(ni * sizeof(DATA_TYPE *));
+  DATA_TYPE **A = (DATA_TYPE **)malloc(ni * sizeof(DATA_TYPE *));
+  DATA_TYPE **B = (DATA_TYPE **)malloc(nk * sizeof(DATA_TYPE *));
+  DATA_TYPE **C = (DATA_TYPE **)malloc(nl * sizeof(DATA_TYPE *));
+  DATA_TYPE **D = (DATA_TYPE **)malloc(ni * sizeof(DATA_TYPE *));
+  
+  if (!tmp || !A || !B || !C || !D) {
+    fprintf(stderr, "Memory allocation failed\n");
+    return 1;
+  }
+  
+  for (int i = 0; i < ni; i++) {
+    tmp[i] = (DATA_TYPE *)malloc(nj * sizeof(DATA_TYPE));
+    A[i] = (DATA_TYPE *)malloc(nk * sizeof(DATA_TYPE));
+    D[i] = (DATA_TYPE *)malloc(nl * sizeof(DATA_TYPE));
+    if (!tmp[i] || !A[i] || !D[i]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+  }
+  for (int i = 0; i < nk; i++) {
+    B[i] = (DATA_TYPE *)malloc(nj * sizeof(DATA_TYPE));
+    if (!B[i]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+  }
+  for (int i = 0; i < nl; i++) {
+    C[i] = (DATA_TYPE *)malloc(nj * sizeof(DATA_TYPE));
+    if (!C[i]) {
+      fprintf(stderr, "Memory allocation failed\n");
+      return 1;
+    }
+  }
 
   /* Initialize array(s). */
-  init_array(ni, nj, nk, nl, &alpha, &beta, POLYBENCH_ARRAY(A),
-             POLYBENCH_ARRAY(B), POLYBENCH_ARRAY(C), POLYBENCH_ARRAY(D));
+  init_array(ni, nj, nk, nl, &alpha, &beta, A, B, C, D);
 
   /* Start timer. */
   polybench_start_instruments;
 
   /* Run kernel. */
-  kernel_2mm(ni, nj, nk, nl, alpha, beta, POLYBENCH_ARRAY(tmp),
-             POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(B), POLYBENCH_ARRAY(C),
-             POLYBENCH_ARRAY(D));
+  kernel_2mm(ni, nj, nk, nl, alpha, beta, tmp, A, B, C, D);
 
   /* Stop and print timer. */
   polybench_stop_instruments;
@@ -125,14 +151,25 @@ int main(int argc, char **argv) {
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
-  polybench_prevent_dce(print_array(ni, nl, POLYBENCH_ARRAY(D)));
+  polybench_prevent_dce(print_array(ni, nl, D));
 
   /* Be clean. */
-  POLYBENCH_FREE_ARRAY(tmp);
-  POLYBENCH_FREE_ARRAY(A);
-  POLYBENCH_FREE_ARRAY(B);
-  POLYBENCH_FREE_ARRAY(C);
-  POLYBENCH_FREE_ARRAY(D);
+  for (int i = 0; i < ni; i++) {
+    free(tmp[i]);
+    free(A[i]);
+    free(D[i]);
+  }
+  for (int i = 0; i < nk; i++) {
+    free(B[i]);
+  }
+  for (int i = 0; i < nl; i++) {
+    free(C[i]);
+  }
+  free(tmp);
+  free(A);
+  free(B);
+  free(C);
+  free(D);
 
   return 0;
 }

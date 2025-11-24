@@ -95,10 +95,10 @@ Three chained matrix multiplications test:
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Clean parameter passing
-- ✅ OpenMP parallel for
-- ✅ Static functions
+- No global variables
+- Clean parameter passing
+- OpenMP parallel for
+- Static functions
 
 ## References
 

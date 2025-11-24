@@ -104,14 +104,6 @@ Poisson equation solvers are fundamental in:
 - **Image Processing**: Seamless cloning, gradient domain editing
 - **Graphics**: Mesh smoothing, surface reconstruction
 
-## CARTS Compatibility
-
-- ✅ No global variables (all data passed as parameters)
-- ✅ Clean array indexing with VLA casting
-- ✅ OpenMP parallel for (jacobi-for, poisson-for)
-- ✅ OpenMP task dependencies (jacobi-task-dep, poisson-task)
-- ✅ Straightforward dependency pattern
-
 ## Key Features
 
 - **Iterative solver**: Jacobi method (simpler than Gauss-Seidel)

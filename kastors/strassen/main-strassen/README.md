@@ -134,11 +134,11 @@ Then combines them to form C11, C12, C21, C22
 
 ## CARTS Compatibility
 
-- ✅ Simple parameter structure
-- ✅ Clean interface to algorithm implementations
-- ✅ No global state
-- ✅ Configurable problem sizes
-- ✅ Integration with benchmark framework
+- Simple parameter structure
+- Clean interface to algorithm implementations
+- No global state
+- Configurable problem sizes
+- Integration with benchmark framework
 
 ## Usage Pattern
 

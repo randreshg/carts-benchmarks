@@ -98,13 +98,13 @@ Transformer architecture is the foundation of:
 
 ## CARTS Compatibility
 
-- ✅ No global variables (weights passed as parameters)
-- ✅ Clean parameter passing via structs
-- ✅ OpenMP parallel for in key operations:
+- No global variables (weights passed as parameters)
+- Clean parameter passing via structs
+- OpenMP parallel for in key operations:
   - Matrix multiplications
   - RMSNorm computation
   - Attention score computation
-- ✅ Self-contained implementation
+- Self-contained implementation
 
 ## Key Features
 

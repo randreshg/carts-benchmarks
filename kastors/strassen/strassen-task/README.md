@@ -202,10 +202,10 @@ if (Depth < cutoff_depth) {
 
 ## CARTS Compatibility
 
-- ✅ No global variables
-- ✅ Matrices passed as parameters
-- ✅ OpenMP untied tasks
-- ✅ Clean recursive structure
-- ✅ Divide-and-conquer pattern
-- ✅ Controllable parallelism (cutoff_depth)
-- ✅ Dynamic memory management (malloc/free)
+- No global variables
+- Matrices passed as parameters
+- OpenMP untied tasks
+- Clean recursive structure
+- Divide-and-conquer pattern
+- Controllable parallelism (cutoff_depth)
+- Dynamic memory management (malloc/free)
