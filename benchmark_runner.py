@@ -22,13 +22,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich import box
@@ -238,6 +239,7 @@ class BenchmarkResult:
     artifacts: Artifacts
     timestamp: str
     total_duration_sec: float
+    thread_count: Optional[int] = None
 
 
 # ============================================================================
@@ -269,6 +271,57 @@ def get_carts_dir() -> Path:
 def get_benchmarks_dir() -> Path:
     """Get the benchmarks directory."""
     return Path(__file__).parent.resolve()
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def parse_threads(spec: str) -> List[int]:
+    """Parse thread specification into list of thread counts.
+
+    Supports comma-separated: "1,2,4,8"
+    Supports range format: "1:16:2" (start:stop:step)
+    """
+    if ',' in spec:
+        return [int(t.strip()) for t in spec.split(',') if t.strip()]
+    elif ':' in spec:
+        parts = [int(p.strip()) for p in spec.split(':') if p.strip()]
+        if len(parts) == 2:
+            start, stop = parts
+            step = 1
+        elif len(parts) == 3:
+            start, stop, step = parts
+        else:
+            raise ValueError(f"Invalid thread range format: {spec}")
+        return list(range(start, stop + 1, step))
+    else:
+        # Single thread count
+        return [int(spec)]
+
+
+def generate_arts_config(base_path: Optional[Path], threads: int, counter_dir: Optional[Path]) -> Path:
+    """Generate temporary arts.cfg with specific thread count."""
+    if base_path and base_path.exists():
+        content = base_path.read_text()
+    else:
+        content = "[ARTS]\nthreads=1\nnodeCount=1\n"
+
+    # Update threads
+    if re.search(r'^threads=', content, re.MULTILINE):
+        content = re.sub(r'^threads=\d+', f'threads={threads}', content, flags=re.MULTILINE)
+    else:
+        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
+
+    # Add counter settings if requested
+    if counter_dir:
+        content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
+
+    # Write to temp file
+    temp_path = Path(tempfile.mkdtemp()) / f"arts_{threads}t.cfg"
+    temp_path.write_text(content)
+    return temp_path
 
 
 # ============================================================================
@@ -361,6 +414,7 @@ class BenchmarkRunner:
         size: str,
         variant: str = "arts",
         arts_config: Optional[Path] = None,
+        cflags: str = "",
     ) -> BuildResult:
         """Build a single benchmark using make."""
         bench_path = self.benchmarks_dir / name
@@ -390,7 +444,7 @@ class BenchmarkRunner:
             "standard": "standard",
         }
 
-        # Build command using make 
+        # Build command using make
         if variant == "openmp":
             # Build only OpenMP variant - pass size via CFLAGS, not make target
             # This ensures OMP builds are independent of ARTS builds
@@ -401,17 +455,23 @@ class BenchmarkRunner:
                 "standard": "-DSTANDARD_DATASET",
                 "large": "-DLARGE_DATASET",
             }
-            cflags = size_flags.get(size, "")
-            cmd = ["make", "openmp"]
+            all_cflags = size_flags.get(size, "")
             if cflags:
-                cmd.append(f"CFLAGS={cflags}")
+                all_cflags = f"{all_cflags} {cflags}".strip()
+            cmd = ["make", "openmp"]
+            if all_cflags:
+                cmd.append(f"CFLAGS={all_cflags}")
         else:
             # Build ARTS variant (full pipeline)
             if size in size_targets:
                 # Size target builds both all and openmp
                 cmd = ["make", size]
+                if cflags:
+                    cmd.append(f"CFLAGS={cflags}")
             else:
                 cmd = ["make", "all"]
+                if cflags:
+                    cmd.append(f"CFLAGS={cflags}")
 
         # Add ARTS config override if provided
         if arts_config and variant != "openmp":
@@ -473,10 +533,89 @@ class BenchmarkRunner:
 
         return None
 
+    def run_with_thread_sweep(
+        self,
+        name: str,
+        size: str,
+        threads_list: List[int],
+        base_config: Optional[Path],
+        cflags: str = "",
+        counter_dir: Optional[Path] = None,
+        timeout: int = DEFAULT_TIMEOUT,
+    ) -> List[BenchmarkResult]:
+        """Run benchmark with multiple thread configurations."""
+        results = []
+        for threads in threads_list:
+            # Generate arts.cfg with thread count
+            arts_cfg = generate_arts_config(base_config, threads, counter_dir)
+
+            # Set OMP_NUM_THREADS for OpenMP variant
+            env = {"OMP_NUM_THREADS": str(threads)}
+
+            # Build both variants
+            build_arts = self.build_benchmark(name, size, "arts", arts_cfg, cflags)
+            build_omp = self.build_benchmark(name, size, "openmp", None, cflags)
+
+            # Run ARTS version (ARTS uses arts.cfg for thread count)
+            if build_arts.status == Status.PASS and build_arts.executable:
+                run_arts = self.run_benchmark(build_arts.executable, timeout)
+            else:
+                run_arts = RunResult(
+                    status=Status.SKIP,
+                    duration_sec=0.0,
+                    exit_code=-1,
+                    stdout="",
+                    stderr="Build failed",
+                )
+
+            # Run OpenMP version (needs OMP_NUM_THREADS env var)
+            if build_omp.status == Status.PASS and build_omp.executable:
+                run_omp = self.run_benchmark(build_omp.executable, timeout, env=env)
+            else:
+                run_omp = RunResult(
+                    status=Status.SKIP,
+                    duration_sec=0.0,
+                    exit_code=-1,
+                    stdout="",
+                    stderr="Build failed",
+                )
+
+            # Calculate timing
+            timing = self.calculate_timing(run_arts, run_omp)
+
+            # Verify correctness for all thread counts
+            verification = self.verify_correctness(run_arts, run_omp)
+
+            # Collect artifacts
+            bench_path = self.benchmarks_dir / name
+            artifacts = self.collect_artifacts(bench_path)
+
+            # Store with thread count
+            result = BenchmarkResult(
+                name=name,
+                suite=name.split("/")[0] if "/" in name else "",
+                size=size,
+                build_arts=build_arts,
+                build_omp=build_omp,
+                run_arts=run_arts,
+                run_omp=run_omp,
+                timing=timing,
+                verification=verification,
+                artifacts=artifacts,
+                timestamp=datetime.now().isoformat(),
+                total_duration_sec=0.0,  # Will be calculated later
+                thread_count=threads,
+            )
+
+            results.append(result)
+
+        return results
+
     def run_benchmark(
         self,
         executable: str,
         timeout: int = DEFAULT_TIMEOUT,
+        env: Optional[Dict[str, str]] = None,
     ) -> RunResult:
         """Execute a benchmark and capture output."""
         if not executable or not os.path.exists(executable):
@@ -488,6 +627,11 @@ class BenchmarkRunner:
                 stderr="Executable not found",
             )
 
+        # Merge with current environment
+        run_env = os.environ.copy()
+        if env:
+            run_env.update(env)
+
         start = time.time()
         try:
             result = subprocess.run(
@@ -496,6 +640,7 @@ class BenchmarkRunner:
                 text=True,
                 timeout=timeout,
                 cwd=Path(executable).parent,
+                env=run_env,
             )
             duration = time.time() - start
 
@@ -1123,31 +1268,75 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m {secs:.0f}s"
 
 
+def get_kernel_time(run_result: RunResult) -> Optional[float]:
+    """Get total kernel time from run result (sum of all kernel timings)."""
+    if run_result.kernel_timings:
+        return sum(run_result.kernel_timings.values())
+    return None
+
+
+def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
+    """Format kernel time for display. Returns (total_time, display_string).
+
+    For single kernel: returns (time, "0.1234s")
+    For multiple kernels: returns (sum, "0.5678s [3]") where [3] is kernel count
+    """
+    if not run_result.kernel_timings:
+        return None, ""
+
+    total = sum(run_result.kernel_timings.values())
+    count = len(run_result.kernel_timings)
+
+    if count == 1:
+        return total, f"{total:.4f}s"
+    else:
+        return total, f"{total:.4f}s [{count}]"
+
+
 def create_results_table(results: List[BenchmarkResult]) -> Table:
     """Create a rich table from benchmark results."""
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("Build ARTS", justify="center")
-    table.add_column("Build OMP", justify="center")
-    table.add_column("Run ARTS", justify="center")
-    table.add_column("Run OMP", justify="center")
+    table.add_column("Build", justify="center")
+    table.add_column("ARTS Kernel", justify="right")
+    table.add_column("OMP Kernel", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
+    has_fallback = False
+    has_multi_kernel = False
     for r in results:
-        # Build status
-        build_arts = f"{status_symbol(r.build_arts.status)} {r.build_arts.duration_sec:.1f}s"
-        build_omp = f"{status_symbol(r.build_omp.status)} {r.build_omp.duration_sec:.1f}s"
+        # Build status (combined)
+        if r.build_arts.status == Status.PASS and r.build_omp.status == Status.PASS:
+            build = f"[green]\u2713[/] {r.build_arts.duration_sec + r.build_omp.duration_sec:.1f}s"
+        else:
+            build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-        # Run status
+        # Get kernel times with formatted display
+        arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+
+        # Track if any benchmark has multiple kernels
+        if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
+            has_multi_kernel = True
+        omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+
+        # Run status with kernel time
         if r.run_arts.status == Status.PASS:
-            run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s"
+            if arts_kernel is not None:
+                run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}"
+            else:
+                run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
+                has_fallback = True
         else:
             run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
 
         if r.run_omp.status == Status.PASS:
-            run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s"
+            if omp_kernel is not None:
+                run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}"
+            else:
+                run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
+                has_fallback = True
         else:
             run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
 
@@ -1161,24 +1350,42 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             correct = "[red]\u2717 NO[/]"
 
-        # Speedup
-        if r.timing.speedup > 0:
-            if r.timing.speedup >= 1:
-                speedup = f"[green]{r.timing.speedup:.2f}x[/]"
+        # Speedup based on kernel time if available
+        if arts_kernel is not None and omp_kernel is not None and arts_kernel > 0:
+            kernel_speedup = omp_kernel / arts_kernel
+            if kernel_speedup >= 1.0:
+                speedup = f"[green]{kernel_speedup:.2f}x[/]"
+            elif kernel_speedup >= 0.8:
+                speedup = f"[yellow]{kernel_speedup:.2f}x[/]"
             else:
-                speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
+                speedup = f"[red]{kernel_speedup:.2f}x[/]"
+        elif r.timing.speedup > 0:
+            # Fallback to total time speedup
+            if r.timing.speedup >= 1:
+                speedup = f"[green]{r.timing.speedup:.2f}x[/]*"
+            else:
+                speedup = f"[yellow]{r.timing.speedup:.2f}x[/]*"
+            has_fallback = True
         else:
             speedup = "[dim]-[/]"
 
         table.add_row(
             r.name,
-            build_arts,
-            build_omp,
+            build,
             run_arts,
             run_omp,
             correct,
             speedup,
         )
+
+    # Build caption based on what notations are used
+    captions = []
+    if has_multi_kernel:
+        captions.append("[N] = sum of N kernels")
+    if has_fallback:
+        captions.append("* = total time (kernel timing unavailable)")
+    if captions:
+        table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
 
     return table
 
@@ -1190,10 +1397,18 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
                  (r.run_arts.status == Status.PASS and not r.verification.correct))
     skipped = sum(1 for r in results if r.run_arts.status == Status.SKIP)
 
-    # Calculate geometric mean speedup
-    speedups = [r.timing.speedup for r in results if r.timing.speedup > 0]
+    # Calculate geometric mean speedup based on kernel time
+    import math
+    speedups = []
+    for r in results:
+        arts_kernel = get_kernel_time(r.run_arts)
+        omp_kernel = get_kernel_time(r.run_omp)
+        if arts_kernel is not None and omp_kernel is not None and arts_kernel > 0:
+            speedups.append(omp_kernel / arts_kernel)
+        elif r.timing.speedup > 0:
+            speedups.append(r.timing.speedup)
+
     if speedups:
-        import math
         geomean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
         speedup_text = f"Geometric mean speedup: [cyan]{geomean:.2f}x[/]"
     else:
@@ -1221,30 +1436,45 @@ def create_live_table(
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("Build ARTS", justify="center")
-    table.add_column("Build OMP", justify="center")
-    table.add_column("Run ARTS", justify="center")
-    table.add_column("Run OMP", justify="center")
+    table.add_column("Build", justify="center")
+    table.add_column("ARTS Kernel", justify="right")
+    table.add_column("OMP Kernel", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
+    has_fallback = False
+    has_multi_kernel = False
     for bench in benchmarks:
         if bench in results:
             # Completed - show full results
             r = results[bench]
 
-            # Build status
-            build_arts = f"{status_symbol(r.build_arts.status)} {r.build_arts.duration_sec:.1f}s"
-            build_omp = f"{status_symbol(r.build_omp.status)} {r.build_omp.duration_sec:.1f}s"
+            # Build status (combined)
+            if r.build_arts.status == Status.PASS and r.build_omp.status == Status.PASS:
+                build = f"[green]\u2713[/] {r.build_arts.duration_sec + r.build_omp.duration_sec:.1f}s"
+            else:
+                build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-            # Run status
+            # Get kernel times with formatted display (includes count for multiple kernels)
+            arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+            omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+
+            # Run status with kernel time
             if r.run_arts.status == Status.PASS:
-                run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s"
+                if arts_kernel is not None:
+                    run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}"
+                else:
+                    run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
+                    has_fallback = True
             else:
                 run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
 
             if r.run_omp.status == Status.PASS:
-                run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s"
+                if omp_kernel is not None:
+                    run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}"
+                else:
+                    run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
+                    has_fallback = True
             else:
                 run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
 
@@ -1258,23 +1488,36 @@ def create_live_table(
             else:
                 correct = "[red]\u2717 NO[/]"
 
-            # Speedup
-            if r.timing.speedup > 0:
-                if r.timing.speedup >= 1:
-                    speedup = f"[green]{r.timing.speedup:.2f}x[/]"
+            # Speedup based on kernel time if available
+            if arts_kernel is not None and omp_kernel is not None and arts_kernel > 0:
+                kernel_speedup = omp_kernel / arts_kernel
+                if kernel_speedup >= 1.0:
+                    speedup = f"[green]{kernel_speedup:.2f}x[/]"
+                elif kernel_speedup >= 0.8:
+                    speedup = f"[yellow]{kernel_speedup:.2f}x[/]"
                 else:
-                    speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
+                    speedup = f"[red]{kernel_speedup:.2f}x[/]"
+            elif r.timing.speedup > 0:
+                # Fallback to total time speedup
+                if r.timing.speedup >= 1:
+                    speedup = f"[green]{r.timing.speedup:.2f}x[/]*"
+                else:
+                    speedup = f"[yellow]{r.timing.speedup:.2f}x[/]*"
+                has_fallback = True
             else:
                 speedup = "[dim]-[/]"
 
-            table.add_row(bench, build_arts, build_omp, run_arts, run_omp, correct, speedup)
+            # Track if any benchmark has multiple kernels
+            if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
+                has_multi_kernel = True
+
+            table.add_row(bench, build, run_arts, run_omp, correct, speedup)
 
         elif bench == in_progress:
             # Currently running - show spinner indicator
             table.add_row(
                 f"[bold]{bench}[/]",
                 "[yellow]\u23f3...[/]",
-                "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
@@ -1289,8 +1532,16 @@ def create_live_table(
                 "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
-                "[dim]-[/]",
             )
+
+    # Build caption based on what notations are used
+    captions = []
+    if has_multi_kernel:
+        captions.append("[N] = sum of N kernels")
+    if has_fallback:
+        captions.append("* = total time (kernel timing unavailable)")
+    if captions:
+        table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
 
     return table
 
@@ -1369,6 +1620,8 @@ def export_json(
     output_path: Path,
     size: str,
     total_duration: float,
+    threads_list: Optional[List[int]] = None,
+    cflags: Optional[str] = None,
 ) -> None:
     """Export results to JSON file."""
     carts_dir = get_carts_dir()
@@ -1383,6 +1636,12 @@ def export_json(
         "size": size,
         "total_duration_seconds": total_duration,
     }
+
+    # Add thread sweep metadata if applicable
+    if threads_list:
+        metadata["thread_sweep"] = threads_list
+    if cflags:
+        metadata["cflags"] = cflags
 
     # Calculate summary
     passed = sum(1 for r in results if r.run_arts.status == Status.PASS and r.verification.correct)
@@ -1411,7 +1670,7 @@ def export_json(
 
     # Convert results to dict
     def result_to_dict(r: BenchmarkResult) -> Dict[str, Any]:
-        return {
+        result_dict = {
             "name": r.name,
             "suite": r.suite,
             "size": r.size,
@@ -1452,6 +1711,12 @@ def export_json(
             "artifacts": asdict(r.artifacts),
             "timestamp": r.timestamp,
         }
+
+        # Add thread count if present (for thread sweep mode)
+        if hasattr(r, 'thread_count'):
+            result_dict["thread_count"] = r.thread_count
+
+        return result_dict
 
     # Collect failures
     failures = []
@@ -1544,11 +1809,20 @@ def run(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output (CI mode)"),
     trace: bool = typer.Option(False, "--trace", help="Show benchmark output (kernel timing and checksum)"),
+    threads: Optional[str] = typer.Option(None, "--threads", help="Thread counts: '1,2,4,8' or '1:16:2' for thread sweep"),
+    cflags: Optional[str] = typer.Option(None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
+    collect_counters: bool = typer.Option(False, "--collect-counters", help="Enable ARTS counter collection"),
+    counter_dir: Optional[Path] = typer.Option(None, "--counter-dir", help="Counter output directory"),
 ):
     """Run benchmarks with verification and timing."""
     verify = not no_verify
     clean = not no_clean
     runner = BenchmarkRunner(console, verbose=verbose, quiet=quiet, trace=trace, clean=clean)
+
+    # Parse thread specification
+    threads_list = None
+    if threads:
+        threads_list = parse_threads(threads)
 
     # Discover or use provided benchmarks
     if benchmarks:
@@ -1560,23 +1834,51 @@ def run(
         console.print("[yellow]No benchmarks found.[/]")
         raise typer.Exit(1)
 
+    # Setup counter directory
+    if collect_counters and not counter_dir:
+        counter_dir = Path("./counters")
+    if counter_dir:
+        counter_dir.mkdir(parents=True, exist_ok=True)
+
     # Print header
     if not quiet:
         console.print(f"\n[bold]CARTS Benchmark Runner v{VERSION}[/]")
         console.print("\u2501" * 30)
-        console.print(f"Config: size={size}, timeout={timeout}s, parallel={parallel}, verify={verify}, clean={clean}")
+        config_items = [f"size={size}", f"timeout={timeout}s", f"parallel={parallel}", f"verify={verify}", f"clean={clean}"]
+        if threads_list:
+            config_items.append(f"threads={threads}")
+        if cflags:
+            config_items.append(f"cflags={cflags}")
+        if collect_counters:
+            config_items.append("counters=on")
+        console.print(f"Config: {', '.join(config_items)}")
         console.print(f"Benchmarks: {len(bench_list)}\n")
 
     # Run benchmarks
     start_time = time.time()
-    results = runner.run_all(
-        bench_list,
-        size=size,
-        timeout=timeout,
-        parallel=parallel,
-        verify=verify,
-        arts_config=arts_config,
-    )
+
+    if threads_list and len(bench_list) == 1:
+        # Thread sweep mode for single benchmark
+        results = runner.run_with_thread_sweep(
+            bench_list[0],
+            size,
+            threads_list,
+            arts_config,
+            cflags or "",
+            counter_dir,
+            timeout,
+        )
+    else:
+        # Standard mode
+        results = runner.run_all(
+            bench_list,
+            size=size,
+            timeout=timeout,
+            parallel=parallel,
+            verify=verify,
+            arts_config=arts_config,
+        )
+
     total_duration = time.time() - start_time
 
     # Display results
@@ -1587,7 +1889,7 @@ def run(
 
     # Export if requested
     if output:
-        export_json(results, output, size, total_duration)
+        export_json(results, output, size, total_duration, threads_list, cflags)
         console.print(f"\n[dim]Results exported to: {output}[/]")
 
     # Exit with error if any failures
