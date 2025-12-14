@@ -1825,21 +1825,34 @@ def get_git_hash(repo_path: Path) -> Optional[str]:
 
 
 def get_compiler_version() -> Dict[str, Optional[str]]:
-    """Get compiler version information."""
-    compilers = {}
+    """Get compiler version information.
 
-    # Try clang
-    try:
-        result = subprocess.run(
-            ["clang", "--version"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            first_line = result.stdout.split('\n')[0]
-            compilers["clang"] = first_line
-    except Exception:
-        pass
+    Prioritizes CARTS-installed LLVM/clang over system compilers,
+    since CARTS builds LLVM from source.
+    """
+    compilers = {}
+    carts_dir = get_carts_dir()
+
+    # Try CARTS-installed LLVM clang first (built from source)
+    carts_clang = carts_dir / ".install" / "llvm" / "bin" / "clang"
+    clang_paths = [str(carts_clang), "clang"]
+
+    for clang_path in clang_paths:
+        try:
+            result = subprocess.run(
+                [clang_path, "--version"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                first_line = result.stdout.split('\n')[0]
+                compilers["clang"] = first_line
+                # Record which clang was found
+                if clang_path != "clang":
+                    compilers["clang_path"] = clang_path
+                break
+        except Exception:
+            continue
 
     # Try gcc
     try:
