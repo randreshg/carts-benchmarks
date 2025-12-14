@@ -240,6 +240,8 @@ class BenchmarkResult:
     timestamp: str
     total_duration_sec: float
     thread_count: Optional[int] = None
+    node_count: Optional[int] = None
+    launcher: Optional[str] = None
 
 
 # ============================================================================
@@ -301,14 +303,24 @@ def parse_threads(spec: str) -> List[int]:
         return [int(spec)]
 
 
-def generate_arts_config(base_path: Optional[Path], threads: int, counter_dir: Optional[Path]) -> Path:
-    """Generate temporary arts.cfg with specific thread count.
+def generate_arts_config(
+    base_path: Optional[Path],
+    threads: int,
+    counter_dir: Optional[Path] = None,
+    launcher: str = "ssh",
+    node_count: int = 1,
+) -> Path:
+    """Generate temporary arts.cfg with specific configuration.
 
     The generated config must include all required ARTS keys:
     - launcher: Required (ARTS dereferences without null check in Config.c:621)
     - threads: Worker thread count per node
     - nodeCount: Number of nodes (1 for single-node)
     - masterNode: Primary node for coordination
+
+    Note: For Slurm, nodeCount in config is IGNORED - ARTS reads SLURM_NNODES
+    from environment (set by srun). The launcher controls HOW we invoke the
+    executable, not just what's in the config.
     """
     if base_path and base_path.exists():
         content = base_path.read_text()
@@ -316,11 +328,10 @@ def generate_arts_config(base_path: Optional[Path], threads: int, counter_dir: O
         # Default config with ALL required keys
         # ARTS requires launcher to be set (Config.c:621 dereferences without null check)
         # NOTE: launcher=local with ports=0 causes segfaults on shutdown
-        # Use launcher=ssh with ports=1 for single-node execution
-        content = """[ARTS]
+        content = f"""[ARTS]
 threads=1
 nodeCount=1
-launcher=ssh
+launcher={launcher}
 masterNode=localhost
 tMT=0
 outgoing=1
@@ -334,12 +345,24 @@ ports=1
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
 
+    # Update nodeCount
+    if re.search(r'^nodeCount=', content, re.MULTILINE):
+        content = re.sub(r'^nodeCount=\d+', f'nodeCount={node_count}', content, flags=re.MULTILINE)
+    else:
+        content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
+
+    # Update launcher
+    if re.search(r'^launcher=', content, re.MULTILINE):
+        content = re.sub(r'^launcher=\w+', f'launcher={launcher}', content, flags=re.MULTILINE)
+    else:
+        content = content.replace('[ARTS]', f'[ARTS]\nlauncher={launcher}')
+
     # Add counter settings if requested
     if counter_dir:
         content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
 
     # Write to temp file
-    temp_path = Path(tempfile.mkdtemp()) / f"arts_{threads}t.cfg"
+    temp_path = Path(tempfile.mkdtemp()) / f"arts_{threads}t_{node_count}n.cfg"
     temp_path.write_text(content)
     return temp_path
 
@@ -563,6 +586,8 @@ class BenchmarkRunner:
         counter_dir: Optional[Path] = None,
         timeout: int = DEFAULT_TIMEOUT,
         omp_threads: Optional[int] = None,
+        launcher: str = "ssh",
+        node_count: int = 1,
     ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
@@ -570,11 +595,16 @@ class BenchmarkRunner:
             omp_threads: If specified, use this fixed thread count for OpenMP
                         instead of matching ARTS thread count. Useful for
                         comparing ARTS scaling against OpenMP at its optimal.
+            launcher: ARTS launcher type (ssh, slurm, lsf, local). For Slurm,
+                     this controls how the executable is invoked (via srun).
+            node_count: Number of nodes for distributed execution.
         """
         results = []
         for threads in threads_list:
-            # Generate arts.cfg with thread count
-            arts_cfg = generate_arts_config(base_config, threads, counter_dir)
+            # Generate arts.cfg with thread count, launcher, and node count
+            arts_cfg = generate_arts_config(
+                base_config, threads, counter_dir, launcher, node_count
+            )
 
             # Set OMP_NUM_THREADS for OpenMP variant
             # Use omp_threads if specified, otherwise match ARTS threads
@@ -590,7 +620,14 @@ class BenchmarkRunner:
             # Without this, runtime may use wrong config (thread count mismatch)
             if build_arts.status == Status.PASS and build_arts.executable:
                 arts_env = {"artsConfig": str(arts_cfg)}
-                run_arts = self.run_benchmark(build_arts.executable, timeout, env=arts_env)
+                run_arts = self.run_benchmark(
+                    build_arts.executable,
+                    timeout,
+                    env=arts_env,
+                    launcher=launcher,
+                    node_count=node_count,
+                    threads=threads,
+                )
             else:
                 run_arts = RunResult(
                     status=Status.SKIP,
@@ -622,7 +659,7 @@ class BenchmarkRunner:
             bench_path = self.benchmarks_dir / name
             artifacts = self.collect_artifacts(bench_path)
 
-            # Store with thread count
+            # Store with thread count and node configuration
             result = BenchmarkResult(
                 name=name,
                 suite=name.split("/")[0] if "/" in name else "",
@@ -637,6 +674,8 @@ class BenchmarkRunner:
                 timestamp=datetime.now().isoformat(),
                 total_duration_sec=0.0,  # Will be calculated later
                 thread_count=threads,
+                node_count=node_count,
+                launcher=launcher,
             )
 
             results.append(result)
@@ -648,8 +687,20 @@ class BenchmarkRunner:
         executable: str,
         timeout: int = DEFAULT_TIMEOUT,
         env: Optional[Dict[str, str]] = None,
+        launcher: str = "ssh",
+        node_count: int = 1,
+        threads: int = 1,
     ) -> RunResult:
-        """Execute a benchmark and capture output."""
+        """Execute a benchmark and capture output.
+
+        Args:
+            executable: Path to the benchmark executable.
+            timeout: Maximum execution time in seconds.
+            env: Environment variables to set.
+            launcher: ARTS launcher type. For 'slurm', wraps executable in srun.
+            node_count: Number of nodes for distributed execution (slurm only).
+            threads: Number of threads per node (for srun --cpus-per-task).
+        """
         if not executable or not os.path.exists(executable):
             return RunResult(
                 status=Status.SKIP,
@@ -664,10 +715,25 @@ class BenchmarkRunner:
         if env:
             run_env.update(env)
 
+        # Build command based on launcher
+        if launcher == "slurm" and node_count > 1:
+            # For Slurm multi-node: wrap in srun
+            # ARTS reads SLURM_NNODES and SLURM_CPUS_PER_TASK from environment
+            cmd = [
+                "srun",
+                f"-N{node_count}",
+                "--ntasks-per-node=1",
+                f"--cpus-per-task={threads}",
+                executable,
+            ]
+        else:
+            # Local or SSH launcher: run directly (ARTS handles distribution for SSH)
+            cmd = [executable]
+
         start = time.time()
         try:
             result = subprocess.run(
-                [executable],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -1745,9 +1811,13 @@ def export_json(
             "timestamp": r.timestamp,
         }
 
-        # Add thread count if present (for thread sweep mode)
-        if hasattr(r, 'thread_count'):
+        # Add scaling configuration if present (for scaling experiments)
+        if hasattr(r, 'thread_count') and r.thread_count is not None:
             result_dict["thread_count"] = r.thread_count
+        if hasattr(r, 'node_count') and r.node_count is not None:
+            result_dict["node_count"] = r.node_count
+        if hasattr(r, 'launcher') and r.launcher is not None:
+            result_dict["launcher"] = r.launcher
 
         return result_dict
 
@@ -1844,6 +1914,8 @@ def run(
     trace: bool = typer.Option(False, "--trace", help="Show benchmark output (kernel timing and checksum)"),
     threads: Optional[str] = typer.Option(None, "--threads", help="Thread counts: '1,2,4,8' or '1:16:2' for thread sweep"),
     omp_threads: Optional[int] = typer.Option(None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
+    launcher: str = typer.Option("ssh", "--launcher", "-l", help="ARTS launcher: ssh (default), slurm, lsf, local"),
+    node_count: int = typer.Option(1, "--node-count", "-n", help="Number of nodes for distributed execution"),
     cflags: Optional[str] = typer.Option(None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
     collect_counters: bool = typer.Option(False, "--collect-counters", help="Enable ARTS counter collection"),
     counter_dir: Optional[Path] = typer.Option(None, "--counter-dir", help="Counter output directory"),
@@ -1902,6 +1974,8 @@ def run(
             counter_dir,
             timeout,
             omp_threads,
+            launcher,
+            node_count,
         )
     else:
         # Standard mode
