@@ -2,6 +2,7 @@
 .DS_Store
 *.log
 *.tmp
+core
 
 # Build artifacts
 **/build/**

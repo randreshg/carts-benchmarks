@@ -64,7 +64,8 @@ CHECKSUM_PATTERNS = [
     r"^([0-9.eE+-]+)\s*$",
 ]
 
-SKIP_DIRS = {"common", "include", "src", "utilities", ".git", ".svn", ".hg", "build", "logs"}
+SKIP_DIRS = {"common", "include", "src", "utilities",
+             ".git", ".svn", ".hg", "build", "logs"}
 
 
 def filter_benchmark_output(output: str) -> str:
@@ -82,7 +83,7 @@ def filter_benchmark_output(output: str) -> str:
             line.startswith("task.") or
             line.startswith("checksum:") or
             line.startswith("tmp_checksum:") or
-            "checksum:" in line.lower()):
+                "checksum:" in line.lower()):
             lines.append(line)
     return "\n".join(lines)
 
@@ -127,7 +128,8 @@ class ParallelTaskTiming:
     See docs/hypothesis.md for the experimental design this supports.
     """
     # Parallel region timings per worker
-    parallel_timings: Dict[str, List[WorkerTiming]] = field(default_factory=dict)
+    parallel_timings: Dict[str, List[WorkerTiming]
+                           ] = field(default_factory=dict)
     # Task (kernel) timings per worker
     task_timings: Dict[str, List[WorkerTiming]] = field(default_factory=dict)
 
@@ -159,8 +161,10 @@ class ParallelTaskTiming:
 
     def compute_overhead(self, parallel_name: str, task_name: str) -> Dict[str, float]:
         """Compute overhead = parallel_time - task_time per worker."""
-        parallel = {t.worker_id: t.time_sec for t in self.parallel_timings.get(parallel_name, [])}
-        task = {t.worker_id: t.time_sec for t in self.task_timings.get(task_name, [])}
+        parallel = {t.worker_id: t.time_sec for t in self.parallel_timings.get(
+            parallel_name, [])}
+        task = {t.worker_id: t.time_sec for t in self.task_timings.get(
+            task_name, [])}
 
         overheads = []
         for worker_id in parallel:
@@ -212,16 +216,32 @@ class VerificationResult:
 @dataclass
 class Artifacts:
     """Paths to generated artifacts."""
+    # Source location
     benchmark_dir: str
+
+    # Per-config build artifacts (in results/{experiment}/{benchmark}/build/{config}/)
     build_dir: Optional[str] = None
+    carts_metadata: Optional[str] = None       # .carts-metadata.json
+    arts_metadata_mlir: Optional[str] = None   # *_arts_metadata.mlir
     executable_arts: Optional[str] = None
     executable_omp: Optional[str] = None
-    mlir_sequential: Optional[str] = None
-    mlir_parallel: Optional[str] = None
-    carts_metadata: Optional[str] = None
+    arts_config: Optional[str] = None          # arts.cfg
+
+    # Per-run artifacts (in results/{experiment}/{benchmark}/build/{config}/runs/{N}/)
+    run_dir: Optional[str] = None
+    arts_log: Optional[str] = None
+    omp_log: Optional[str] = None
     counters_dir: Optional[str] = None
     counter_files: List[str] = field(default_factory=list)
-    logs_dir: Optional[str] = None
+
+
+@dataclass
+class BenchmarkConfig:
+    """Configuration for a benchmark run."""
+    arts_threads: int
+    arts_nodes: int
+    omp_threads: int
+    launcher: str
 
 
 @dataclass
@@ -230,6 +250,8 @@ class BenchmarkResult:
     name: str
     suite: str
     size: str
+    config: BenchmarkConfig
+    run_number: int
     build_arts: BuildResult
     build_omp: BuildResult
     run_arts: RunResult
@@ -239,9 +261,6 @@ class BenchmarkResult:
     artifacts: Artifacts
     timestamp: str
     total_duration_sec: float
-    thread_count: Optional[int] = None
-    node_count: Optional[int] = None
-    launcher: Optional[str] = None
 
 
 # ============================================================================
@@ -445,19 +464,22 @@ ports=1
 
     # Update threads
     if re.search(r'^threads=', content, re.MULTILINE):
-        content = re.sub(r'^threads=\d+', f'threads={threads}', content, flags=re.MULTILINE)
+        content = re.sub(
+            r'^threads=\d+', f'threads={threads}', content, flags=re.MULTILINE)
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
 
     # Update nodeCount
     if re.search(r'^nodeCount=', content, re.MULTILINE):
-        content = re.sub(r'^nodeCount=\d+', f'nodeCount={node_count}', content, flags=re.MULTILINE)
+        content = re.sub(
+            r'^nodeCount=\d+', f'nodeCount={node_count}', content, flags=re.MULTILINE)
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
 
     # Update launcher
     if re.search(r'^launcher=', content, re.MULTILINE):
-        content = re.sub(r'^launcher=\w+', f'launcher={launcher}', content, flags=re.MULTILINE)
+        content = re.sub(r'^launcher=\w+',
+                         f'launcher={launcher}', content, flags=re.MULTILINE)
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nlauncher={launcher}')
 
@@ -469,6 +491,191 @@ ports=1
     temp_path = Path(tempfile.mkdtemp()) / f"arts_{threads}t_{node_count}n.cfg"
     temp_path.write_text(content)
     return temp_path
+
+
+# Counter level mapping
+COUNTER_LEVELS = {
+    0: "off",       # No counters (counter.profile-none.cfg)
+    1: "artsid",    # ArtsID metrics (counter.profile-artsid-only.cfg)
+    2: "deep",      # Deep captures (counter.profile-deep.cfg)
+}
+
+
+def check_arts_counter_support() -> int:
+    """Check what counter level ARTS was built with.
+
+    Returns:
+        0 = counters disabled (counter.profile-none.cfg)
+        1 = artsid metrics (counter.profile-artsid-only.cfg)
+        2 = deep captures (counter.profile-deep.cfg)
+    """
+    preamble = Path(get_carts_dir()) / \
+        ".install/arts/include/arts/introspection/Preamble.h"
+    if not preamble.exists():
+        return 0
+
+    content = preamble.read_text()
+
+    # Check for deep captures (level 2)
+    if "ENABLE_artsIdEdtCaptures 1" in content:
+        return 2
+
+    # Check for artsid metrics (level 1)
+    if "ENABLE_artsIdEdtMetrics 1" in content:
+        return 1
+
+    return 0
+
+
+# ============================================================================
+# Artifact Directory Management
+# ============================================================================
+
+
+def create_experiment_dir(output_base: Path) -> Tuple[Path, Path]:
+    """Create timestamped experiment directory with JSON inside.
+
+    This creates a self-contained experiment directory where both the
+    JSON results and all build/run artifacts are stored together.
+
+    Args:
+        output_base: Base path for the experiment (e.g., results/single_rank/foo).
+                     The .json extension is optional and will be stripped.
+
+    Returns:
+        Tuple of (experiment_dir, json_path):
+        - experiment_dir: results/single_rank/foo_20251214_143052/
+        - json_path: results/single_rank/foo_20251214_143052/foo.json
+
+    Example:
+        >>> create_experiment_dir(Path("results/single_rank/foo"))
+        (Path("results/single_rank/foo_20251214_143052/"),
+         Path("results/single_rank/foo_20251214_143052/foo.json"))
+
+        >>> create_experiment_dir(Path("results/foo.json"))
+        (Path("results/foo_20251214_143052/"),
+         Path("results/foo_20251214_143052/foo.json"))
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Strip .json extension if provided
+    name = output_base.stem  # "foo" from "foo.json" or "foo"
+    parent = output_base.parent  # "results/single_rank"
+
+    experiment_dir = parent / f"{name}_{timestamp}"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = experiment_dir / f"{name}.json"
+
+    return experiment_dir, json_path
+
+
+def create_config_directory(
+    artifacts_base_dir: Path,
+    benchmark_name: str,
+    config: BenchmarkConfig,
+) -> Tuple[Path, Path, Path]:
+    """Create config directory structure.
+
+    Returns:
+        Tuple of (config_dir, artifacts_dir, runs_dir)
+
+    Creates:
+        {artifacts_base_dir}/{benchmark_name}/build/{threads}t_{nodes}n/
+        {artifacts_base_dir}/{benchmark_name}/build/{threads}t_{nodes}n/artifacts/
+        {artifacts_base_dir}/{benchmark_name}/build/{threads}t_{nodes}n/runs/
+    """
+    config_dir = artifacts_base_dir / benchmark_name / "build" / f"{config.arts_threads}t_{config.arts_nodes}n"
+    artifacts_dir = config_dir / "artifacts"
+    runs_dir = config_dir / "runs"
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir.mkdir(exist_ok=True)
+    runs_dir.mkdir(exist_ok=True)
+
+    return config_dir, artifacts_dir, runs_dir
+
+
+def create_run_directory(runs_dir: Path, run_number: int) -> Path:
+    """Create numbered run directory.
+
+    Example: {runs_dir}/1/, {runs_dir}/2/, etc.
+    """
+    run_dir = runs_dir / str(run_number)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def copy_build_artifacts(
+    bench_path: Path,
+    config_dir: Path,
+    artifacts_dir: Path,
+) -> Dict[str, Optional[str]]:
+    """Copy build artifacts to results directory.
+
+    Copies:
+    - arts.cfg -> config_dir/ (build INPUT)
+    - .carts-metadata.json -> artifacts_dir/ (compiler metadata)
+    - *_arts_metadata.mlir -> artifacts_dir/ (MLIR with metadata)
+    - *.mlir -> artifacts_dir/ (other MLIR files)
+    - *-arts.ll -> artifacts_dir/ (LLVM IR)
+    - *_arts, *_omp -> artifacts_dir/ (executables)
+    - logs/build_*.log -> artifacts_dir/ (build logs)
+
+    Returns:
+        Dict with paths to key artifacts in the results directory.
+    """
+    paths: Dict[str, Optional[str]] = {}
+
+    # Copy arts.cfg to config root (it's the build INPUT)
+    arts_cfg = bench_path / "arts.cfg"
+    if arts_cfg.exists():
+        dest = config_dir / "arts.cfg"
+        shutil.copy2(arts_cfg, dest)
+        paths["arts_config"] = str(dest)
+
+    # Copy compiler metadata to artifacts/
+    metadata = bench_path / ".carts-metadata.json"
+    if metadata.exists():
+        dest = artifacts_dir / ".carts-metadata.json"
+        shutil.copy2(metadata, dest)
+        paths["carts_metadata"] = str(dest)
+
+    # Copy *_arts_metadata.mlir to artifacts/
+    for mlir in bench_path.glob("*_arts_metadata.mlir"):
+        dest = artifacts_dir / mlir.name
+        shutil.copy2(mlir, dest)
+        paths["arts_metadata_mlir"] = str(dest)
+
+    # Copy other MLIR files to artifacts/
+    for mlir in bench_path.glob("*.mlir"):
+        if "_metadata" not in mlir.name:
+            shutil.copy2(mlir, artifacts_dir / mlir.name)
+
+    # Copy LLVM IR to artifacts/
+    for ll in bench_path.glob("*-arts.ll"):
+        shutil.copy2(ll, artifacts_dir / ll.name)
+
+    # Copy executables to artifacts/
+    for exe in bench_path.glob("*_arts"):
+        if exe.is_file():
+            dest = artifacts_dir / exe.name
+            shutil.copy2(exe, dest)
+            paths["executable_arts"] = str(dest)
+    for exe in bench_path.glob("*_omp"):
+        if exe.is_file():
+            dest = artifacts_dir / exe.name
+            shutil.copy2(exe, dest)
+            paths["executable_omp"] = str(dest)
+
+    # Copy build logs to artifacts/
+    logs_dir = bench_path / "logs"
+    if logs_dir.exists():
+        for log in ["build_arts.log", "build_openmp.log"]:
+            log_file = logs_dir / log
+            if log_file.exists():
+                shutil.copy2(log_file, artifacts_dir / log)
+
+    return paths
 
 
 # ============================================================================
@@ -486,12 +693,14 @@ class BenchmarkRunner:
         quiet: bool = False,
         trace: bool = False,
         clean: bool = True,
+        debug: int = 0,
     ):
         self.console = console
         self.verbose = verbose
         self.quiet = quiet
         self.trace = trace
         self.clean = clean
+        self.debug = debug
         self.carts_dir = get_carts_dir()
         self.benchmarks_dir = get_benchmarks_dir()
         self.results: List[BenchmarkResult] = []
@@ -509,7 +718,8 @@ class BenchmarkRunner:
                 continue
 
             # Skip if no source files
-            has_source = any(bench_dir.glob("*.c")) or any(bench_dir.glob("*.cpp"))
+            has_source = any(bench_dir.glob(
+                "*.c")) or any(bench_dir.glob("*.cpp"))
             if not has_source:
                 continue
 
@@ -624,6 +834,10 @@ class BenchmarkRunner:
         if arts_config and variant != "openmp":
             cmd.append(f"ARTS_CFG={arts_config}")
 
+        # Debug output level 1: show commands
+        if self.debug >= 1:
+            self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
+
         start = time.time()
         try:
             result = subprocess.run(
@@ -634,6 +848,22 @@ class BenchmarkRunner:
                 cwd=bench_path,
             )
             duration = time.time() - start
+
+            # Debug output level 2: write build log to file
+            if self.debug >= 2:
+                logs_dir = bench_path / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                log_file = logs_dir / f"build_{variant}.log"
+                with open(log_file, "w") as f:
+                    f.write(f"# Command: {' '.join(cmd)}\n")
+                    f.write(f"# Duration: {duration:.3f}s\n")
+                    f.write(f"# Exit code: {result.returncode}\n\n")
+                    if result.stdout:
+                        f.write(result.stdout)
+                    if result.stderr:
+                        f.write("=== STDERR ===\n")
+                        f.write(result.stderr)
+                self.console.print(f"[dim]  Log: {log_file}[/]")
 
             if result.returncode == 0:
                 executable = self._find_executable(bench_path, variant)
@@ -694,8 +924,9 @@ class BenchmarkRunner:
         node_count: int = 1,
         weak_scaling: bool = False,
         base_size: Optional[int] = None,
-        scaling_complexity: str = "auto",
-    ) -> List[BenchmarkResult]:
+        runs: int = 1,
+        output_path: Optional[Path] = None,
+    ) -> Tuple[List[BenchmarkResult], Optional[Path], Optional[Path]]:
         """Run benchmark with multiple thread configurations.
 
         Args:
@@ -707,9 +938,22 @@ class BenchmarkRunner:
             node_count: Number of nodes for distributed execution.
             weak_scaling: If True, scale problem size with parallelism.
             base_size: Base problem size for weak scaling.
-            scaling_complexity: Work complexity for scaling: 'auto', '2d', '3d', 'linear'.
+            runs: Number of times to run each configuration.
+            output_path: If specified, create experiment directory for reproducibility.
+
+        Returns:
+            Tuple of (results, experiment_dir, json_path). Both paths are None if
+            output_path was not specified.
         """
         results = []
+
+        # Create timestamped experiment directory ONCE per experiment
+        # Both JSON results and artifacts will be stored together
+        experiment_dir = None
+        json_path = None
+        if output_path:
+            experiment_dir, json_path = create_experiment_dir(output_path)
+
         for threads in threads_list:
             # Generate arts.cfg with thread count, launcher, and node count
             arts_cfg = generate_arts_config(
@@ -719,14 +963,8 @@ class BenchmarkRunner:
             # Compute effective cflags (may include weak scaling size overrides)
             effective_cflags = cflags
             if weak_scaling and base_size:
-                # Determine complexity (auto looks up per-benchmark, else use specified)
-                if scaling_complexity == "auto" and name in BENCHMARK_SIZE_PARAMS:
-                    complexity = BENCHMARK_SIZE_PARAMS[name]["complexity"]
-                elif scaling_complexity in ("2d", "3d", "linear"):
-                    complexity = scaling_complexity
-                else:
-                    complexity = "2d"  # Default fallback
-
+                # Note: complexity is determined inside get_weak_scaling_cflags
+                # based on BENCHMARK_SIZE_PARAMS lookup
                 weak_cflags = get_weak_scaling_cflags(
                     name, base_size, threads, node_count, base_parallelism=1
                 )
@@ -738,76 +976,155 @@ class BenchmarkRunner:
             actual_omp_threads = omp_threads if omp_threads else threads
             env = {"OMP_NUM_THREADS": str(actual_omp_threads)}
 
-            # Build both variants (with potentially different cflags per thread count)
-            build_arts = self.build_benchmark(name, size, "arts", arts_cfg, effective_cflags)
-            build_omp = self.build_benchmark(name, size, "openmp", None, effective_cflags)
+            # Build both variants ONCE per thread config (with potentially different cflags per thread count)
+            build_arts = self.build_benchmark(
+                name, size, "arts", arts_cfg, effective_cflags)
+            build_omp = self.build_benchmark(
+                name, size, "openmp", None, effective_cflags)
 
-            # Run ARTS version - MUST pass artsConfig env var so runtime uses same config as compile
-            # ARTS reads config from: 1) artsConfig env var, 2) ./arts.cfg in CWD
-            # Without this, runtime may use wrong config (thread count mismatch)
-            if build_arts.status == Status.PASS and build_arts.executable:
-                arts_env = {"artsConfig": str(arts_cfg)}
-                run_arts = self.run_benchmark(
-                    build_arts.executable,
-                    timeout,
-                    env=arts_env,
-                    launcher=launcher,
-                    node_count=node_count,
-                    threads=threads,
-                )
-            else:
-                run_arts = RunResult(
-                    status=Status.SKIP,
-                    duration_sec=0.0,
-                    exit_code=-1,
-                    stdout="",
-                    stderr="Build failed",
-                )
-
-            # Run OpenMP version (needs OMP_NUM_THREADS env var)
-            if build_omp.status == Status.PASS and build_omp.executable:
-                run_omp = self.run_benchmark(build_omp.executable, timeout, env=env)
-            else:
-                run_omp = RunResult(
-                    status=Status.SKIP,
-                    duration_sec=0.0,
-                    exit_code=-1,
-                    stdout="",
-                    stderr="Build failed",
-                )
-
-            # Calculate timing
-            timing = self.calculate_timing(run_arts, run_omp)
-
-            # Verify correctness for all thread counts
-            verification = self.verify_correctness(run_arts, run_omp)
-
-            # Collect artifacts
             bench_path = self.benchmarks_dir / name
-            artifacts = self.collect_artifacts(bench_path)
 
-            # Store with thread count and node configuration
-            result = BenchmarkResult(
-                name=name,
-                suite=name.split("/")[0] if "/" in name else "",
-                size=size,
-                build_arts=build_arts,
-                build_omp=build_omp,
-                run_arts=run_arts,
-                run_omp=run_omp,
-                timing=timing,
-                verification=verification,
-                artifacts=artifacts,
-                timestamp=datetime.now().isoformat(),
-                total_duration_sec=0.0,  # Will be calculated later
-                thread_count=threads,
-                node_count=node_count,
+            # Create config object
+            config = BenchmarkConfig(
+                arts_threads=threads,
+                arts_nodes=node_count,
+                omp_threads=actual_omp_threads,
                 launcher=launcher,
             )
 
-            results.append(result)
+            # Create artifact directories if output specified (ONCE per config)
+            config_dir = result_artifacts_dir = runs_dir = None
+            artifact_paths: Dict[str, Optional[str]] = {}
+            if experiment_dir:
+                config_dir, result_artifacts_dir, runs_dir = create_config_directory(
+                    experiment_dir, name, config
+                )
+                # Copy build artifacts ONCE per config
+                artifact_paths = copy_build_artifacts(bench_path, config_dir, result_artifacts_dir)
 
-        return results
+            # Run multiple times per configuration
+            for run_num in range(1, runs + 1):
+                # Create run directory if output specified
+                run_dir = None
+                arts_log_path: Optional[str] = None
+                omp_log_path: Optional[str] = None
+
+                if runs_dir:
+                    run_dir = create_run_directory(runs_dir, run_num)
+                    # Logs go to run directory
+                    arts_log = run_dir / "arts.log"
+                    omp_log = run_dir / "omp.log"
+                    arts_log_path = str(arts_log)
+                    omp_log_path = str(omp_log)
+                elif self.debug >= 2:
+                    # Fallback to benchmark logs directory for debug mode without output
+                    logs_dir = bench_path / "logs"
+                    run_suffix = f"_r{run_num}" if runs > 1 else ""
+                    arts_log = logs_dir / f"arts_{threads}t{run_suffix}.log"
+                    omp_log = logs_dir / f"omp_{threads}t{run_suffix}.log"
+                else:
+                    arts_log = None
+                    omp_log = None
+
+                # Run ARTS version - MUST pass artsConfig env var so runtime uses same config as compile
+                # ARTS reads config from: 1) artsConfig env var, 2) ./arts.cfg in CWD
+                # Without this, runtime may use wrong config (thread count mismatch)
+                if build_arts.status == Status.PASS and build_arts.executable:
+                    arts_env = {"artsConfig": str(arts_cfg)}
+                    run_arts = self.run_benchmark(
+                        build_arts.executable,
+                        timeout,
+                        env=arts_env,
+                        launcher=launcher,
+                        node_count=node_count,
+                        threads=threads,
+                        log_file=arts_log,
+                    )
+                else:
+                    run_arts = RunResult(
+                        status=Status.SKIP,
+                        duration_sec=0.0,
+                        exit_code=-1,
+                        stdout="",
+                        stderr="Build failed",
+                    )
+
+                # Run OpenMP version (needs OMP_NUM_THREADS env var)
+                if build_omp.status == Status.PASS and build_omp.executable:
+                    run_omp = self.run_benchmark(
+                        build_omp.executable, timeout, env=env, log_file=omp_log)
+                else:
+                    run_omp = RunResult(
+                        status=Status.SKIP,
+                        duration_sec=0.0,
+                        exit_code=-1,
+                        stdout="",
+                        stderr="Build failed",
+                    )
+
+                # Calculate timing
+                timing = self.calculate_timing(run_arts, run_omp)
+
+                # Verify correctness for all thread counts
+                verification = self.verify_correctness(run_arts, run_omp)
+
+                # Collect artifacts from benchmark source directory
+                artifacts = self.collect_artifacts(bench_path)
+
+                # If output specified, update artifacts with paths in results directory
+                if experiment_dir and run_dir:
+                    # Update build artifacts from copied locations
+                    if artifact_paths.get("arts_config"):
+                        artifacts.arts_config = artifact_paths["arts_config"]
+                    if artifact_paths.get("carts_metadata"):
+                        artifacts.carts_metadata = artifact_paths["carts_metadata"]
+                    if artifact_paths.get("arts_metadata_mlir"):
+                        artifacts.arts_metadata_mlir = artifact_paths["arts_metadata_mlir"]
+                    if artifact_paths.get("executable_arts"):
+                        artifacts.executable_arts = artifact_paths["executable_arts"]
+                    if artifact_paths.get("executable_omp"):
+                        artifacts.executable_omp = artifact_paths["executable_omp"]
+                    if result_artifacts_dir:
+                        artifacts.build_dir = str(result_artifacts_dir)
+
+                    # Update run artifacts
+                    artifacts.run_dir = str(run_dir)
+                    artifacts.arts_log = arts_log_path
+                    artifacts.omp_log = omp_log_path
+
+                    # Handle counter files if counter_dir was specified
+                    if counter_dir and run_dir:
+                        run_counters_dir = run_dir / "counters"
+                        if counter_dir.exists():
+                            run_counters_dir.mkdir(exist_ok=True)
+                            for counter_file in counter_dir.glob("*.json"):
+                                shutil.copy2(counter_file, run_counters_dir / counter_file.name)
+                            artifacts.counters_dir = str(run_counters_dir)
+                            artifacts.counter_files = sorted(
+                                str(f) for f in run_counters_dir.glob("*.json")
+                            )
+
+                # Store with config and run number
+                result = BenchmarkResult(
+                    name=name,
+                    suite=name.split("/")[0] if "/" in name else "",
+                    size=size,
+                    config=config,
+                    run_number=run_num,
+                    build_arts=build_arts,
+                    build_omp=build_omp,
+                    run_arts=run_arts,
+                    run_omp=run_omp,
+                    timing=timing,
+                    verification=verification,
+                    artifacts=artifacts,
+                    timestamp=datetime.now().isoformat(),
+                    total_duration_sec=0.0,  # Will be calculated later
+                )
+
+                results.append(result)
+
+        return results, experiment_dir, json_path
 
     def run_benchmark(
         self,
@@ -817,6 +1134,7 @@ class BenchmarkRunner:
         launcher: str = "ssh",
         node_count: int = 1,
         threads: int = 1,
+        log_file: Optional[Path] = None,
     ) -> RunResult:
         """Execute a benchmark and capture output.
 
@@ -827,6 +1145,7 @@ class BenchmarkRunner:
             launcher: ARTS launcher type. For 'slurm', wraps executable in srun.
             node_count: Number of nodes for distributed execution (slurm only).
             threads: Number of threads per node (for srun --cpus-per-task).
+            log_file: Optional path to write full output (for debug=2).
         """
         if not executable or not os.path.exists(executable):
             return RunResult(
@@ -857,6 +1176,14 @@ class BenchmarkRunner:
             # Local or SSH launcher: run directly (ARTS handles distribution for SSH)
             cmd = [executable]
 
+        # Debug output level 1: show commands
+        if self.debug >= 1:
+            env_str = " ".join(f"{k}={v}" for k, v in (env or {}).items())
+            if env_str:
+                self.console.print(f"[dim]$ {env_str} {' '.join(cmd)}[/]")
+            else:
+                self.console.print(f"[dim]$ {' '.join(cmd)}[/]")
+
         start = time.time()
         try:
             result = subprocess.run(
@@ -869,6 +1196,33 @@ class BenchmarkRunner:
             )
             duration = time.time() - start
 
+            # Debug output level 2: write to log file (ARTS output can be huge)
+            if self.debug >= 2:
+                if log_file:
+                    log_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(log_file, "w") as f:
+                        f.write(f"# Command: {' '.join(cmd)}\n")
+                        f.write(f"# Duration: {duration:.3f}s\n")
+                        f.write(f"# Exit code: {result.returncode}\n\n")
+                        if result.stdout:
+                            f.write("=== STDOUT ===\n")
+                            f.write(result.stdout)
+                            f.write("\n")
+                        if result.stderr:
+                            f.write("=== STDERR ===\n")
+                            f.write(result.stderr)
+                            f.write("\n")
+                    self.console.print(f"[dim]  Log: {log_file}[/]")
+                else:
+                    # No log file specified, print summary only
+                    lines = (result.stdout + result.stderr).strip().split('\n')
+                    if len(lines) > 10:
+                        self.console.print(
+                            f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
+                    elif lines and lines[0]:
+                        for line in lines[:10]:
+                            self.console.print(f"[dim]  {line}[/]")
+
             # Determine status based on exit code
             if result.returncode == 0:
                 status = Status.PASS
@@ -879,7 +1233,8 @@ class BenchmarkRunner:
 
             checksum = self.extract_checksum(result.stdout)
             kernel_timings = self.extract_kernel_timings(result.stdout)
-            parallel_task_timing = self.extract_parallel_task_timings(result.stdout)
+            parallel_task_timing = self.extract_parallel_task_timings(
+                result.stdout)
 
             return RunResult(
                 status=status,
@@ -965,7 +1320,8 @@ class BenchmarkRunner:
 
             if name not in result.parallel_timings:
                 result.parallel_timings[name] = []
-            result.parallel_timings[name].append(WorkerTiming(worker_id, time_sec))
+            result.parallel_timings[name].append(
+                WorkerTiming(worker_id, time_sec))
             found_any = True
 
         # Pattern for task timings: task.<name>[worker=<id>]: <time>s
@@ -1076,15 +1432,11 @@ class BenchmarkRunner:
         """Collect all artifact paths for a benchmark."""
         build_dir = bench_path / "build"
         counters_dir = bench_path / "counters"
-        logs_dir = bench_path / "logs"
 
         artifacts = Artifacts(benchmark_dir=str(bench_path))
 
         if build_dir.exists():
             artifacts.build_dir = str(build_dir)
-
-        if logs_dir.exists():
-            artifacts.logs_dir = str(logs_dir)
 
         # Find executables
         for exe in bench_path.glob("*_arts"):
@@ -1097,21 +1449,20 @@ class BenchmarkRunner:
                 artifacts.executable_omp = str(exe)
                 break
 
-        # Find MLIR files in build directory
-        if build_dir.exists():
-            for mlir in build_dir.glob("*_seq.mlir"):
-                artifacts.mlir_sequential = str(mlir)
-                break
+        # Find CARTS metadata JSON (compiler-generated analysis)
+        carts_meta = bench_path / ".carts-metadata.json"
+        if carts_meta.exists():
+            artifacts.carts_metadata = str(carts_meta)
 
-            for mlir in build_dir.glob("*.mlir"):
-                if "_seq" not in mlir.name:
-                    artifacts.mlir_parallel = str(mlir)
-                    break
+        # Find ARTS metadata MLIR (MLIR with embedded metadata attributes)
+        for mlir in bench_path.glob("*_arts_metadata.mlir"):
+            artifacts.arts_metadata_mlir = str(mlir)
+            break
 
-            # Find CARTS metadata JSON
-            for meta in build_dir.glob("*.carts-metadata.json"):
-                artifacts.carts_metadata = str(meta)
-                break
+        # Find arts.cfg (ARTS runtime configuration)
+        arts_cfg = bench_path / "arts.cfg"
+        if arts_cfg.exists():
+            artifacts.arts_config = str(arts_cfg)
 
         # Collect counter files
         if counters_dir.exists():
@@ -1146,10 +1497,17 @@ class BenchmarkRunner:
         # Build OpenMP version
         build_omp = self.build_benchmark(name, size, "openmp", arts_config)
 
+        # Setup log files for debug=2
+        logs_dir = bench_path / "logs"
+        arts_log = logs_dir / "arts.log" if self.debug >= 2 else None
+        omp_log = logs_dir / "omp.log" if self.debug >= 2 else None
+
         # Run ARTS version - pass artsConfig env var so runtime uses same config as compile
         if build_arts.status == Status.PASS and build_arts.executable:
-            arts_env = {"artsConfig": str(arts_config)} if arts_config else None
-            run_arts = self.run_benchmark(build_arts.executable, timeout, env=arts_env)
+            arts_env = {"artsConfig": str(
+                arts_config)} if arts_config else None
+            run_arts = self.run_benchmark(
+                build_arts.executable, timeout, env=arts_env, log_file=arts_log)
         else:
             run_arts = RunResult(
                 status=Status.SKIP,
@@ -1161,7 +1519,8 @@ class BenchmarkRunner:
 
         # Run OpenMP version
         if build_omp.status == Status.PASS and build_omp.executable:
-            run_omp = self.run_benchmark(build_omp.executable, timeout)
+            run_omp = self.run_benchmark(
+                build_omp.executable, timeout, log_file=omp_log)
         else:
             run_omp = RunResult(
                 status=Status.SKIP,
@@ -1176,7 +1535,8 @@ class BenchmarkRunner:
             arts_output = filter_benchmark_output(run_arts.stdout)
             omp_output = filter_benchmark_output(run_omp.stdout)
 
-            self.console.print(f"\n[bold cyan]═══ CARTS Output ({name}) ═══[/]")
+            self.console.print(
+                f"\n[bold cyan]═══ CARTS Output ({name}) ═══[/]")
             self.console.print(arts_output or "[dim](no benchmark output)[/]")
 
             self.console.print(f"\n[bold green]═══ OMP Output ({name}) ═══[/]")
@@ -1203,10 +1563,20 @@ class BenchmarkRunner:
 
         total_duration = time.time() - start_time
 
+        # Default config for single runs (no thread sweep)
+        config = BenchmarkConfig(
+            arts_threads=1,
+            arts_nodes=1,
+            omp_threads=1,
+            launcher="local",
+        )
+
         return BenchmarkResult(
             name=name,
             suite=suite,
             size=size,
+            config=config,
+            run_number=1,
             build_arts=build_arts,
             build_omp=build_omp,
             run_arts=run_arts,
@@ -1223,16 +1593,11 @@ class BenchmarkRunner:
         benchmarks: List[str],
         size: str = DEFAULT_SIZE,
         timeout: int = DEFAULT_TIMEOUT,
-        parallel: int = 1,
         verify: bool = True,
         arts_config: Optional[Path] = None,
     ) -> List[BenchmarkResult]:
-        """Run benchmark suite with optional parallelization."""
-        if parallel > 1:
-            return self._run_parallel(
-                benchmarks, size, timeout, parallel, verify, arts_config
-            )
-
+        """Run benchmark suite.
+        """
         results_dict: Dict[str, BenchmarkResult] = {}
         results_list: List[BenchmarkResult] = []
         start_time = time.time()
@@ -1240,7 +1605,8 @@ class BenchmarkRunner:
         if self.quiet:
             # Quiet mode - no live display
             for bench in benchmarks:
-                result = self.run_single(bench, size, timeout, verify, arts_config)
+                result = self.run_single(
+                    bench, size, timeout, verify, arts_config)
                 results_list.append(result)
             self.results = results_list
             return results_list
@@ -1254,16 +1620,19 @@ class BenchmarkRunner:
             for bench in benchmarks:
                 # Update display to show current benchmark as in-progress
                 elapsed = time.time() - start_time
-                live.update(create_live_display(benchmarks, results_dict, bench, elapsed))
+                live.update(create_live_display(
+                    benchmarks, results_dict, bench, elapsed))
 
                 # Run benchmark
-                result = self.run_single(bench, size, timeout, verify, arts_config)
+                result = self.run_single(
+                    bench, size, timeout, verify, arts_config)
 
                 # Update results and refresh display
                 results_dict[bench] = result
                 results_list.append(result)
                 elapsed = time.time() - start_time
-                live.update(create_live_display(benchmarks, results_dict, None, elapsed))
+                live.update(create_live_display(
+                    benchmarks, results_dict, None, elapsed))
 
         self.results = results_list
         return results_list
@@ -1281,7 +1650,8 @@ class BenchmarkRunner:
         results_dict: Dict[str, BenchmarkResult] = {}
         results_list: List[BenchmarkResult] = []
         start_time = time.time()
-        in_progress: set = set(benchmarks)  # All benchmarks start as in-progress
+        # All benchmarks start as in-progress
+        in_progress: set = set(benchmarks)
 
         if self.quiet:
             # Quiet mode - no live display
@@ -1306,14 +1676,16 @@ class BenchmarkRunner:
                         result = future.result()
                         results_list.append(result)
                     except Exception as e:
-                        results_list.append(self._make_error_result(bench, size, str(e)))
+                        results_list.append(
+                            self._make_error_result(bench, size, str(e)))
 
             self.results = results_list
             return results_list
 
         # Live display mode - show table that updates as benchmarks complete
         with Live(
-            create_live_display(benchmarks, results_dict, f"[parallel={n_workers}]", 0),
+            create_live_display(benchmarks, results_dict,
+                                f"[parallel={n_workers}]", 0),
             console=self.console,
             refresh_per_second=4,
         ) as live:
@@ -1339,7 +1711,8 @@ class BenchmarkRunner:
                         results_dict[bench] = result
                         results_list.append(result)
                     except Exception as e:
-                        error_result = self._make_error_result(bench, size, str(e))
+                        error_result = self._make_error_result(
+                            bench, size, str(e))
                         results_dict[bench] = error_result
                         results_list.append(error_result)
 
@@ -1348,7 +1721,8 @@ class BenchmarkRunner:
 
                     # Show one of the remaining in-progress benchmarks
                     current_in_progress = next(iter(in_progress), None)
-                    live.update(create_live_display(benchmarks, results_dict, current_in_progress, elapsed))
+                    live.update(create_live_display(
+                        benchmarks, results_dict, current_in_progress, elapsed))
 
         self.results = results_list
         return results_list
@@ -1376,10 +1750,20 @@ class BenchmarkRunner:
             stderr=error,
         )
 
+        # Default config for error results
+        config = BenchmarkConfig(
+            arts_threads=1,
+            arts_nodes=1,
+            omp_threads=1,
+            launcher="local",
+        )
+
         return BenchmarkResult(
             name=name,
             suite=suite,
             size=size,
+            config=config,
+            run_number=1,
             build_arts=failed_build,
             build_omp=failed_build,
             run_arts=failed_run,
@@ -1437,7 +1821,8 @@ def _run_single_worker(
     clean: bool = True,
 ) -> BenchmarkResult:
     """Worker function for parallel benchmark execution."""
-    runner = BenchmarkRunner(Console(force_terminal=False), quiet=True, clean=clean)
+    runner = BenchmarkRunner(
+        Console(force_terminal=False), quiet=True, clean=clean)
     runner.benchmarks_dir = Path(benchmarks_dir)
     return runner.run_single(
         name,
@@ -1618,7 +2003,8 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
 def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Panel:
     """Create a summary panel."""
-    passed = sum(1 for r in results if r.run_arts.status == Status.PASS and r.verification.correct)
+    passed = sum(1 for r in results if r.run_arts.status ==
+                 Status.PASS and r.verification.correct)
     failed = sum(1 for r in results if r.run_arts.status in (Status.FAIL, Status.CRASH) or
                  (r.run_arts.status == Status.PASS and not r.verification.correct))
     skipped = sum(1 for r in results if r.run_arts.status == Status.SKIP)
@@ -1778,7 +2164,8 @@ def create_live_summary(
     elapsed: float,
 ) -> Text:
     """Create a one-line summary for live display."""
-    passed = sum(1 for r in results.values() if r.run_arts.status == Status.PASS and r.verification.correct)
+    passed = sum(1 for r in results.values() if r.run_arts.status ==
+                 Status.PASS and r.verification.correct)
     failed = sum(1 for r in results.values() if r.run_arts.status in (Status.FAIL, Status.CRASH) or
                  (r.run_arts.status == Status.PASS and not r.verification.correct))
     pending = total - len(results)
@@ -1979,7 +2366,6 @@ def get_reproducibility_metadata(carts_dir: Path, benchmarks_dir: Path) -> Dict[
     return metadata
 
 
-
 def _serialize_parallel_task_timing(timing: Optional[ParallelTaskTiming]) -> Optional[Dict]:
     """Serialize ParallelTaskTiming to JSON-compatible dict."""
     if timing is None:
@@ -1987,14 +2373,72 @@ def _serialize_parallel_task_timing(timing: Optional[ParallelTaskTiming]) -> Opt
 
     return {
         "parallel_timings": {
-            name: [{"worker_id": t.worker_id, "time_sec": t.time_sec} for t in timings]
+            name: [{"worker_id": t.worker_id, "time_sec": t.time_sec}
+                   for t in timings]
             for name, timings in timing.parallel_timings.items()
         },
         "task_timings": {
-            name: [{"worker_id": t.worker_id, "time_sec": t.time_sec} for t in timings]
+            name: [{"worker_id": t.worker_id, "time_sec": t.time_sec}
+                   for t in timings]
             for name, timings in timing.task_timings.items()
         },
     }
+
+
+def compute_stats(values: List[float]) -> Dict[str, float]:
+    """Compute mean, stddev, min, max for a list of values."""
+    if not values:
+        return {"mean": 0.0}
+    if len(values) == 1:
+        return {"mean": values[0]}
+    from statistics import mean, stdev
+    return {
+        "mean": mean(values),
+        "stddev": stdev(values),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
+    """Calculate statistics for multiple runs grouped by config."""
+    from collections import defaultdict
+
+    # Group by config (name + threads + nodes)
+    groups: Dict[Tuple, List[BenchmarkResult]] = defaultdict(list)
+    for r in results:
+        key = (r.name, r.config.arts_threads, r.config.arts_nodes)
+        groups[key].append(r)
+
+    stats = {}
+    for key, runs in groups.items():
+        _name, threads, nodes = key
+        # Extract kernel times (use first kernel timing if available)
+        arts_kernel_times = []
+        omp_kernel_times = []
+        for r in runs:
+            if r.run_arts.kernel_timings:
+                # Use the first kernel timing (most benchmarks have one)
+                first_key = next(iter(r.run_arts.kernel_timings))
+                arts_kernel_times.append(r.run_arts.kernel_timings[first_key])
+            if r.run_omp.kernel_timings:
+                first_key = next(iter(r.run_omp.kernel_timings))
+                omp_kernel_times.append(r.run_omp.kernel_timings[first_key])
+
+        speedups = [r.timing.speedup for r in runs if r.timing.speedup > 0]
+
+        config_key = f"{threads}_threads"
+        if nodes > 1:
+            config_key = f"{threads}_threads_{nodes}_nodes"
+
+        stats[config_key] = {
+            "arts_kernel_time": compute_stats(arts_kernel_times),
+            "omp_kernel_time": compute_stats(omp_kernel_times),
+            "speedup": compute_stats(speedups),
+            "run_count": len(runs),
+        }
+
+    return stats
 
 
 def export_json(
@@ -2005,9 +2449,10 @@ def export_json(
     threads_list: Optional[List[int]] = None,
     cflags: Optional[str] = None,
     launcher: Optional[str] = None,
-    node_count: Optional[int] = None,
     weak_scaling: bool = False,
     base_size: Optional[int] = None,
+    runs_per_config: int = 1,
+    artifacts_directory: Optional[str] = None,
 ) -> None:
     """Export results to JSON file with comprehensive reproducibility metadata."""
     carts_dir = get_carts_dir()
@@ -2022,6 +2467,7 @@ def export_json(
         "hostname": platform.node(),
         "size": size,
         "total_duration_seconds": total_duration,
+        "runs_per_config": runs_per_config,
         # Include reproducibility bundle
         "reproducibility": repro_metadata,
     }
@@ -2033,31 +2479,39 @@ def export_json(
         metadata["cflags"] = cflags
     if launcher:
         metadata["launcher"] = launcher
-    if node_count and node_count > 1:
-        metadata["node_count"] = node_count
     if weak_scaling:
         metadata["weak_scaling"] = {
             "enabled": True,
             "base_size": base_size,
         }
+    if artifacts_directory:
+        metadata["artifacts_directory"] = artifacts_directory
 
     # Calculate summary
-    passed = sum(1 for r in results if r.run_arts.status == Status.PASS and r.verification.correct)
-    failed = sum(1 for r in results if r.run_arts.status in (Status.FAIL, Status.CRASH))
+    passed = sum(1 for r in results if r.run_arts.status ==
+                 Status.PASS and r.verification.correct)
+    failed = sum(1 for r in results if r.run_arts.status in (
+        Status.FAIL, Status.CRASH))
     skipped = sum(1 for r in results if r.run_arts.status == Status.SKIP)
     total = len(results)
+
+    # Count unique configs
+    unique_configs = len(set((r.name, r.config.arts_threads, r.config.arts_nodes)
+                             for r in results))
 
     speedups = [r.timing.speedup for r in results if r.timing.speedup > 0]
     if speedups:
         import math
         avg_speedup = sum(speedups) / len(speedups)
-        geomean_speedup = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
+        geomean_speedup = math.exp(sum(math.log(s)
+                                   for s in speedups) / len(speedups))
     else:
         avg_speedup = 0.0
         geomean_speedup = 0.0
 
-    summary = {
-        "total": total,
+    summary: Dict[str, Any] = {
+        "total_configs": unique_configs,
+        "total_runs": total,
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
@@ -2066,12 +2520,23 @@ def export_json(
         "geometric_mean_speedup": geomean_speedup,
     }
 
+    # Add statistics when multiple runs
+    if runs_per_config > 1:
+        summary["statistics"] = calculate_statistics(results)
+
     # Convert results to dict
     def result_to_dict(r: BenchmarkResult) -> Dict[str, Any]:
-        result_dict = {
+        return {
             "name": r.name,
             "suite": r.suite,
             "size": r.size,
+            "config": {
+                "arts_threads": r.config.arts_threads,
+                "arts_nodes": r.config.arts_nodes,
+                "omp_threads": r.config.omp_threads,
+                "launcher": r.config.launcher,
+            },
+            "run_number": r.run_number,
             "build_arts": {
                 "status": r.build_arts.status.value,
                 "duration_sec": r.build_arts.duration_sec,
@@ -2097,8 +2562,8 @@ def export_json(
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
             },
             "timing": {
-                "arts_time_sec": r.timing.arts_time_sec,
-                "omp_time_sec": r.timing.omp_time_sec,
+                "arts_kernel_sec": r.timing.arts_time_sec,
+                "omp_kernel_sec": r.timing.omp_time_sec,
                 "speedup": r.timing.speedup,
             },
             "verification": {
@@ -2110,40 +2575,41 @@ def export_json(
             "timestamp": r.timestamp,
         }
 
-        # Add scaling configuration if present (for scaling experiments)
-        if hasattr(r, 'thread_count') and r.thread_count is not None:
-            result_dict["thread_count"] = r.thread_count
-        if hasattr(r, 'node_count') and r.node_count is not None:
-            result_dict["node_count"] = r.node_count
-        if hasattr(r, 'launcher') and r.launcher is not None:
-            result_dict["launcher"] = r.launcher
-
-        return result_dict
-
     # Collect failures
     failures = []
     for r in results:
         if r.run_arts.status in (Status.FAIL, Status.CRASH, Status.TIMEOUT):
             failures.append({
                 "name": r.name,
+                "config": {
+                    "arts_threads": r.config.arts_threads,
+                    "arts_nodes": r.config.arts_nodes,
+                },
+                "run_number": r.run_number,
                 "phase": "run_arts",
                 "error": r.run_arts.status.value,
                 "exit_code": r.run_arts.exit_code,
                 "stderr": r.run_arts.stderr[:500] if r.run_arts.stderr else "",
                 "artifacts": {
                     "benchmark_dir": r.artifacts.benchmark_dir,
-                    "logs_dir": r.artifacts.logs_dir,
+                    "run_dir": r.artifacts.run_dir,
+                    "arts_log": r.artifacts.arts_log,
                 },
             })
         elif r.build_arts.status == Status.FAIL:
             failures.append({
                 "name": r.name,
+                "config": {
+                    "arts_threads": r.config.arts_threads,
+                    "arts_nodes": r.config.arts_nodes,
+                },
+                "run_number": r.run_number,
                 "phase": "build_arts",
                 "error": "build_failed",
                 "output": r.build_arts.output[:500],
                 "artifacts": {
                     "benchmark_dir": r.artifacts.benchmark_dir,
-                    "logs_dir": r.artifacts.logs_dir,
+                    "build_dir": r.artifacts.build_dir,
                 },
             })
 
@@ -2165,8 +2631,10 @@ def export_json(
 
 @app.command(name="list")
 def list_benchmarks(
-    suite: Optional[str] = typer.Option(None, "--suite", "-s", help="Filter by suite"),
-    format: str = typer.Option("table", "--format", "-f", help="Output format: table, json, plain"),
+    suite: Optional[str] = typer.Option(
+        None, "--suite", "-s", help="Filter by suite"),
+    format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, plain"),
 ):
     """List all available benchmarks."""
     runner = BenchmarkRunner(console)
@@ -2187,7 +2655,8 @@ def list_benchmarks(
                 suites[suite_name] = []
             suites[suite_name].append(bench)
 
-        console.print(f"\n[bold]Available CARTS Benchmarks[/] ({len(benchmarks)} total)\n")
+        console.print(
+            f"\n[bold]Available CARTS Benchmarks[/] ({len(benchmarks)} total)\n")
 
         for suite_name in sorted(suites.keys()):
             if suite_name:
@@ -2199,33 +2668,56 @@ def list_benchmarks(
 
 @app.command()
 def run(
-    benchmarks: Optional[List[str]] = typer.Argument(None, help="Specific benchmarks to run"),
-    size: str = typer.Option(DEFAULT_SIZE, "--size", "-s", help="Dataset size: small, medium, large"),
-    timeout: int = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t", help="Execution timeout in seconds"),
-    parallel: int = typer.Option(1, "--parallel", "-p", help="Number of parallel workers"),
-    no_verify: bool = typer.Option(False, "--no-verify", help="Disable correctness verification"),
-    no_clean: bool = typer.Option(False, "--no-clean", help="Skip cleaning before build (faster, but may use stale artifacts)"),
-    arts_config: Optional[Path] = typer.Option(None, "--arts-config", help="Custom arts.cfg file"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Export results to JSON file"),
-    suite: Optional[str] = typer.Option(None, "--suite", help="Filter by suite"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output (CI mode)"),
-    trace: bool = typer.Option(False, "--trace", help="Show benchmark output (kernel timing and checksum)"),
-    threads: Optional[str] = typer.Option(None, "--threads", help="Thread counts: '1,2,4,8' or '1:16:2' for thread sweep"),
-    omp_threads: Optional[int] = typer.Option(None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
-    launcher: str = typer.Option("ssh", "--launcher", "-l", help="ARTS launcher: ssh (default), slurm, lsf, local"),
-    node_count: int = typer.Option(1, "--node-count", "-n", help="Number of nodes for distributed execution"),
-    weak_scaling: bool = typer.Option(False, "--weak-scaling", help="Enable weak scaling: auto-scale problem size with parallelism"),
-    base_size: Optional[int] = typer.Option(None, "--base-size", help="Base problem size for weak scaling (at base parallelism)"),
-    scaling_complexity: str = typer.Option("auto", "--scaling-complexity", help="Work complexity: 'auto' (per benchmark), '2d' (N²), '3d' (N³), 'linear'"),
-    cflags: Optional[str] = typer.Option(None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
-    collect_counters: bool = typer.Option(False, "--collect-counters", help="Enable ARTS counter collection"),
-    counter_dir: Optional[Path] = typer.Option(None, "--counter-dir", help="Counter output directory"),
+    benchmarks: Optional[List[str]] = typer.Argument(
+        None, help="Specific benchmarks to run"),
+    size: str = typer.Option(DEFAULT_SIZE, "--size",
+                             "-s", help="Dataset size: small, medium, large"),
+    timeout: int = typer.Option(
+        DEFAULT_TIMEOUT, "--timeout", "-t", help="Execution timeout in seconds"),
+    no_verify: bool = typer.Option(
+        False, "--no-verify", help="Disable correctness verification"),
+    no_clean: bool = typer.Option(
+        False, "--no-clean", help="Skip cleaning before build (faster, but may use stale artifacts)"),
+    arts_config: Optional[Path] = typer.Option(
+        None, "--arts-config", help="Custom arts.cfg file"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Export results to JSON file"),
+    suite: Optional[str] = typer.Option(
+        None, "--suite", help="Filter by suite"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Verbose output"),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Minimal output (CI mode)"),
+    trace: bool = typer.Option(
+        False, "--trace", help="Show benchmark output (kernel timing and checksum)"),
+    threads: Optional[str] = typer.Option(
+        None, "--threads", help="Thread counts: '1,2,4,8' or '1:16:2' for thread sweep"),
+    omp_threads: Optional[int] = typer.Option(
+        None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
+    launcher: str = typer.Option(
+        "ssh", "--launcher", "-l", help="ARTS launcher: ssh (default), slurm, lsf, local"),
+    node_count: int = typer.Option(
+        1, "--node-count", "-n", help="Number of nodes for distributed execution"),
+    weak_scaling: bool = typer.Option(
+        False, "--weak-scaling", help="Enable weak scaling: auto-scale problem size with parallelism"),
+    base_size: Optional[int] = typer.Option(
+        None, "--base-size", help="Base problem size for weak scaling (at base parallelism)"),
+    cflags: Optional[str] = typer.Option(
+        None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
+    debug_level: int = typer.Option(
+        0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=full output"),
+    counters: int = typer.Option(
+        0, "--counters", help="Counter level: 0=off, 1=artsid metrics, 2=deep captures. Requires ARTS built with matching --counters level."),
+    counter_dir: Optional[Path] = typer.Option(
+        None, "--counter-dir", help="Directory for ARTS counter output (n0_t*.json files)"),
+    runs: int = typer.Option(
+        1, "--runs", "-r", help="Number of times to run each benchmark configuration (for statistical significance)"),
 ):
     """Run benchmarks with verification and timing."""
     verify = not no_verify
     clean = not no_clean
-    runner = BenchmarkRunner(console, verbose=verbose, quiet=quiet, trace=trace, clean=clean)
+    runner = BenchmarkRunner(
+        console, verbose=verbose, quiet=quiet, trace=trace, clean=clean, debug=debug_level)
 
     # Parse thread specification
     threads_list = None
@@ -2242,9 +2734,17 @@ def run(
         console.print("[yellow]No benchmarks found.[/]")
         raise typer.Exit(1)
 
-    # Setup counter directory
-    if collect_counters and not counter_dir:
-        counter_dir = Path("./counters")
+    # Setup counter collection
+    if counters > 0:
+        # Check if ARTS was built with counter support
+        arts_level = check_arts_counter_support()
+        if arts_level < counters:
+            console.print(
+                f"[yellow]Warning: ARTS built with counters={arts_level}, requested counters={counters}[/]")
+            console.print(
+                f"[dim]Rebuild ARTS: carts build --arts --counters={counters}[/]")
+        if not counter_dir:
+            counter_dir = Path(f"./counters/{size}")
     if counter_dir:
         counter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2252,22 +2752,30 @@ def run(
     if not quiet:
         console.print(f"\n[bold]CARTS Benchmark Runner v{VERSION}[/]")
         console.print("\u2501" * 30)
-        config_items = [f"size={size}", f"timeout={timeout}s", f"parallel={parallel}", f"verify={verify}", f"clean={clean}"]
+        config_items = [f"size={size}", f"timeout={timeout}s",
+                        f"verify={verify}", f"clean={clean}"]
         if threads_list:
             config_items.append(f"threads={threads}")
+        if runs > 1:
+            config_items.append(f"runs={runs}")
         if cflags:
             config_items.append(f"cflags={cflags}")
-        if collect_counters:
-            config_items.append("counters=on")
+        if debug_level > 0:
+            config_items.append(f"debug={debug_level}")
+        if counters > 0:
+            config_items.append(
+                f"counters={counters} ({COUNTER_LEVELS.get(counters, 'unknown')})")
         console.print(f"Config: {', '.join(config_items)}")
         console.print(f"Benchmarks: {len(bench_list)}\n")
 
     # Run benchmarks
     start_time = time.time()
+    experiment_dir: Optional[Path] = None
+    actual_json_path: Optional[Path] = None
 
     if threads_list and len(bench_list) == 1:
         # Thread sweep mode for single benchmark
-        results = runner.run_with_thread_sweep(
+        results, experiment_dir, actual_json_path = runner.run_with_thread_sweep(
             bench_list[0],
             size,
             threads_list,
@@ -2280,7 +2788,8 @@ def run(
             node_count,
             weak_scaling,
             base_size,
-            scaling_complexity,
+            runs,
+            output,  # Pass output_path for artifact organization
         )
     else:
         # Standard mode
@@ -2288,7 +2797,6 @@ def run(
             bench_list,
             size=size,
             timeout=timeout,
-            parallel=parallel,
             verify=verify,
             arts_config=arts_config,
         )
@@ -2303,34 +2811,55 @@ def run(
 
     # Export if requested
     if output:
+        # Use the actual JSON path (inside experiment dir) if available from thread sweep
+        # Otherwise fall back to output path for standard mode
+        json_output_path = actual_json_path if actual_json_path else output
+
+        # artifacts_directory is "." since JSON is now inside the experiment folder
+        # (or None for standard mode which doesn't create experiment dirs)
+        artifacts_dir_name = "." if experiment_dir else None
+
         export_json(
             results,
-            output,
+            json_output_path,
             size,
             total_duration,
             threads_list,
             cflags,
             launcher,
-            node_count,
             weak_scaling,
             base_size,
+            runs,
+            artifacts_dir_name,
         )
-        console.print(f"\n[dim]Results exported to: {output}[/]")
+        # Show output paths
+        console.print()
+        if experiment_dir:
+            console.print(f"[green]Experiment folder:[/] {experiment_dir}")
+            console.print(f"[green]Results JSON:[/]      {actual_json_path}")
+        else:
+            console.print(f"[green]Results exported to:[/] {json_output_path}")
 
     # Exit with error if any failures
-    failed = sum(1 for r in results if r.run_arts.status in (Status.FAIL, Status.CRASH))
+    failed = sum(1 for r in results if r.run_arts.status in (
+        Status.FAIL, Status.CRASH))
     if failed > 0:
         raise typer.Exit(1)
 
 
 @app.command()
 def build(
-    benchmarks: Optional[List[str]] = typer.Argument(None, help="Specific benchmarks to build"),
-    size: str = typer.Option(DEFAULT_SIZE, "--size", "-s", help="Dataset size: small, medium, large"),
-    openmp: bool = typer.Option(False, "--openmp", help="Build OpenMP version only"),
+    benchmarks: Optional[List[str]] = typer.Argument(
+        None, help="Specific benchmarks to build"),
+    size: str = typer.Option(DEFAULT_SIZE, "--size",
+                             "-s", help="Dataset size: small, medium, large"),
+    openmp: bool = typer.Option(
+        False, "--openmp", help="Build OpenMP version only"),
     arts: bool = typer.Option(False, "--arts", help="Build ARTS version only"),
-    suite: Optional[str] = typer.Option(None, "--suite", help="Filter by suite"),
-    arts_config: Optional[Path] = typer.Option(None, "--arts-config", help="Custom arts.cfg file"),
+    suite: Optional[str] = typer.Option(
+        None, "--suite", help="Filter by suite"),
+    arts_config: Optional[Path] = typer.Option(
+        None, "--arts-config", help="Custom arts.cfg file"),
 ):
     """Build benchmarks without running."""
     runner = BenchmarkRunner(console)
@@ -2354,7 +2883,8 @@ def build(
     else:
         variants = ["arts", "openmp"]
 
-    console.print(f"\n[bold]Building {len(bench_list)} benchmarks[/] (size={size})\n")
+    console.print(
+        f"\n[bold]Building {len(bench_list)} benchmarks[/] (size={size})\n")
 
     with Progress(
         SpinnerColumn(),
@@ -2364,15 +2894,19 @@ def build(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Building...", total=len(bench_list) * len(variants))
+        task = progress.add_task(
+            "Building...", total=len(bench_list) * len(variants))
 
         for bench in bench_list:
             for variant in variants:
-                progress.update(task, description=f"[cyan]{bench}[/] ({variant})")
-                result = runner.build_benchmark(bench, size, variant, arts_config)
+                progress.update(
+                    task, description=f"[cyan]{bench}[/] ({variant})")
+                result = runner.build_benchmark(
+                    bench, size, variant, arts_config)
                 status = status_symbol(result.status)
                 if result.status != Status.PASS:
-                    console.print(f"  {status} {bench} ({variant}): {result.status.value}")
+                    console.print(
+                        f"  {status} {bench} ({variant}): {result.status.value}")
                 progress.advance(task)
 
     console.print("\n[bold green]Build complete![/]")
@@ -2380,9 +2914,12 @@ def build(
 
 @app.command()
 def clean(
-    benchmarks: Optional[List[str]] = typer.Argument(None, help="Specific benchmarks to clean"),
-    all: bool = typer.Option(False, "--all", "-a", help="Clean all benchmarks"),
-    suite: Optional[str] = typer.Option(None, "--suite", help="Filter by suite"),
+    benchmarks: Optional[List[str]] = typer.Argument(
+        None, help="Specific benchmarks to clean"),
+    all: bool = typer.Option(False, "--all", "-a",
+                             help="Clean all benchmarks"),
+    suite: Optional[str] = typer.Option(
+        None, "--suite", help="Filter by suite"),
 ):
     """Clean build artifacts."""
     runner = BenchmarkRunner(console)
@@ -2413,18 +2950,23 @@ def clean(
 
 @app.command()
 def report(
-    input: Optional[Path] = typer.Option(None, "--input", "-i", help="Input JSON file"),
-    format: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file"),
+    input: Optional[Path] = typer.Option(
+        None, "--input", "-i", help="Input JSON file"),
+    format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Output file"),
 ):
     """View or export benchmark results."""
     if not input:
         # Look for most recent results file
-        results_files = sorted(Path(".").glob("benchmark_results_*.json"), reverse=True)
+        results_files = sorted(Path(".").glob(
+            "benchmark_results_*.json"), reverse=True)
         if results_files:
             input = results_files[0]
         else:
-            console.print("[yellow]No results file found. Run benchmarks first.[/]")
+            console.print(
+                "[yellow]No results file found. Run benchmarks first.[/]")
             raise typer.Exit(1)
 
     with open(input) as f:
@@ -2479,13 +3021,14 @@ def report(
         ))
 
 
-
-
 @app.command()
 def analyze(
-    input: Optional[Path] = typer.Option(None, "--input", "-i", help="Input JSON file with benchmark results"),
-    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Specific benchmark to analyze"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed per-worker timings"),
+    input: Optional[Path] = typer.Option(
+        None, "--input", "-i", help="Input JSON file with benchmark results"),
+    benchmark: Optional[str] = typer.Option(
+        None, "--benchmark", "-b", help="Specific benchmark to analyze"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show detailed per-worker timings"),
 ):
     """Analyze parallel region and task timing results.
 
@@ -2501,11 +3044,13 @@ def analyze(
     """
     if not input:
         # Look for most recent results file
-        results_files = sorted(Path(".").glob("benchmark_results_*.json"), reverse=True)
+        results_files = sorted(Path(".").glob(
+            "benchmark_results_*.json"), reverse=True)
         if results_files:
             input = results_files[0]
         else:
-            console.print("[yellow]No results file found. Run benchmarks first with --output.[/]")
+            console.print(
+                "[yellow]No results file found. Run benchmarks first with --output.[/]")
             raise typer.Exit(1)
 
     with open(input) as f:
@@ -2548,16 +3093,19 @@ def analyze(
                 times = [t["time_sec"] for t in timings]
                 if times:
                     mean = sum(times) / len(times)
-                    console.print(f"  task.{task_name}: mean={mean:.6f}s (n={len(times)} workers)")
+                    console.print(
+                        f"  task.{task_name}: mean={mean:.6f}s (n={len(times)} workers)")
                     if verbose:
                         for t in timings:
-                            console.print(f"    worker {t['worker_id']}: {t['time_sec']:.6f}s")
+                            console.print(
+                                f"    worker {t['worker_id']}: {t['time_sec']:.6f}s")
 
             for par_name, timings in arts_pt.get("parallel_timings", {}).items():
                 times = [t["time_sec"] for t in timings]
                 if times:
                     mean = sum(times) / len(times)
-                    console.print(f"  parallel.{par_name}: mean={mean:.6f}s (n={len(times)} workers)")
+                    console.print(
+                        f"  parallel.{par_name}: mean={mean:.6f}s (n={len(times)} workers)")
 
         # Analyze OpenMP timings
         if omp_pt:
@@ -2566,16 +3114,19 @@ def analyze(
                 times = [t["time_sec"] for t in timings]
                 if times:
                     mean = sum(times) / len(times)
-                    console.print(f"  task.{task_name}: mean={mean:.6f}s (n={len(times)} workers)")
+                    console.print(
+                        f"  task.{task_name}: mean={mean:.6f}s (n={len(times)} workers)")
                     if verbose:
                         for t in timings:
-                            console.print(f"    worker {t['worker_id']}: {t['time_sec']:.6f}s")
+                            console.print(
+                                f"    worker {t['worker_id']}: {t['time_sec']:.6f}s")
 
             for par_name, timings in omp_pt.get("parallel_timings", {}).items():
                 times = [t["time_sec"] for t in timings]
                 if times:
                     mean = sum(times) / len(times)
-                    console.print(f"  parallel.{par_name}: mean={mean:.6f}s (n={len(times)} workers)")
+                    console.print(
+                        f"  parallel.{par_name}: mean={mean:.6f}s (n={len(times)} workers)")
 
         # Compute efficiency ratio if we have both
         if arts_pt and omp_pt:
@@ -2614,7 +3165,8 @@ def analyze(
                             interpretation = "[red]Significant degradation - delayed opts hurt[/]"
 
                         console.print(f"  task.{task_name}:")
-                        console.print(f"    η = {eta:.3f} (CARTS={arts_mean:.6f}s / OMP={omp_mean:.6f}s)")
+                        console.print(
+                            f"    η = {eta:.3f} (CARTS={arts_mean:.6f}s / OMP={omp_mean:.6f}s)")
                         console.print(f"    {interpretation}")
 
             # Compute overhead if we have matching parallel/task names
@@ -2624,22 +3176,32 @@ def analyze(
             # Try to find matching parallel and task names for overhead calculation
             for par_name in set(arts_parallel.keys()) & set(omp_parallel.keys()):
                 # Find a task that might correspond (e.g., "gemm" -> "gemm:kernel")
-                matching_tasks = [t for t in arts_tasks.keys() if t.startswith(par_name)]
+                matching_tasks = [
+                    t for t in arts_tasks.keys() if t.startswith(par_name)]
                 if matching_tasks:
                     task_name = matching_tasks[0]
                     if task_name in arts_tasks and task_name in omp_tasks:
-                        arts_par_times = [t["time_sec"] for t in arts_parallel[par_name]]
-                        arts_task_times = [t["time_sec"] for t in arts_tasks[task_name]]
-                        omp_par_times = [t["time_sec"] for t in omp_parallel[par_name]]
-                        omp_task_times = [t["time_sec"] for t in omp_tasks[task_name]]
+                        arts_par_times = [t["time_sec"]
+                                          for t in arts_parallel[par_name]]
+                        arts_task_times = [t["time_sec"]
+                                           for t in arts_tasks[task_name]]
+                        omp_par_times = [t["time_sec"]
+                                         for t in omp_parallel[par_name]]
+                        omp_task_times = [t["time_sec"]
+                                          for t in omp_tasks[task_name]]
 
                         if arts_par_times and arts_task_times and omp_par_times and omp_task_times:
-                            arts_overhead = sum(arts_par_times) / len(arts_par_times) - sum(arts_task_times) / len(arts_task_times)
-                            omp_overhead = sum(omp_par_times) / len(omp_par_times) - sum(omp_task_times) / len(omp_task_times)
+                            arts_overhead = sum(
+                                arts_par_times) / len(arts_par_times) - sum(arts_task_times) / len(arts_task_times)
+                            omp_overhead = sum(
+                                omp_par_times) / len(omp_par_times) - sum(omp_task_times) / len(omp_task_times)
 
-                            console.print(f"\n  Overhead Analysis (parallel.{par_name} - task.{task_name}):")
-                            console.print(f"    CARTS overhead: {arts_overhead:.6f}s")
-                            console.print(f"    OMP overhead:   {omp_overhead:.6f}s")
+                            console.print(
+                                f"\n  Overhead Analysis (parallel.{par_name} - task.{task_name}):")
+                            console.print(
+                                f"    CARTS overhead: {arts_overhead:.6f}s")
+                            console.print(
+                                f"    OMP overhead:   {omp_overhead:.6f}s")
 
     # Summary
     if analysis_results:
@@ -2662,18 +3224,27 @@ def analyze(
         # Overall interpretation
         console.print("\n[bold]Interpretation:[/]")
         if geomean_eta <= 1.05:
-            console.print("[green]✓ Delayed optimizations have minimal impact.[/]")
-            console.print("  LLVM -O3 successfully recovers most optimizations.")
+            console.print(
+                "[green]✓ Delayed optimizations have minimal impact.[/]")
+            console.print(
+                "  LLVM -O3 successfully recovers most optimizations.")
         elif geomean_eta <= 1.2:
-            console.print("[yellow]⚠ Minor performance impact from delayed optimizations.[/]")
-            console.print("  Some optimization opportunities are lost at MLIR level.")
+            console.print(
+                "[yellow]⚠ Minor performance impact from delayed optimizations.[/]")
+            console.print(
+                "  Some optimization opportunities are lost at MLIR level.")
         else:
-            console.print("[red]✗ Significant performance degradation detected.[/]")
-            console.print("  Delayed MLIR optimizations hurt sequential kernel performance.")
-            console.print("  Consider investigating optimization ordering in CARTS pipeline.")
+            console.print(
+                "[red]✗ Significant performance degradation detected.[/]")
+            console.print(
+                "  Delayed MLIR optimizations hurt sequential kernel performance.")
+            console.print(
+                "  Consider investigating optimization ordering in CARTS pipeline.")
     else:
-        console.print("\n[yellow]No parallel/task timing data found in results.[/]")
-        console.print("Make sure benchmarks use CARTS_PARALLEL_TIMER_* and CARTS_TASK_TIMER_* macros.")
+        console.print(
+            "\n[yellow]No parallel/task timing data found in results.[/]")
+        console.print(
+            "Make sure benchmarks use CARTS_PARALLEL_TIMER_* and CARTS_TASK_TIMER_* macros.")
 
 
 if __name__ == "__main__":
