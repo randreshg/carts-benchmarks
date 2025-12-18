@@ -31,7 +31,23 @@ carts benchmarks run polybench/3mm --trace --size=large
 | 2mm | 1.56s | 2.01s | **1.29x** | 418 |
 | **3mm** | **8.60s** | **3.57s** | **0.42x** | 20 |
 
-**3mm is 2.4x SLOWER than OpenMP!**
+**Note:** 3mm performance is extremely sensitive to matmul loop shape. Without
+cache/SIMD-friendly transforms, ARTS can be significantly slower than OpenMP.
+
+---
+
+## Update: Matmul Loop Transforms (Stage 6)
+
+ARTS now has a Stage 6 matmul-focused pass (`arts-loop-transforms`) that:
+- Rewrites SSA dot-product matmuls into an update form (`k` outer / `j` inner) with `j` tiling.
+- Recognizes the post-loop-reordering update form (common in 3mm) and **hoists `A[i,k]` out of the inner `j` loop**, optionally tiling `j`.
+
+### Confirm it triggers
+
+```bash
+# Stop after Stage 6 and show both passes
+carts run 3mm.mlir --loop-reordering --debug-only=loop_reordering,loop_transforms 2>&1
+```
 
 ---
 

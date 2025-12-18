@@ -36,8 +36,14 @@ Walk through these steps and fix any problem that you find in the way
       carts run 2mm.mlir --concurrency-opt &> 2mm_concurrency_opt.mlir
     ```
 
-4. **Finally lets carts execute and check**
+5. **Finally lets carts execute and check**
 ```bash
     carts execute 2mm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./2mm_arts
+```
+
+6. **Run it with carts example and check**
+
+```bash
+    carts benchmarks run polybench/2mm
 ```
