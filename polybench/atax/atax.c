@@ -18,8 +18,8 @@
 
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 4000. */
-#include "atax.h"
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "atax.h"
 
 /* Array initialization. */
 static void init_array(int nx, int ny, DATA_TYPE **A, DATA_TYPE *x) {
@@ -70,9 +70,15 @@ static void kernel_atax(int nx, int ny, DATA_TYPE **A, DATA_TYPE *x,
 }
 
 int main(int argc, char **argv) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   /* Retrieve problem size. */
   int nx = NX;
   int ny = NY;
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("atax");
 
   /* Variable declaration/allocation. */
   DATA_TYPE **A = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
@@ -91,15 +97,19 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("kernel_atax");
+  CARTS_KERNEL_TIMER_START("atax");
   kernel_atax(nx, ny, A, x, y, tmp);
-  CARTS_KERNEL_TIMER_STOP("kernel_atax");
+  CARTS_KERNEL_TIMER_STOP("atax");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  /* Compute checksum inline */
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  /* Verification (not timed) */
   double checksum = 0.0;
   for (int i = 0; i < ny; i++) {
     checksum += y[i];

@@ -69,7 +69,7 @@ SKIP_DIRS = {"common", "include", "src", "utilities",
 
 
 def filter_benchmark_output(output: str) -> str:
-    """Extract only CARTS benchmark output lines (kernel timing, parallel/task timing, checksum).
+    """Extract only CARTS benchmark output lines (init/e2e/kernel timing, parallel/task timing, checksum).
 
     Filters out verbose ARTS runtime debug logs and keeps only benchmark-relevant output.
     """
@@ -79,6 +79,8 @@ def filter_benchmark_output(output: str) -> str:
     for line in output.splitlines():
         # Keep lines that match benchmark output patterns
         if (line.startswith("kernel.") or
+            line.startswith("e2e.") or
+            line.startswith("init.") or
             line.startswith("parallel.") or
             line.startswith("task.") or
             line.startswith("checksum:") or
@@ -201,22 +203,28 @@ class RunResult:
     stderr: str
     checksum: Optional[str] = None
     kernel_timings: Dict[str, float] = field(default_factory=dict)
+    e2e_timings: Dict[str, float] = field(default_factory=dict)
+    init_timings: Dict[str, float] = field(default_factory=dict)
     parallel_task_timing: Optional[ParallelTaskTiming] = None
 
 
 @dataclass
 class TimingResult:
     """Timing comparison between ARTS and OpenMP."""
-    arts_time_sec: float  # Basis used for speedup (kernel if available, else total)
+    arts_time_sec: float  # Basis used for speedup (e2e if available, else kernel, else total)
     omp_time_sec: float
     speedup: float  # omp_time / arts_time (>1 = ARTS faster)
     note: str
     # Additional context
     arts_kernel_sec: Optional[float] = None
     omp_kernel_sec: Optional[float] = None
+    arts_e2e_sec: Optional[float] = None
+    omp_e2e_sec: Optional[float] = None
+    arts_init_sec: Optional[float] = None
+    omp_init_sec: Optional[float] = None
     arts_total_sec: float = 0.0
     omp_total_sec: float = 0.0
-    speedup_basis: str = "total"  # "kernel" or "total"
+    speedup_basis: str = "total"  # "e2e", "kernel", or "total"
 
 
 @dataclass
@@ -277,6 +285,7 @@ class BenchmarkResult:
     artifacts: Artifacts
     timestamp: str
     total_duration_sec: float
+    size_params: Optional[str] = None  # Actual CFLAGS used for this size (e.g., "-DNI=2000 -DNJ=2000")
 
 
 # ============================================================================
@@ -509,6 +518,54 @@ ports=1
     return temp_path
 
 
+def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
+    """Parse an ARTS config file (arts.cfg) into a key/value dict.
+
+    This parser is intentionally simple: it ignores section headers and
+    supports `key=value` lines, stripping whitespace and inline comments.
+    """
+    if not path or not path.exists():
+        return {}
+
+    values: Dict[str, str] = {}
+    try:
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.startswith(";"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            # Strip common inline comments.
+            value = value.split("#", 1)[0].split(";", 1)[0].strip()
+            if key:
+                values[key] = value
+    except Exception:
+        return {}
+    return values
+
+
+def get_arts_cfg_int(path: Optional[Path], key: str) -> Optional[int]:
+    vals = parse_arts_cfg(path)
+    if key not in vals:
+        return None
+    try:
+        return int(vals[key])
+    except Exception:
+        return None
+
+
+def get_arts_cfg_str(path: Optional[Path], key: str) -> Optional[str]:
+    vals = parse_arts_cfg(path)
+    v = vals.get(key)
+    return v if v else None
+
+
 # Counter level mapping
 COUNTER_LEVELS = {
     0: "off",       # No counters (counter.profile-none.cfg)
@@ -626,11 +683,13 @@ def copy_build_artifacts(
     bench_path: Path,
     config_dir: Path,
     artifacts_dir: Path,
+    *,
+    arts_cfg_used: Optional[Path] = None,
 ) -> Dict[str, Optional[str]]:
     """Copy build artifacts to results directory.
 
     Copies:
-    - arts.cfg -> config_dir/ (build INPUT)
+    - arts.cfg (used) -> config_dir/ (build INPUT)
     - .carts-metadata.json -> artifacts_dir/ (compiler metadata)
     - *_arts_metadata.mlir -> artifacts_dir/ (MLIR with metadata)
     - *.mlir -> artifacts_dir/ (other MLIR files)
@@ -643,11 +702,12 @@ def copy_build_artifacts(
     """
     paths: Dict[str, Optional[str]] = {}
 
-    # Copy arts.cfg to config root (it's the build INPUT)
-    arts_cfg = bench_path / "arts.cfg"
-    if arts_cfg.exists():
+    # Copy arts.cfg to config root (it's the build INPUT).
+    # Prefer the effective config actually used for this build/run.
+    cfg_src = arts_cfg_used if arts_cfg_used and arts_cfg_used.exists() else (bench_path / "arts.cfg")
+    if cfg_src.exists():
         dest = config_dir / "arts.cfg"
-        shutil.copy2(arts_cfg, dest)
+        shutil.copy2(cfg_src, dest)
         paths["arts_config"] = str(dest)
 
     # Copy compiler metadata to artifacts/
@@ -678,7 +738,8 @@ def copy_build_artifacts(
             dest = artifacts_dir / exe.name
             shutil.copy2(exe, dest)
             paths["executable_arts"] = str(dest)
-    for exe in bench_path.glob("*_omp"):
+    # OpenMP reference binaries usually live under build/ (common/carts.mk).
+    for exe in list(bench_path.glob("*_omp")) + list((bench_path / "build").glob("*_omp")):
         if exe.is_file():
             dest = artifacts_dir / exe.name
             shutil.copy2(exe, dest)
@@ -782,6 +843,41 @@ class BenchmarkRunner:
 
         return None
 
+    def get_size_params(self, bench_path: Path, size: str) -> Optional[str]:
+        """Extract the CFLAGS for a given size from the Makefile.
+
+        Returns the actual -D flags used (e.g., "-DNI=2000 -DNJ=2000") or None if not found.
+        """
+        makefile = bench_path / "Makefile"
+        if not makefile.exists():
+            return None
+
+        content = makefile.read_text()
+
+        # Map size to CFLAGS variable name
+        size_var_map = {
+            "small": "SMALL_CFLAGS",
+            "medium": "MEDIUM_CFLAGS",
+            "large": "LARGE_CFLAGS",
+            "extralarge": "EXTRALARGE_CFLAGS",
+            "mini": "MINI_CFLAGS",
+            "standard": "STANDARD_CFLAGS",
+        }
+
+        var_name = size_var_map.get(size.lower())
+        if not var_name:
+            return None
+
+        # Look for VAR_NAME ?= ... or VAR_NAME := ...
+        import re
+        pattern = rf'^{var_name}\s*[?:]?=\s*(.+)$'
+        for line in content.splitlines():
+            match = re.match(pattern, line.strip())
+            if match:
+                return match.group(1).strip()
+
+        return None
+
     def build_benchmark(
         self,
         name: str,
@@ -814,38 +910,30 @@ class BenchmarkRunner:
             "small": "small",
             "medium": "medium",
             "large": "large",
+            "extralarge": "extralarge",
             "mini": "mini",
             "standard": "standard",
         }
 
         # Build command using make
+        # Use granular targets ({size}-arts, {size}-openmp) defined in common/carts.mk
         if variant == "openmp":
-            # Build only OpenMP variant - pass size via CFLAGS, not make target
-            # This ensures OMP builds are independent of ARTS builds
-            size_flags = {
-                "small": "-DSMALL_DATASET",
-                "mini": "-DMINI_DATASET",
-                "medium": "-DSTANDARD_DATASET",
-                "standard": "-DSTANDARD_DATASET",
-                "large": "-DLARGE_DATASET",
-            }
-            all_cflags = size_flags.get(size, "")
+            # Build only OpenMP variant using granular target
+            if size in size_targets:
+                cmd = ["make", f"{size}-openmp"]
+            else:
+                cmd = ["make", "openmp"]
             if cflags:
-                all_cflags = f"{all_cflags} {cflags}".strip()
-            cmd = ["make", "openmp"]
-            if all_cflags:
-                cmd.append(f"CFLAGS={all_cflags}")
+                cmd.append(f"CFLAGS={cflags}")
         else:
             # Build ARTS variant (full pipeline)
             if size in size_targets:
-                # Size target builds both all and openmp
-                cmd = ["make", size]
-                if cflags:
-                    cmd.append(f"CFLAGS={cflags}")
+                # Use granular size-arts target for ARTS-only builds
+                cmd = ["make", f"{size}-arts"]
             else:
                 cmd = ["make", "all"]
-                if cflags:
-                    cmd.append(f"CFLAGS={cflags}")
+            if cflags:
+                cmd.append(f"CFLAGS={cflags}")
 
         # Add ARTS config override if provided
         if arts_config and variant != "openmp":
@@ -937,8 +1025,8 @@ class BenchmarkRunner:
         counter_dir: Optional[Path] = None,
         timeout: int = DEFAULT_TIMEOUT,
         omp_threads: Optional[int] = None,
-        launcher: str = "ssh",
-        node_count: int = 1,
+        launcher: Optional[str] = None,
+        node_count: Optional[int] = None,
         weak_scaling: bool = False,
         base_size: Optional[int] = None,
         runs: int = 1,
@@ -950,9 +1038,9 @@ class BenchmarkRunner:
             omp_threads: If specified, use this fixed thread count for OpenMP
                         instead of matching ARTS thread count. Useful for
                         comparing ARTS scaling against OpenMP at its optimal.
-            launcher: ARTS launcher type (ssh, slurm, lsf, local). For Slurm,
-                     this controls how the executable is invoked (via srun).
-            node_count: Number of nodes for distributed execution.
+            launcher: Optional override for launcher (default: from arts.cfg).
+                      For Slurm, this controls how the executable is invoked (via srun).
+            node_count: Optional override for nodeCount (default: from arts.cfg).
             weak_scaling: If True, scale problem size with parallelism.
             base_size: Base problem size for weak scaling.
             runs: Number of times to run each configuration.
@@ -968,6 +1056,19 @@ class BenchmarkRunner:
         if self.clean:
             self.clean_benchmark(name)
 
+        bench_path = self.benchmarks_dir / name
+
+        # Default: use the benchmark's own arts.cfg as the base config.
+        if base_config is None:
+            candidate = bench_path / "arts.cfg"
+            if candidate.exists():
+                base_config = candidate
+
+        base_nodes = get_arts_cfg_int(base_config, "nodeCount") or 1
+        base_launcher = get_arts_cfg_str(base_config, "launcher") or "ssh"
+        desired_nodes = node_count if node_count is not None else base_nodes
+        desired_launcher = launcher if launcher is not None else base_launcher
+
         # Create timestamped experiment directory ONCE per experiment
         # Both JSON results and artifacts will be stored together
         experiment_dir = None
@@ -978,7 +1079,7 @@ class BenchmarkRunner:
         for threads in threads_list:
             # Generate arts.cfg with thread count, launcher, and node count
             arts_cfg = generate_arts_config(
-                base_config, threads, counter_dir, launcher, node_count
+                base_config, threads, counter_dir, desired_launcher, desired_nodes
             )
 
             # Compute effective cflags (may include weak scaling size overrides)
@@ -987,7 +1088,7 @@ class BenchmarkRunner:
                 # Note: complexity is determined inside get_weak_scaling_cflags
                 # based on BENCHMARK_SIZE_PARAMS lookup
                 weak_cflags = get_weak_scaling_cflags(
-                    name, base_size, threads, node_count, base_parallelism=1
+                    name, base_size, threads, desired_nodes, base_parallelism=1
                 )
                 if weak_cflags:
                     effective_cflags = f"{cflags} {weak_cflags}".strip()
@@ -996,6 +1097,10 @@ class BenchmarkRunner:
             # Use omp_threads if specified, otherwise match ARTS threads
             actual_omp_threads = omp_threads if omp_threads else threads
             env = {"OMP_NUM_THREADS": str(actual_omp_threads)}
+            if "OMP_WAIT_POLICY" not in os.environ:
+                env["OMP_WAIT_POLICY"] = "ACTIVE"
+            if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
+                env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
 
             # Build both variants ONCE per thread config (with potentially different cflags per thread count)
             build_arts = self.build_benchmark(
@@ -1003,14 +1108,12 @@ class BenchmarkRunner:
             build_omp = self.build_benchmark(
                 name, size, "openmp", None, effective_cflags)
 
-            bench_path = self.benchmarks_dir / name
-
             # Create config object
             config = BenchmarkConfig(
                 arts_threads=threads,
-                arts_nodes=node_count,
+                arts_nodes=desired_nodes,
                 omp_threads=actual_omp_threads,
-                launcher=launcher,
+                launcher=desired_launcher,
             )
 
             # Create artifact directories if output specified (ONCE per config)
@@ -1022,7 +1125,7 @@ class BenchmarkRunner:
                 )
                 # Copy build artifacts ONCE per config
                 artifact_paths = copy_build_artifacts(
-                    bench_path, config_dir, result_artifacts_dir)
+                    bench_path, config_dir, result_artifacts_dir, arts_cfg_used=arts_cfg)
 
             # Run multiple times per configuration
             for run_num in range(1, runs + 1):
@@ -1052,7 +1155,8 @@ class BenchmarkRunner:
                 # ARTS reads config from: 1) artsConfig env var, 2) ./arts.cfg in CWD
                 # Without this, runtime may use wrong config (thread count mismatch)
                 if build_arts.status == Status.PASS and build_arts.executable:
-                    arts_env = {"artsConfig": str(arts_cfg)}
+                    arts_env = dict(env)
+                    arts_env["artsConfig"] = str(arts_cfg)
                     run_arts = self.run_benchmark(
                         build_arts.executable,
                         timeout,
@@ -1143,6 +1247,7 @@ class BenchmarkRunner:
                     artifacts=artifacts,
                     timestamp=datetime.now().isoformat(),
                     total_duration_sec=0.0,  # Will be calculated later
+                    size_params=self.get_size_params(bench_path, size),
                 )
 
                 results.append(result)
@@ -1256,6 +1361,8 @@ class BenchmarkRunner:
 
             checksum = self.extract_checksum(result.stdout)
             kernel_timings = self.extract_kernel_timings(result.stdout)
+            e2e_timings = self.extract_e2e_timings(result.stdout)
+            init_timings = self.extract_init_timings(result.stdout)
             parallel_task_timing = self.extract_parallel_task_timings(
                 result.stdout)
 
@@ -1267,6 +1374,8 @@ class BenchmarkRunner:
                 stderr=result.stderr,
                 checksum=checksum,
                 kernel_timings=kernel_timings,
+                e2e_timings=e2e_timings,
+                init_timings=init_timings,
                 parallel_task_timing=parallel_task_timing,
             )
         except subprocess.TimeoutExpired:
@@ -1314,11 +1423,37 @@ class BenchmarkRunner:
         Parses lines like 'kernel.relu: 0.001234s' into a dict.
         """
         timings = {}
-        pattern = r"kernel\.(\w+):\s*([0-9.]+)s"
-        for match in re.finditer(pattern, output):
-            kernel_name = match.group(1)
+        pattern = r"^\s*kernel\.([^:]+):\s*([0-9.]+)s\s*$"
+        for match in re.finditer(pattern, output, re.MULTILINE):
+            kernel_name = match.group(1).strip()
             kernel_time = float(match.group(2))
             timings[kernel_name] = kernel_time
+        return timings
+
+    def extract_e2e_timings(self, output: str) -> Dict[str, float]:
+        """Extract end-to-end timing info from benchmark output.
+
+        Parses lines like 'e2e.gemm: 0.001234567s' into a dict.
+        """
+        timings = {}
+        pattern = r"^\s*e2e\.([^:]+):\s*([0-9.]+)s\s*$"
+        for match in re.finditer(pattern, output, re.MULTILINE):
+            name = match.group(1).strip()
+            time_sec = float(match.group(2))
+            timings[name] = time_sec
+        return timings
+
+    def extract_init_timings(self, output: str) -> Dict[str, float]:
+        """Extract runtime initialization timing info from benchmark output.
+
+        Parses lines like 'init.omp: 0.000123456s' or 'init.arts: 0.123456789s'.
+        """
+        timings = {}
+        pattern = r"^\s*init\.([^:]+):\s*([0-9.]+)s\s*$"
+        for match in re.finditer(pattern, output, re.MULTILINE):
+            name = match.group(1).strip()
+            time_sec = float(match.group(2))
+            timings[name] = time_sec
         return timings
 
     def extract_parallel_task_timings(self, output: str) -> Optional[ParallelTaskTiming]:
@@ -1423,9 +1558,13 @@ class BenchmarkRunner:
         arts_result: RunResult,
         omp_result: RunResult,
     ) -> TimingResult:
-        """Calculate speedup preferring kernel timings when available."""
+        """Calculate speedup preferring E2E timings when available."""
         arts_kernel = get_kernel_time(arts_result)
         omp_kernel = get_kernel_time(omp_result)
+        arts_e2e = get_e2e_time(arts_result)
+        omp_e2e = get_e2e_time(omp_result)
+        arts_init = get_init_time(arts_result)
+        omp_init = get_init_time(omp_result)
         arts_total = arts_result.duration_sec
         omp_total = omp_result.duration_sec
 
@@ -1437,14 +1576,28 @@ class BenchmarkRunner:
                 note="Cannot calculate: one or both runs failed",
                 arts_kernel_sec=arts_kernel,
                 omp_kernel_sec=omp_kernel,
+                arts_e2e_sec=arts_e2e,
+                omp_e2e_sec=omp_e2e,
+                arts_init_sec=arts_init,
+                omp_init_sec=omp_init,
                 arts_total_sec=arts_total,
                 omp_total_sec=omp_total,
-                speedup_basis="kernel" if (
-                    arts_kernel is not None and omp_kernel is not None) else "total",
+                speedup_basis=(
+                    "e2e"
+                    if (arts_e2e is not None and omp_e2e is not None)
+                    else "kernel"
+                    if (arts_kernel is not None and omp_kernel is not None)
+                    else "total"
+                ),
             )
 
-        # Prefer kernel timings when both are available, otherwise fall back to total duration
-        if arts_kernel is not None and omp_kernel is not None:
+        # Prefer E2E timings when both are available, otherwise fall back to kernel timings,
+        # otherwise fall back to total process duration.
+        if arts_e2e is not None and omp_e2e is not None:
+            arts_time = arts_e2e
+            omp_time = omp_e2e
+            speedup_basis = "e2e"
+        elif arts_kernel is not None and omp_kernel is not None:
             arts_time = arts_kernel
             omp_time = omp_kernel
             speedup_basis = "kernel"
@@ -1472,6 +1625,10 @@ class BenchmarkRunner:
             note=note,
             arts_kernel_sec=arts_kernel,
             omp_kernel_sec=omp_kernel,
+            arts_e2e_sec=arts_e2e,
+            omp_e2e_sec=omp_e2e,
+            arts_init_sec=arts_init,
+            omp_init_sec=omp_init,
             arts_total_sec=arts_total,
             omp_total_sec=omp_total,
             speedup_basis=speedup_basis,
@@ -1493,7 +1650,8 @@ class BenchmarkRunner:
                 artifacts.executable_arts = str(exe)
                 break
 
-        for exe in bench_path.glob("*_omp"):
+        # OpenMP reference binaries usually live under build/ (common/carts.mk).
+        for exe in list(bench_path.glob("*_omp")) + list(build_dir.glob("*_omp") if build_dir.exists() else []):
             if exe.is_file() and os.access(exe, os.X_OK):
                 artifacts.executable_omp = str(exe)
                 break
@@ -1529,6 +1687,11 @@ class BenchmarkRunner:
         timeout: int = DEFAULT_TIMEOUT,
         verify: bool = True,
         arts_config: Optional[Path] = None,
+        threads_override: Optional[int] = None,
+        node_count_override: Optional[int] = None,
+        launcher_override: Optional[str] = None,
+        omp_threads_override: Optional[int] = None,
+        counter_dir: Optional[Path] = None,
         phase_callback: Optional[Callable[[Phase], None]] = None,
         partial_results: Optional[Dict[str, Any]] = None,
     ) -> BenchmarkResult:
@@ -1544,6 +1707,38 @@ class BenchmarkRunner:
         bench_path = self.benchmarks_dir / name
         suite = name.split("/")[0] if "/" in name else ""
 
+        # Determine the effective ARTS config for this benchmark.
+        # Default: use the benchmark's own arts.cfg (if present).
+        base_cfg = arts_config
+        if base_cfg is None:
+            candidate = bench_path / "arts.cfg"
+            if candidate.exists():
+                base_cfg = candidate
+
+        base_threads = get_arts_cfg_int(base_cfg, "threads") or 1
+        base_nodes = get_arts_cfg_int(base_cfg, "nodeCount") or 1
+        base_launcher = get_arts_cfg_str(base_cfg, "launcher") or "ssh"
+
+        desired_threads = threads_override if threads_override is not None else base_threads
+        desired_nodes = node_count_override if node_count_override is not None else base_nodes
+        desired_launcher = launcher_override if launcher_override is not None else base_launcher
+
+        # If the benchmark has no arts.cfg, always generate a minimal one to avoid
+        # ARTS dereferencing a missing launcher field.
+        need_generated = (base_cfg is None)
+        if threads_override is not None or node_count_override is not None or launcher_override is not None:
+            need_generated = True
+        if counter_dir is not None:
+            need_generated = True
+
+        effective_arts_cfg: Optional[Path]
+        if need_generated:
+            effective_arts_cfg = generate_arts_config(
+                base_cfg, desired_threads, counter_dir, desired_launcher, desired_nodes
+            )
+        else:
+            effective_arts_cfg = base_cfg
+
         # Clean before building to avoid stale artifacts
         if self.clean:
             self.clean_benchmark(name)
@@ -1551,14 +1746,14 @@ class BenchmarkRunner:
         # Build ARTS version
         if phase_callback:
             phase_callback(Phase.BUILD_ARTS)
-        build_arts = self.build_benchmark(name, size, "arts", arts_config)
+        build_arts = self.build_benchmark(name, size, "arts", effective_arts_cfg)
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
         # Build OpenMP version
         if phase_callback:
             phase_callback(Phase.BUILD_OMP)
-        build_omp = self.build_benchmark(name, size, "openmp", arts_config)
+        build_omp = self.build_benchmark(name, size, "openmp", None)
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
@@ -1567,14 +1762,27 @@ class BenchmarkRunner:
         arts_log = logs_dir / "arts.log" if self.debug >= 2 else None
         omp_log = logs_dir / "omp.log" if self.debug >= 2 else None
 
-        # Run ARTS version - pass artsConfig env var so runtime uses same config as compile
+        # Ensure init timing is reported and align OMP wait/spin policy with ARTS.
+        common_env: Dict[str, str] = {}
+        if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
+            common_env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
+
+        # Run ARTS version - pass artsConfig env var so runtime uses the effective config.
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
         if build_arts.status == Status.PASS and build_arts.executable:
-            arts_env = {"artsConfig": str(
-                arts_config)} if arts_config else None
+            arts_env = dict(common_env)
+            if effective_arts_cfg:
+                arts_env["artsConfig"] = str(effective_arts_cfg)
             run_arts = self.run_benchmark(
-                build_arts.executable, timeout, env=arts_env, log_file=arts_log)
+                build_arts.executable,
+                timeout,
+                env=arts_env,
+                launcher=desired_launcher,
+                node_count=desired_nodes,
+                threads=desired_threads,
+                log_file=arts_log,
+            )
         else:
             run_arts = RunResult(
                 status=Status.SKIP,
@@ -1590,8 +1798,15 @@ class BenchmarkRunner:
         if phase_callback:
             phase_callback(Phase.RUN_OMP)
         if build_omp.status == Status.PASS and build_omp.executable:
+            omp_env = dict(common_env)
+            actual_omp_threads = (
+                omp_threads_override if omp_threads_override is not None else desired_threads
+            )
+            omp_env["OMP_NUM_THREADS"] = str(actual_omp_threads)
+            if "OMP_WAIT_POLICY" not in os.environ:
+                omp_env["OMP_WAIT_POLICY"] = "ACTIVE"
             run_omp = self.run_benchmark(
-                build_omp.executable, timeout, log_file=omp_log)
+                build_omp.executable, timeout, env=omp_env, log_file=omp_log)
         else:
             run_omp = RunResult(
                 status=Status.SKIP,
@@ -1631,15 +1846,23 @@ class BenchmarkRunner:
 
         # Collect artifacts
         artifacts = self.collect_artifacts(bench_path)
+        if effective_arts_cfg:
+            artifacts.arts_config = str(effective_arts_cfg)
+        if arts_log is not None:
+            artifacts.arts_log = str(arts_log)
+        if omp_log is not None:
+            artifacts.omp_log = str(omp_log)
 
         total_duration = time.time() - start_time
 
         # Default config for single runs (no thread sweep)
         config = BenchmarkConfig(
-            arts_threads=1,
-            arts_nodes=1,
-            omp_threads=1,
-            launcher="local",
+            arts_threads=desired_threads,
+            arts_nodes=desired_nodes,
+            omp_threads=(
+                omp_threads_override if omp_threads_override is not None else desired_threads
+            ),
+            launcher=desired_launcher,
         )
 
         return BenchmarkResult(
@@ -1657,6 +1880,7 @@ class BenchmarkRunner:
             artifacts=artifacts,
             timestamp=timestamp,
             total_duration_sec=total_duration,
+            size_params=self.get_size_params(bench_path, size),
         )
 
     def run_all(
@@ -1666,6 +1890,11 @@ class BenchmarkRunner:
         timeout: int = DEFAULT_TIMEOUT,
         verify: bool = True,
         arts_config: Optional[Path] = None,
+        threads_override: Optional[int] = None,
+        node_count_override: Optional[int] = None,
+        launcher_override: Optional[str] = None,
+        omp_threads_override: Optional[int] = None,
+        counter_dir: Optional[Path] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -1677,7 +1906,17 @@ class BenchmarkRunner:
             # Quiet mode - no live display
             for bench in benchmarks:
                 result = self.run_single(
-                    bench, size, timeout, verify, arts_config)
+                    bench,
+                    size,
+                    timeout,
+                    verify,
+                    arts_config,
+                    threads_override,
+                    node_count_override,
+                    launcher_override,
+                    omp_threads_override,
+                    counter_dir,
+                )
                 results_list.append(result)
             self.results = results_list
             return results_list
@@ -1711,7 +1950,19 @@ class BenchmarkRunner:
 
                 # Run benchmark with phase callback and partial results storage
                 result = self.run_single(
-                    bench, size, timeout, verify, arts_config, phase_callback, current_partial[0])
+                    bench,
+                    size,
+                    timeout,
+                    verify,
+                    arts_config,
+                    threads_override,
+                    node_count_override,
+                    launcher_override,
+                    omp_threads_override,
+                    counter_dir,
+                    phase_callback,
+                    current_partial[0],
+                )
 
                 # Update results and refresh display
                 results_dict[bench] = result
@@ -1753,7 +2004,7 @@ class BenchmarkRunner:
                         timeout,
                         verify,
                         str(arts_config) if arts_config else None,
-                        self.clean,
+                        clean=self.clean,
                     ): bench
                     for bench in benchmarks
                 }
@@ -1787,7 +2038,7 @@ class BenchmarkRunner:
                         timeout,
                         verify,
                         str(arts_config) if arts_config else None,
-                        self.clean,
+                        clean=self.clean,
                     ): bench
                     for bench in benchmarks
                 }
@@ -1861,6 +2112,7 @@ class BenchmarkRunner:
             artifacts=Artifacts(benchmark_dir=str(bench_path)),
             timestamp=datetime.now().isoformat(),
             total_duration_sec=0.0,
+            size_params=self.get_size_params(bench_path, size),
         )
 
     def clean_benchmark(self, name: str) -> bool:
@@ -1906,6 +2158,11 @@ def _run_single_worker(
     timeout: int,
     verify: bool,
     arts_config: Optional[str],
+    threads_override: Optional[int] = None,
+    node_count_override: Optional[int] = None,
+    launcher_override: Optional[str] = None,
+    omp_threads_override: Optional[int] = None,
+    counter_dir: Optional[str] = None,
     clean: bool = True,
 ) -> BenchmarkResult:
     """Worker function for parallel benchmark execution."""
@@ -1918,6 +2175,11 @@ def _run_single_worker(
         timeout,
         verify,
         Path(arts_config) if arts_config else None,
+        threads_override,
+        node_count_override,
+        launcher_override,
+        omp_threads_override,
+        Path(counter_dir) if counter_dir else None,
     )
 
 
@@ -1974,6 +2236,26 @@ def get_kernel_time(run_result: RunResult) -> Optional[float]:
     return None
 
 
+def get_e2e_time(run_result: RunResult) -> Optional[float]:
+    """Get total end-to-end time from run result (sum of all e2e timings)."""
+    if run_result.e2e_timings:
+        return sum(run_result.e2e_timings.values())
+    return None
+
+
+def get_init_time(run_result: RunResult) -> Optional[float]:
+    """Get total runtime init time from run result (sum of all init timings)."""
+    if run_result.init_timings:
+        # Prefer the canonical keys when present to avoid accidental double counting
+        # if additional init signals are added (e.g., init.arts_runtime).
+        if "arts" in run_result.init_timings:
+            return run_result.init_timings["arts"]
+        if "omp" in run_result.init_timings:
+            return run_result.init_timings["omp"]
+        return sum(run_result.init_timings.values())
+    return None
+
+
 def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     """Format kernel time for display. Returns (total_time, display_string).
 
@@ -1992,19 +2274,42 @@ def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
         return total, f"{total:.4f}s [{count}]"
 
 
+def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
+    """Format end-to-end time for display. Returns (total_time, display_string)."""
+    if not run_result.e2e_timings:
+        return None, ""
+    total = sum(run_result.e2e_timings.values())
+    count = len(run_result.e2e_timings)
+    if count == 1:
+        return total, f"{total:.4f}s"
+    return total, f"{total:.4f}s [{count}]"
+
+
+def format_init_time(run_result: RunResult) -> Tuple[Optional[float], str]:
+    """Format runtime init time for display. Returns (total_time, display_string)."""
+    if not run_result.init_timings:
+        return None, ""
+    total = sum(run_result.init_timings.values())
+    count = len(run_result.init_timings)
+    if count == 1:
+        return total, f"{total:.4f}s"
+    return total, f"{total:.4f}s [{count}]"
+
+
 def create_results_table(results: List[BenchmarkResult]) -> Table:
     """Create a rich table from benchmark results."""
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
     table.add_column("Build", justify="center")
-    table.add_column("ARTS Kernel", justify="right")
-    table.add_column("OMP Kernel", justify="right")
+    table.add_column("ARTS E2E", justify="right")
+    table.add_column("OMP E2E", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
     has_fallback = False
     has_multi_kernel = False
+    has_multi_e2e = False
     for r in results:
         # Build status (combined)
         if r.build_arts.status == Status.PASS and r.build_omp.status == Status.PASS:
@@ -2012,29 +2317,38 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-        # Get kernel times with formatted display
-        arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+        arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
+        omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
 
-        # Track if any benchmark has multiple kernels
+        # Track if any benchmark has multiple kernels / e2e segments
         if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
             has_multi_kernel = True
-        omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+        if r.run_arts.e2e_timings and len(r.run_arts.e2e_timings) > 1:
+            has_multi_e2e = True
 
-        # Run status with kernel time
+        # Run status with e2e time (fall back to kernel, then total duration)
         if r.run_arts.status == Status.PASS:
-            if arts_kernel is not None:
-                run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}"
+            if arts_e2e is not None:
+                run_arts = f"{status_symbol(r.run_arts.status)} {arts_e2e_str}"
             else:
-                run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
+                arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+                if arts_kernel is not None:
+                    run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}*"
+                else:
+                    run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
                 has_fallback = True
         else:
             run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
 
         if r.run_omp.status == Status.PASS:
-            if omp_kernel is not None:
-                run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}"
+            if omp_e2e is not None:
+                run_omp = f"{status_symbol(r.run_omp.status)} {omp_e2e_str}"
             else:
-                run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
+                omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+                if omp_kernel is not None:
+                    run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}*"
+                else:
+                    run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
                 has_fallback = True
         else:
             run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
@@ -2049,22 +2363,17 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             correct = "[red]\u2717 NO[/]"
 
-        # Speedup based on kernel time if available
-        if arts_kernel is not None and omp_kernel is not None and arts_kernel > 0:
-            kernel_speedup = omp_kernel / arts_kernel
-            if kernel_speedup >= 1.0:
-                speedup = f"[green]{kernel_speedup:.2f}x[/]"
-            elif kernel_speedup >= 0.8:
-                speedup = f"[yellow]{kernel_speedup:.2f}x[/]"
+        # Speedup (basis chosen in calculate_timing)
+        if r.timing.speedup > 0:
+            if r.timing.speedup >= 1.0:
+                speedup = f"[green]{r.timing.speedup:.2f}x[/]"
+            elif r.timing.speedup >= 0.8:
+                speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
             else:
-                speedup = f"[red]{kernel_speedup:.2f}x[/]"
-        elif r.timing.speedup > 0:
-            # Fallback to total time speedup
-            if r.timing.speedup >= 1:
-                speedup = f"[green]{r.timing.speedup:.2f}x[/]*"
-            else:
-                speedup = f"[yellow]{r.timing.speedup:.2f}x[/]*"
-            has_fallback = True
+                speedup = f"[red]{r.timing.speedup:.2f}x[/]"
+            if r.timing.speedup_basis != "e2e":
+                speedup += "*"
+                has_fallback = True
         else:
             speedup = "[dim]-[/]"
 
@@ -2081,8 +2390,10 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
     captions = []
     if has_multi_kernel:
         captions.append("[N] = sum of N kernels")
+    if has_multi_e2e:
+        captions.append("[N] = sum of N e2e segments")
     if has_fallback:
-        captions.append("* = total time (kernel timing unavailable)")
+        captions.append("* = speedup/time not based on e2e")
     if captions:
         table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
 
@@ -2097,20 +2408,18 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
                  (r.run_arts.status == Status.PASS and not r.verification.correct))
     skipped = sum(1 for r in results if r.run_arts.status == Status.SKIP)
 
-    # Calculate geometric mean speedup based on kernel time
+    # Calculate geometric mean speedup based on e2e time (preferred)
     import math
     speedups = []
     for r in results:
-        arts_kernel = get_kernel_time(r.run_arts)
-        omp_kernel = get_kernel_time(r.run_omp)
-        if arts_kernel is not None and omp_kernel is not None and arts_kernel > 0:
-            speedups.append(omp_kernel / arts_kernel)
-        elif r.timing.speedup > 0:
+        if r.timing.speedup > 0:
             speedups.append(r.timing.speedup)
 
     if speedups:
+        bases = {r.timing.speedup_basis for r in results if r.timing.speedup > 0}
+        basis_label = next(iter(bases)) if len(bases) == 1 else "mixed"
         geomean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
-        speedup_text = f"Geometric mean speedup: [cyan]{geomean:.2f}x[/]"
+        speedup_text = f"Geometric mean speedup ({basis_label}): [cyan]{geomean:.2f}x[/]"
     else:
         speedup_text = ""
 
@@ -2127,6 +2436,976 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
     return Panel(content, title="Summary", border_style="blue")
 
 
+def _render_init_e2e_bar(init_sec: Optional[float], e2e_sec: Optional[float], max_total: float, width: int = 30) -> Text:
+    """Render a stacked bar: init (red) + e2e (green)."""
+    init_val = float(init_sec or 0.0)
+    e2e_val = float(e2e_sec or 0.0)
+    total = init_val + e2e_val
+
+    if max_total <= 0.0:
+        return Text("(no timing)", style="dim")
+
+    total_len = int(round(width * (total / max_total)))
+    init_len = int(round(width * (init_val / max_total)))
+    init_len = min(init_len, total_len)
+    e2e_len = max(0, total_len - init_len)
+
+    bar = Text()
+    if init_len > 0:
+        bar.append("█" * init_len, style="red")
+    if e2e_len > 0:
+        bar.append("█" * e2e_len, style="green")
+    if total_len < width:
+        bar.append(" " * (width - total_len), style="dim")
+
+    label = f" {total:.4f}s"
+    if init_sec is not None and e2e_sec is not None:
+        label += f" (init {init_val:.4f}s + e2e {e2e_val:.4f}s)"
+    elif e2e_sec is not None:
+        label += f" (e2e {e2e_val:.4f}s)"
+    elif init_sec is not None:
+        label += f" (init {init_val:.4f}s)"
+    else:
+        label += " (n/a)"
+    bar.append(label, style="dim")
+    return bar
+
+
+def create_init_e2e_bar_chart(results: List[BenchmarkResult], width: int = 30) -> Table:
+    """Create a stacked bar chart per benchmark: init + e2e (ARTS vs OMP)."""
+    table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+    table.add_column("Benchmark", style="cyan", no_wrap=True)
+    table.add_column("ARTS init+e2e", justify="left")
+    table.add_column("OMP init+e2e", justify="left")
+
+    # Scale bars by max (init+e2e) across all rows/runtimes.
+    max_total = 0.0
+    for r in results:
+        for init_sec, e2e_sec in (
+            (r.timing.arts_init_sec, r.timing.arts_e2e_sec),
+            (r.timing.omp_init_sec, r.timing.omp_e2e_sec),
+        ):
+            init_val = float(init_sec or 0.0)
+            e2e_val = float(e2e_sec or 0.0)
+            max_total = max(max_total, init_val + e2e_val)
+
+    for r in results:
+        table.add_row(
+            r.name,
+            _render_init_e2e_bar(r.timing.arts_init_sec, r.timing.arts_e2e_sec, max_total, width),
+            _render_init_e2e_bar(r.timing.omp_init_sec, r.timing.omp_e2e_sec, max_total, width),
+        )
+
+    table.caption = "[dim]Bar colors: init=red, e2e=green[/]"
+    return table
+
+
+def _sanitize_filename(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "benchmark"
+
+
+def _svg_escape(s: str) -> str:
+    return (s.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace("\"", "&quot;"))
+
+
+def _bar_segment_palette(n: int) -> List[str]:
+    # Tableau-ish distinct colors (good in print, ok for colorblind readers).
+    base = [
+        "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
+        "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC",
+    ]
+    if n <= len(base):
+        return base[:n]
+    out = list(base)
+    # Repeat with a slight offset in luminance by alternating a neutral gray.
+    while len(out) < n:
+        out.append("#777777")
+    return out[:n]
+
+
+def _write_per_benchmark_timeline_svg(
+    benchmark: str,
+    arts_init: Dict[str, float],
+    arts_e2e: Dict[str, float],
+    arts_kernel: Dict[str, float],
+    omp_init: Dict[str, float],
+    omp_e2e: Dict[str, float],
+    omp_kernel: Dict[str, float],
+    *,
+    speedup: Optional[float],
+    speedup_basis: str,
+    svg_path: Path,
+) -> None:
+    """Write a per-benchmark SVG with its own local x-scale (paper-friendly)."""
+    arts_init_total = sum(arts_init.values()) if arts_init else 0.0
+    omp_init_total = sum(omp_init.values()) if omp_init else 0.0
+    arts_e2e_total = sum(arts_e2e.values()) if arts_e2e else 0.0
+    omp_e2e_total = sum(omp_e2e.values()) if omp_e2e else 0.0
+    arts_kernel_total = sum(arts_kernel.values()) if arts_kernel else 0.0
+    omp_kernel_total = sum(omp_kernel.values()) if omp_kernel else 0.0
+    arts_other_total = max(arts_e2e_total - arts_kernel_total, 0.0)
+    omp_other_total = max(omp_e2e_total - omp_kernel_total, 0.0)
+
+    # Segment ordering: preserve observed order in ARTS, then append unseen OMP segments.
+    seg_order: List[str] = list(arts_e2e.keys())
+    for k in omp_e2e.keys():
+        if k not in seg_order:
+            seg_order.append(k)
+
+    # Total used for scaling (per runtime bars)
+    arts_total = arts_init_total + arts_e2e_total
+    omp_total = omp_init_total + omp_e2e_total
+    max_total = max(arts_total, omp_total, 1e-12)
+
+    # Layout
+    pad = 18
+    label_w = 220
+    bar_w = 640
+    right_w = 260
+    w = pad + label_w + bar_w + right_w + pad
+    title_h = 46
+    row_h = 34
+    bar_h = 14
+    h = title_h + row_h * 4 + 78
+
+    bar_x = pad + label_w
+    arts_y = title_h + 10
+    omp_y = arts_y + row_h
+    arts_b_y = omp_y + row_h + 12
+    omp_b_y = arts_b_y + row_h
+    axis_y = omp_b_y + 28
+
+    def xscale(v: float) -> float:
+        return bar_w * (v / max_total)
+
+    init_color = "#D62728"
+    other_color = "#9AA0A6"
+    kernel_color = "#1F77B4"
+    e2e_colors = _bar_segment_palette(max(1, len(seg_order)))
+    seg_color = {name: e2e_colors[i] for i, name in enumerate(seg_order)}
+
+    title = _svg_escape(benchmark)
+    lines: List[str] = []
+    lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">')
+    lines.append("<style>")
+    lines.append('text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; }')
+    lines.append('.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }')
+    lines.append(".dim { fill: #555; }")
+    lines.append(".light { fill: #888; }")
+    lines.append("</style>")
+
+    # Title
+    sp = ""
+    if speedup is not None and speedup > 0:
+        sp = f"  |  speedup={speedup:.2f}x ({_svg_escape(speedup_basis)})"
+    lines.append(f'<text x="{pad}" y="{22}" font-size="16">{title}{sp}</text>')
+    lines.append(f'<text x="{pad}" y="{40}" class="dim mono">local x-scale: 0–{max_total:.6f}s</text>')
+
+    # Legend (init + kernel/other + e2e segments)
+    legend_x = pad
+    legend_y = h - 22
+    lines.append(f'<rect x="{legend_x}" y="{legend_y-10}" width="12" height="8" fill="{init_color}" />')
+    lines.append(f'<text x="{legend_x+18}" y="{legend_y-3}" class="dim mono">init</text>')
+    lines.append(f'<rect x="{legend_x+70}" y="{legend_y-10}" width="12" height="8" fill="{kernel_color}" />')
+    lines.append(f'<text x="{legend_x+88}" y="{legend_y-3}" class="dim mono">kernel</text>')
+    lines.append(f'<rect x="{legend_x+160}" y="{legend_y-10}" width="12" height="8" fill="{other_color}" />')
+    lines.append(f'<text x="{legend_x+178}" y="{legend_y-3}" class="dim mono">other(e2e-kernel)</text>')
+
+    lx = legend_x + 360
+    for i, seg in enumerate(seg_order[:6]):  # keep legend compact
+        c = seg_color[seg]
+        lines.append(f'<rect x="{lx}" y="{legend_y-10}" width="12" height="8" fill="{c}" />')
+        lines.append(f'<text x="{lx+18}" y="{legend_y-3}" class="dim mono">{_svg_escape(seg)}</text>')
+        lx += 160
+        if lx > w - 240:
+            break
+
+    # Axis ticks (independent scale)
+    lines.append(f'<line x1="{bar_x}" y1="{axis_y}" x2="{bar_x+bar_w}" y2="{axis_y}" stroke="#bbb" stroke-width="1" />')
+    for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        x = bar_x + bar_w * t
+        lines.append(f'<line x1="{x}" y1="{axis_y-4}" x2="{x}" y2="{axis_y+4}" stroke="#bbb" stroke-width="1" />')
+        lines.append(f'<text x="{x}" y="{axis_y+18}" text-anchor="middle" class="light mono">{(max_total*t):.3f}</text>')
+
+    def draw_runtime_row(y: int, label: str, init_map: Dict[str, float], e2e_map: Dict[str, float]) -> None:
+        init_v = sum(init_map.values()) if init_map else 0.0
+        e2e_total = sum(e2e_map.values()) if e2e_map else 0.0
+        total_v = init_v + e2e_total
+
+        lines.append(f'<text x="{pad}" y="{y+12}" class="mono">{_svg_escape(label)}</text>')
+        # Background bar
+        lines.append(f'<rect x="{bar_x}" y="{y}" width="{bar_w}" height="{bar_h}" fill="#f1f1f1" />')
+
+        x0 = bar_x
+        if init_v > 0:
+            iw = xscale(init_v)
+            lines.append(f'<rect x="{x0}" y="{y}" width="{iw:.2f}" height="{bar_h}" fill="{init_color}"><title>init: {init_v:.6f}s</title></rect>')
+            x0 += iw
+
+        for seg in seg_order:
+            v = float(e2e_map.get(seg, 0.0))
+            if v <= 0:
+                continue
+            sw = xscale(v)
+            c = seg_color[seg]
+            pct = (v / total_v * 100.0) if total_v > 0 else 0.0
+            title_txt = f"{seg}: {v:.6f}s ({pct:.1f}%)"
+            lines.append(f'<rect x="{x0:.2f}" y="{y}" width="{sw:.2f}" height="{bar_h}" fill="{c}"><title>{_svg_escape(title_txt)}</title></rect>')
+            # Inline label only if it fits well (reduce clutter)
+            if sw >= 70:
+                lines.append(f'<text x="{x0 + sw/2:.2f}" y="{y+11}" text-anchor="middle" fill="#000" class="mono">{v:.3f}s</text>')
+            x0 += sw
+
+        # Totals on the right
+        tx = bar_x + bar_w + 10
+        lines.append(f'<text x="{tx}" y="{y+12}" class="dim mono">total {total_v:.6f}s</text>')
+        lines.append(f'<text x="{tx}" y="{y+26}" class="light mono">init {init_v:.6f}s + e2e {e2e_total:.6f}s</text>')
+
+    draw_runtime_row(arts_y, "ARTS", arts_init, arts_e2e)
+    draw_runtime_row(omp_y, "OMP", omp_init, omp_e2e)
+
+    # Breakdown rows: init + other(e2e-kernel) + kernel (consistent across benchmarks).
+    def draw_breakdown_row(y: int, label: str, init_v: float, other_v: float, kernel_v: float) -> None:
+        total_v = init_v + other_v + kernel_v
+        lines.append(f'<text x="{pad}" y="{y+12}" class="mono">{_svg_escape(label)}</text>')
+        lines.append(f'<rect x="{bar_x}" y="{y}" width="{bar_w}" height="{bar_h}" fill="#f1f1f1" />')
+
+        x0 = bar_x
+        if init_v > 0:
+            iw = xscale(init_v)
+            lines.append(f'<rect x="{x0}" y="{y}" width="{iw:.2f}" height="{bar_h}" fill="{init_color}"><title>init: {init_v:.6f}s</title></rect>')
+            x0 += iw
+        if other_v > 0:
+            ow = xscale(other_v)
+            lines.append(f'<rect x="{x0:.2f}" y="{y}" width="{ow:.2f}" height="{bar_h}" fill="{other_color}"><title>other (e2e-kernel): {other_v:.6f}s</title></rect>')
+            x0 += ow
+        if kernel_v > 0:
+            kw = xscale(kernel_v)
+            lines.append(f'<rect x="{x0:.2f}" y="{y}" width="{kw:.2f}" height="{bar_h}" fill="{kernel_color}"><title>kernel: {kernel_v:.6f}s</title></rect>')
+            x0 += kw
+
+        tx = bar_x + bar_w + 10
+        lines.append(f'<text x="{tx}" y="{y+12}" class="dim mono">total {total_v:.6f}s</text>')
+        lines.append(f'<text x="{tx}" y="{y+26}" class="light mono">init {init_v:.6f}s | other {other_v:.6f}s | kernel {kernel_v:.6f}s</text>')
+
+    draw_breakdown_row(arts_b_y, "ARTS breakdown", arts_init_total, arts_other_total, arts_kernel_total)
+    draw_breakdown_row(omp_b_y, "OMP breakdown", omp_init_total, omp_other_total, omp_kernel_total)
+
+    lines.append("</svg>")
+    svg_path.write_text("\n".join(lines))
+
+
+def _write_small_multiples_svg(groups: List[Dict[str, Any]], svg_path: Path) -> None:
+    """Write a multi-panel SVG: each benchmark panel has its own local x-scale."""
+    if not groups:
+        svg_path.write_text("")
+        return
+
+    pad = 18
+    panel_h = 120
+    w = 1200
+    h = 60 + panel_h * len(groups) + 30
+    lines: List[str] = []
+    lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">')
+    lines.append("<style>")
+    lines.append('text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; }')
+    lines.append('.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }')
+    lines.append(".dim { fill: #555; }")
+    lines.append(".light { fill: #888; }")
+    lines.append("</style>")
+    lines.append(f'<text x="{pad}" y="24" font-size="16">Init + E2E timeline (per-benchmark local scale)</text>')
+    lines.append(f'<text x="{pad}" y="44" class="dim mono">Note: each panel has an independent x-axis scale for readability.</text>')
+
+    y0 = 60
+    for i, g in enumerate(groups):
+        y = y0 + i * panel_h
+        # Reuse per-benchmark writer by inlining a simplified rendering into a group <g>
+        bench = str(g["benchmark"])
+        sp = g.get("speedup")
+        sp_basis = str(g.get("speedup_basis", "total"))
+        scale_max = float(g["scale_max"])
+
+        label_w = 240
+        bar_w = 720
+        right_w = 200
+        bar_x = pad + label_w
+        arts_y = y + 30
+        omp_y = y + 64
+        axis_y = y + 92
+
+        def xscale(v: float) -> float:
+            return bar_w * (v / max(scale_max, 1e-12))
+
+        # Panel background
+        lines.append(f'<rect x="{pad}" y="{y}" width="{w-2*pad}" height="{panel_h-6}" fill="#fafafa" stroke="#eee" />')
+
+        sp_txt = ""
+        if sp is not None and float(sp) > 0:
+            sp_txt = f"  speedup={float(sp):.2f}x ({_svg_escape(sp_basis)})"
+        lines.append(f'<text x="{pad+6}" y="{y+18}" class="mono">{_svg_escape(bench)}{sp_txt}</text>')
+        lines.append(f'<text x="{pad+6}" y="{y+34}" class="light mono">scale: 0–{scale_max:.4f}s</text>')
+
+        # Axis
+        lines.append(f'<line x1="{bar_x}" y1="{axis_y}" x2="{bar_x+bar_w}" y2="{axis_y}" stroke="#bbb" stroke-width="1" />')
+        for t in [0.0, 0.5, 1.0]:
+            x = bar_x + bar_w * t
+            lines.append(f'<line x1="{x}" y1="{axis_y-4}" x2="{x}" y2="{axis_y+4}" stroke="#bbb" stroke-width="1" />')
+            lines.append(f'<text x="{x}" y="{axis_y+18}" text-anchor="middle" class="light mono">{(scale_max*t):.3f}</text>')
+
+        # Draw rows using consistent segments (init + other + kernel)
+        init_color = "#D62728"
+        other_color = "#9AA0A6"
+        kernel_color = "#1F77B4"
+
+        def draw_row(y_row: int, label: str, segments: List[Tuple[str, float]], total: float) -> None:
+            lines.append(f'<text x="{pad+6}" y="{y_row+12}" class="mono">{_svg_escape(label)}</text>')
+            lines.append(f'<rect x="{bar_x}" y="{y_row}" width="{bar_w}" height="14" fill="#f1f1f1" />')
+            xcur = bar_x
+            for name, val in segments:
+                if val <= 0:
+                    continue
+                sw = xscale(val)
+                if name == "__init__":
+                    c = init_color
+                    title_txt = "init"
+                elif name == "__kernel__":
+                    c = kernel_color
+                    title_txt = "kernel"
+                else:
+                    c = other_color
+                    title_txt = "other (e2e-kernel)"
+                pct = (val / total * 100.0) if total > 0 else 0.0
+                lines.append(f'<rect x="{xcur:.2f}" y="{y_row}" width="{sw:.2f}" height="14" fill="{c}"><title>{_svg_escape(title_txt)}: {val:.6f}s ({pct:.1f}%)</title></rect>')
+                xcur += sw
+            lines.append(f'<text x="{bar_x+bar_w+10}" y="{y_row+12}" class="dim mono">{total:.4f}s</text>')
+
+        draw_row(arts_y, "ARTS", g["arts_segments"], g["arts_total"])
+        draw_row(omp_y, "OMP", g["omp_segments"], g["omp_total"])
+
+    lines.append("</svg>")
+    svg_path.write_text("\n".join(lines))
+
+
+def _write_speedup_bar_chart(rows: List[Dict[str, Any]], svg_path: Path) -> None:
+    """Write a single bar chart with all benchmarks/configs."""
+    valid = [
+        r
+        for r in rows
+        if r.get("speedup_mean") is not None and float(r["speedup_mean"]) > 0
+    ]
+    if not valid:
+        svg_path.write_text("")
+        return
+
+    width = 1200
+    bar_height = 30
+    gap = 12
+    pad = 150
+    height = 60 + len(valid) * (bar_height + gap)
+
+    sorted_rows = sorted(valid, key=lambda r: float(r["speedup_mean"]), reverse=True)
+    max_speedup = max(float(r["speedup_mean"]) for r in sorted_rows)
+    max_speedup = max(max_speedup, 1.2)
+
+    def x_pos(value: float) -> float:
+        return pad + (width - pad - 80) * min(value / max_speedup, 1.0)
+
+    lines: List[str] = []
+    lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">')
+    lines.append("<style>")
+    lines.append(
+        'text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; }'
+    )
+    lines.append(
+        '.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }'
+    )
+    lines.append(".dim { fill: #555; }")
+    lines.append("</style>")
+    lines.append(f'<text x="{pad}" y="24" font-size="16">Speedup (OMP / ARTS) per benchmark/configuration</text>')
+    lines.append(f'<text x="{pad}" y="42" class="dim mono">Bars > 1.0x → CARTS faster; < 1.0x → OpenMP wins. Multi-run mean ± std shown.</text>')
+    lines.append(f'<line x1="{pad}" y1="48" x2="{width-60}" y2="48" stroke="#ddd" stroke-width="1" />')
+
+    for idx, r in enumerate(sorted_rows):
+        y = 60 + idx * (bar_height + gap)
+        label = f"{r['benchmark']} (t={r['threads']}, n={r['nodes']}, omp={r['omp_threads']})"
+        sp = float(r["speedup_mean"])
+        sp_std = r.get("speedup_std") or 0.0
+        color = "#2CA02C" if sp >= 1.0 else "#D62728"
+        lines.append(f'<text x="8" y="{y + bar_height/2 + 4:.1f}" class="mono" text-anchor="start">{_svg_escape(label)}</text>')
+        bar_start = pad
+        bar_end = x_pos(sp)
+        lines.append(
+            f'<rect x="{bar_start}" y="{y}" width="{max(bar_end - bar_start, 1):.2f}" height="{bar_height}" fill="{color}" opacity="0.9">'
+        )
+        lines.append("</rect>")
+        if sp_std > 0:
+            err_start = x_pos(max(sp - float(sp_std), 0.0))
+            err_end = x_pos(sp + float(sp_std))
+            lines.append(
+                f'<line x1="{err_start:.2f}" y1="{y + bar_height/2:.2f}" x2="{err_end:.2f}" y2="{y + bar_height/2:.2f}" stroke="{color}" stroke-width="1.2" />'
+            )
+        lines.append(
+            f'<text x="{bar_end + 8:.2f}" y="{y + bar_height/2 + 4:.1f}" class="dim mono">{sp:.2f}x ± {float(sp_std):.2f}x</text>'
+        )
+
+    # x-axis
+    axis_y = height - 16
+    lines.append(f'<line x1="{pad}" y1="{axis_y}" x2="{width-80}" y2="{axis_y}" stroke="#bbb" stroke-width="1" />')
+    for t in [0.2, 0.5, 1.0, 2.0, max_speedup]:
+        if t > max_speedup:
+            continue
+        x = x_pos(t)
+        lines.append(f'<line x1="{x:.2f}" y1="{axis_y-4}" x2="{x:.2f}" y2="{axis_y+4}" stroke="#bbb" stroke-width="1" />')
+        lines.append(f'<text x="{x:.2f}" y="{axis_y+16}" text-anchor="middle" class="light mono">{t:.2f}x</text>')
+    if max_speedup >= 1.0:
+        x1 = x_pos(1.0)
+        lines.append(f'<line x1="{x1:.2f}" y1="48" x2="{x1:.2f}" y2="{axis_y}" stroke="#999" stroke-dasharray="4,3" stroke-width="1" />')
+        lines.append(f'<text x="{x1:.2f}" y="60" class="dim mono">1.0x</text>')
+
+    lines.append("</svg>")
+    svg_path.write_text("\n".join(lines))
+def generate_markdown_report(
+    results: List[BenchmarkResult],
+    report_md_path: Path,
+    chart_svg_path: Path,
+    *,
+    size: str,
+) -> Tuple[Path, Path]:
+    """Generate a Markdown report + companion SVG charts (paper-friendly)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    figures_dir = report_md_path.parent / f"{report_md_path.stem}_figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    speedup_svg_path = report_md_path.parent / f"{report_md_path.stem}_speedup_bar_chart.svg"
+
+    # Build per-benchmark groups (config-aware) and per-benchmark SVGs.
+    groups: Dict[Tuple, List[BenchmarkResult]] = {}
+    for r in results:
+        key = (r.name, r.config.arts_threads, r.config.arts_nodes, r.config.omp_threads, r.config.launcher)
+        groups.setdefault(key, []).append(r)
+
+    panel_groups: List[Dict[str, Any]] = []
+    per_svgs: List[Tuple[Tuple, Path]] = []
+
+    def _mean_std(vals: List[float]) -> Tuple[Optional[float], Optional[float]]:
+        if not vals:
+            return None, None
+        if len(vals) == 1:
+            return vals[0], 0.0
+        from statistics import mean, stdev
+        return mean(vals), stdev(vals)
+
+    def _fmt_ms(v: Optional[float]) -> str:
+        if v is None:
+            return "-"
+        return f"{v * 1e3:.3f}"
+
+    def _fmt_s(v: Optional[float]) -> str:
+        if v is None:
+            return "-"
+        return f"{v:.6f}"
+
+    def _fmt_mean_std_s(mean_v: Optional[float], std_v: Optional[float]) -> str:
+        if mean_v is None:
+            return "-"
+        if std_v is None:
+            return f"{mean_v:.6f}"
+        return f"{mean_v:.6f} ± {std_v:.6f}"
+
+    def _kv_lines(d: Dict[str, float]) -> str:
+        if not d:
+            return "-"
+        parts = [f"`{k}`={v:.6f}s" for k, v in sorted(d.items())]
+        return ", ".join(parts)
+
+    report_rows: List[Dict[str, Any]] = []
+
+    for key, runs in sorted(groups.items(), key=lambda kv: kv[0][0]):
+        r0 = runs[0]
+        bench = r0.name
+
+        # Aggregate timing stats across runs (mean±std) for paper reporting.
+        arts_init_vals = [float(r.run_arts.init_timings.get("arts")) for r in runs if r.run_arts.init_timings.get("arts") is not None]
+        omp_init_vals = [float(r.run_omp.init_timings.get("omp")) for r in runs if r.run_omp.init_timings.get("omp") is not None]
+        arts_e2e_vals = [sum(r.run_arts.e2e_timings.values()) for r in runs if r.run_arts.e2e_timings]
+        omp_e2e_vals = [sum(r.run_omp.e2e_timings.values()) for r in runs if r.run_omp.e2e_timings]
+        arts_kernel_vals = [sum(r.run_arts.kernel_timings.values()) for r in runs if r.run_arts.kernel_timings]
+        omp_kernel_vals = [sum(r.run_omp.kernel_timings.values()) for r in runs if r.run_omp.kernel_timings]
+
+        arts_init_mean, arts_init_std = _mean_std(arts_init_vals)
+        omp_init_mean, omp_init_std = _mean_std(omp_init_vals)
+        arts_e2e_mean, arts_e2e_std = _mean_std(arts_e2e_vals)
+        omp_e2e_mean, omp_e2e_std = _mean_std(omp_e2e_vals)
+        arts_kernel_mean, arts_kernel_std = _mean_std(arts_kernel_vals)
+        omp_kernel_mean, omp_kernel_std = _mean_std(omp_kernel_vals)
+
+        arts_other_mean = None if arts_e2e_mean is None or arts_kernel_mean is None else max(arts_e2e_mean - arts_kernel_mean, 0.0)
+        omp_other_mean = None if omp_e2e_mean is None or omp_kernel_mean is None else max(omp_e2e_mean - omp_kernel_mean, 0.0)
+
+        arts_total_mean = None if arts_init_mean is None or arts_e2e_mean is None else (arts_init_mean + arts_e2e_mean)
+        omp_total_mean = None if omp_init_mean is None or omp_e2e_mean is None else (omp_init_mean + omp_e2e_mean)
+        scale_max = max(float(arts_total_mean or 0.0), float(omp_total_mean or 0.0), 1e-12)
+
+        # Use segment maps from the first run for labeling. (If multiple runs, segment keys should match.)
+        arts_init_map = dict(r0.run_arts.init_timings)
+        omp_init_map = dict(r0.run_omp.init_timings)
+        arts_e2e_map = dict(r0.run_arts.e2e_timings)
+        omp_e2e_map = dict(r0.run_omp.e2e_timings)
+        arts_kernel_map = dict(r0.run_arts.kernel_timings)
+        omp_kernel_map = dict(r0.run_omp.kernel_timings)
+
+        # Per-benchmark SVG (local scale, detailed tooltips).
+        svg_name = f"{_sanitize_filename(bench)}_{r0.config.arts_threads}t_{r0.config.arts_nodes}n.svg"
+        svg_path = figures_dir / svg_name
+        _write_per_benchmark_timeline_svg(
+            bench,
+            arts_init_map,
+            arts_e2e_map,
+            arts_kernel_map,
+            omp_init_map,
+            omp_e2e_map,
+            omp_kernel_map,
+            speedup=(r0.timing.speedup if r0.timing.speedup > 0 else None),
+            speedup_basis=r0.timing.speedup_basis,
+            svg_path=svg_path,
+        )
+        per_svgs.append((key, svg_path))
+
+        # Multi-panel summary data (init + other(e2e-kernel) + kernel): consistent meaning across benchmarks.
+        arts_segments: List[Tuple[str, float]] = [
+            ("__init__", float(arts_init_mean or 0.0)),
+            ("__other__", float(arts_other_mean or 0.0)),
+            ("__kernel__", float(arts_kernel_mean or 0.0)),
+        ]
+        omp_segments: List[Tuple[str, float]] = [
+            ("__init__", float(omp_init_mean or 0.0)),
+            ("__other__", float(omp_other_mean or 0.0)),
+            ("__kernel__", float(omp_kernel_mean or 0.0)),
+        ]
+
+        panel_groups.append({
+            "benchmark": bench,
+            "speedup": (r0.timing.speedup if r0.timing.speedup > 0 else None),
+            "speedup_basis": r0.timing.speedup_basis,
+            "scale_max": scale_max,
+            "arts_segments": arts_segments,
+            "omp_segments": omp_segments,
+            "arts_total": sum(v for _, v in arts_segments),
+            "omp_total": sum(v for _, v in omp_segments),
+        })
+
+        # Report row (mean±std)
+        run_count = len(runs)
+        correct_count = sum(1 for r in runs if r.verification.correct)
+        arts_pass = sum(1 for r in runs if r.run_arts.status == Status.PASS)
+        omp_pass = sum(1 for r in runs if r.run_omp.status == Status.PASS)
+        speedup_vals = [r.timing.speedup for r in runs if r.timing.speedup > 0]
+        sp_mean, sp_std = _mean_std(speedup_vals)
+
+        report_rows.append({
+            "key": key,
+            "benchmark": bench,
+            "size_params": r0.size_params,
+            "threads": r0.config.arts_threads,
+            "nodes": r0.config.arts_nodes,
+            "omp_threads": r0.config.omp_threads,
+            "launcher": r0.config.launcher,
+            "run_count": run_count,
+            "arts_pass": arts_pass,
+            "omp_pass": omp_pass,
+            "correct_count": correct_count,
+            "speedup_basis": r0.timing.speedup_basis,
+            "speedup_mean": sp_mean,
+            "speedup_std": sp_std,
+            "arts_init_mean": arts_init_mean,
+            "arts_init_std": arts_init_std,
+            "arts_e2e_mean": arts_e2e_mean,
+            "arts_e2e_std": arts_e2e_std,
+            "arts_kernel_mean": arts_kernel_mean,
+            "arts_kernel_std": arts_kernel_std,
+            "arts_other_mean": arts_other_mean,
+            "omp_init_mean": omp_init_mean,
+            "omp_init_std": omp_init_std,
+            "omp_e2e_mean": omp_e2e_mean,
+            "omp_e2e_std": omp_e2e_std,
+            "omp_kernel_mean": omp_kernel_mean,
+            "omp_kernel_std": omp_kernel_std,
+            "omp_other_mean": omp_other_mean,
+            # First-run raw breakdowns (for segment listing)
+            "arts_init_map": arts_init_map,
+            "arts_e2e_map": arts_e2e_map,
+            "arts_kernel_map": arts_kernel_map,
+            "omp_init_map": omp_init_map,
+            "omp_e2e_map": omp_e2e_map,
+            "omp_kernel_map": omp_kernel_map,
+            "arts_status": r0.run_arts.status.value,
+            "omp_status": r0.run_omp.status.value,
+            "correct_note": r0.verification.note,
+        })
+
+    # Write the summary small-multiples SVG (each panel has its own scale).
+    _write_small_multiples_svg(panel_groups, chart_svg_path)
+
+    # Write a speedup scaling SVG (each benchmark has its own y-axis range).
+    _write_speedup_bar_chart(report_rows, speedup_svg_path)
+
+    # Markdown
+    lines: List[str] = []
+    lines.append("# CARTS Benchmarks Report")
+    lines.append("")
+    lines.append(f"- Timestamp: {now}")
+    lines.append(f"- Size: {size}")
+    lines.append(f"- Config groups: {len(groups)}")
+    lines.append(f"- Figures: `{figures_dir.name}/`")
+    lines.append("")
+    lines.append("## Summary Figure (local scale per benchmark)")
+    lines.append("")
+    lines.append(f"![init+e2e small multiples]({chart_svg_path.name})")
+    lines.append("")
+    lines.append("## Speedup Figure (local scale per benchmark)")
+    lines.append("")
+    lines.append(f"![speedup small multiples]({speedup_svg_path.name})")
+    lines.append("")
+    lines.append("## Results (mean ± std, seconds)")
+    lines.append("")
+    lines.append("| Benchmark | t | n | ARTS status | OMP status | ARTS init | ARTS e2e | ARTS kernel | ARTS other | OMP init | OMP e2e | OMP kernel | OMP other | Speedup | Correct |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|")
+    for row in report_rows:
+        speedup_txt = "-"
+        if row["speedup_mean"] is not None:
+            speedup_txt = _fmt_mean_std_s(row["speedup_mean"], row["speedup_std"]) + f" ({row['speedup_basis']})"
+
+        correct_txt = "-"
+        if row["correct_note"] == "Verification disabled":
+            correct_txt = "N/A"
+        else:
+            correct_txt = f"{row['correct_count']}/{row['run_count']}"
+
+        lines.append(
+            "| "
+            + f"{row['benchmark']} "
+            + f"| {row['threads']} "
+            + f"| {row['nodes']} "
+            + f"| {row['arts_status']} "
+            + f"| {row['omp_status']} "
+            + f"| {_fmt_mean_std_s(row['arts_init_mean'], row['arts_init_std'])} "
+            + f"| {_fmt_mean_std_s(row['arts_e2e_mean'], row['arts_e2e_std'])} "
+            + f"| {_fmt_mean_std_s(row['arts_kernel_mean'], row['arts_kernel_std'])} "
+            + f"| {_fmt_s(row['arts_other_mean'])} "
+            + f"| {_fmt_mean_std_s(row['omp_init_mean'], row['omp_init_std'])} "
+            + f"| {_fmt_mean_std_s(row['omp_e2e_mean'], row['omp_e2e_std'])} "
+            + f"| {_fmt_mean_std_s(row['omp_kernel_mean'], row['omp_kernel_std'])} "
+            + f"| {_fmt_s(row['omp_other_mean'])} "
+            + f"| {speedup_txt} "
+            + f"| {correct_txt} |"
+        )
+    lines.append("")
+    lines.append("Notes:")
+    lines.append("- `other = e2e - kernel` (clamped at 0).")
+    lines.append("- Figures use independent x-axis scaling per benchmark to preserve within-benchmark structure.")
+    lines.append("")
+    lines.append("## Missing Signals")
+    lines.append("")
+    lines.append("| Benchmark | Missing | Likely cause |")
+    lines.append("|---|---|---|")
+    any_missing = False
+    for row in report_rows:
+        missing: List[str] = []
+        if not row["arts_init_map"].get("arts"):
+            missing.append("ARTS init.arts")
+        if not row["arts_e2e_map"]:
+            missing.append("ARTS e2e.*")
+        if not row["omp_init_map"].get("omp"):
+            missing.append("OMP init.omp")
+        if not row["omp_e2e_map"]:
+            missing.append("OMP e2e.*")
+        if not missing:
+            continue
+        any_missing = True
+
+        cause = []
+        if row["arts_status"] != Status.PASS.value:
+            cause.append("ARTS run failed/crashed before printing timers")
+        if row["omp_status"] != Status.PASS.value:
+            cause.append("OMP run failed/crashed before printing timers")
+        if not cause:
+            cause.append("timing macros not enabled or benchmark not rebuilt")
+
+        lines.append(f"| {row['benchmark']} | {', '.join(missing)} | {', '.join(cause)} |")
+    if not any_missing:
+        lines.append("| (none) | - | - |")
+    lines.append("")
+    lines.append("## Per-Benchmark Figures")
+    lines.append("")
+    per_svg_lookup = {k: p for k, p in per_svgs}
+    for row in report_rows:
+        key = row["key"]
+        svg_path = per_svg_lookup.get(key)
+        bench = row["benchmark"]
+        lines.append(f"### {bench}")
+        lines.append("")
+        if svg_path is not None:
+            lines.append(f"![{bench}]({figures_dir.name}/{svg_path.name})")
+            lines.append("")
+        lines.append(f"- Config: `threads={row['threads']}`, `nodes={row['nodes']}`, `omp_threads={row['omp_threads']}`, `launcher={row['launcher']}`, `runs={row['run_count']}`")
+        lines.append(f"- Size params: `{row['size_params'] or 'N/A'}`")
+        lines.append(f"- Status: `ARTS={row['arts_status']}`, `OMP={row['omp_status']}`")
+        lines.append(f"- ARTS init breakdown: {_kv_lines(row['arts_init_map'])}")
+        lines.append(f"- ARTS e2e breakdown: {_kv_lines(row['arts_e2e_map'])}")
+        lines.append(f"- ARTS kernel breakdown: {_kv_lines(row['arts_kernel_map'])}")
+        lines.append(f"- OMP init breakdown: {_kv_lines(row['omp_init_map'])}")
+        lines.append(f"- OMP e2e breakdown: {_kv_lines(row['omp_e2e_map'])}")
+        lines.append(f"- OMP kernel breakdown: {_kv_lines(row['omp_kernel_map'])}")
+        lines.append("")
+
+    report_md_path.write_text("\n".join(lines))
+    return chart_svg_path, speedup_svg_path
+
+
+def generate_markdown_report_from_json(
+    data: Dict[str, Any],
+    *,
+    input_path: Path,
+    output_md: Path,
+) -> Tuple[Path, Path, Path]:
+    """Generate a Markdown+SVG report from an exported results JSON."""
+    output_md.parent.mkdir(parents=True, exist_ok=True)
+    figures_dir = output_md.parent / f"{output_md.stem}_figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    chart_svg_path = output_md.parent / f"{output_md.stem}_init_e2e_small_multiples.svg"
+    out_speedup_svg = output_md.parent / f"{output_md.stem}_speedup_bar_chart.svg"
+
+    results = data.get("results", [])
+    if not results:
+        output_md.write_text("# CARTS Benchmarks Report\n\n(no results)\n")
+        _write_small_multiples_svg([], chart_svg_path)
+        _write_speedup_bar_chart([], out_speedup_svg)
+        return chart_svg_path, out_speedup_svg, figures_dir
+
+    # Group by config (name + threads + nodes + omp_threads + launcher)
+    grouped: Dict[Tuple, List[Dict[str, Any]]] = {}
+    for r in results:
+        cfg = r.get("config", {})
+        key = (
+            r.get("name", ""),
+            cfg.get("arts_threads"),
+            cfg.get("arts_nodes"),
+            cfg.get("omp_threads"),
+            cfg.get("launcher"),
+        )
+        grouped.setdefault(key, []).append(r)
+
+    def mean_std(vals: List[float]) -> Tuple[Optional[float], Optional[float]]:
+        if not vals:
+            return None, None
+        if len(vals) == 1:
+            return vals[0], 0.0
+        from statistics import mean, stdev
+        return mean(vals), stdev(vals)
+
+    def sum_map(m: Any) -> Optional[float]:
+        if not isinstance(m, dict) or not m:
+            return None
+        return sum(float(v) for v in m.values())
+
+    def fmt_mean_std(m: Optional[float], s: Optional[float]) -> str:
+        if m is None:
+            return "-"
+        if s is None:
+            return f"{m:.6f}"
+        return f"{m:.6f} ± {s:.6f}"
+
+    def fmt_s(m: Optional[float]) -> str:
+        return "-" if m is None else f"{m:.6f}"
+
+    def kv_lines(m: Any) -> str:
+        if not isinstance(m, dict) or not m:
+            return "-"
+        return ", ".join(f"`{k}`={float(v):.6f}s" for k, v in sorted(m.items()))
+
+    panel_groups: List[Dict[str, Any]] = []
+    report_rows: List[Dict[str, Any]] = []
+
+    for key, runs in sorted(grouped.items(), key=lambda kv: kv[0][0]):
+        name, arts_t, arts_n, omp_t, launcher_v = key
+        first = runs[0]
+        timing0 = first.get("timing", {})
+        run_arts0 = first.get("run_arts", {})
+        run_omp0 = first.get("run_omp", {})
+        speedup_vals = [
+            float(r.get("timing", {}).get("speedup") or 0.0)
+            for r in runs
+            if float(r.get("timing", {}).get("speedup") or 0.0) > 0.0
+        ]
+        sp_mean, sp_std = mean_std(speedup_vals)
+
+        arts_init_vals = [
+            float(r.get("run_arts", {}).get("init_timings", {}).get("arts"))
+            for r in runs
+            if r.get("run_arts", {}).get("init_timings", {}).get("arts") is not None
+        ]
+        omp_init_vals = [
+            float(r.get("run_omp", {}).get("init_timings", {}).get("omp"))
+            for r in runs
+            if r.get("run_omp", {}).get("init_timings", {}).get("omp") is not None
+        ]
+
+        arts_e2e_vals = [sum_map(r.get("run_arts", {}).get("e2e_timings")) for r in runs]
+        arts_e2e_vals = [v for v in arts_e2e_vals if v is not None]
+        omp_e2e_vals = [sum_map(r.get("run_omp", {}).get("e2e_timings")) for r in runs]
+        omp_e2e_vals = [v for v in omp_e2e_vals if v is not None]
+
+        arts_kernel_vals = [sum_map(r.get("run_arts", {}).get("kernel_timings")) for r in runs]
+        arts_kernel_vals = [v for v in arts_kernel_vals if v is not None]
+        omp_kernel_vals = [sum_map(r.get("run_omp", {}).get("kernel_timings")) for r in runs]
+        omp_kernel_vals = [v for v in omp_kernel_vals if v is not None]
+
+        arts_init_mean, arts_init_std = mean_std(arts_init_vals)
+        omp_init_mean, omp_init_std = mean_std(omp_init_vals)
+        arts_e2e_mean, arts_e2e_std = mean_std(arts_e2e_vals)
+        omp_e2e_mean, omp_e2e_std = mean_std(omp_e2e_vals)
+        arts_kernel_mean, arts_kernel_std = mean_std(arts_kernel_vals)
+        omp_kernel_mean, omp_kernel_std = mean_std(omp_kernel_vals)
+
+        arts_other = None if arts_e2e_mean is None or arts_kernel_mean is None else max(arts_e2e_mean - arts_kernel_mean, 0.0)
+        omp_other = None if omp_e2e_mean is None or omp_kernel_mean is None else max(omp_e2e_mean - omp_kernel_mean, 0.0)
+
+        arts_total = float((arts_init_mean or 0.0) + (arts_e2e_mean or 0.0))
+        omp_total = float((omp_init_mean or 0.0) + (omp_e2e_mean or 0.0))
+        scale_max = max(arts_total, omp_total, 1e-12)
+
+        arts_segments = [
+            ("__init__", float(arts_init_mean or 0.0)),
+            ("__other__", float(arts_other or 0.0)),
+            ("__kernel__", float(arts_kernel_mean or 0.0)),
+        ]
+        omp_segments = [
+            ("__init__", float(omp_init_mean or 0.0)),
+            ("__other__", float(omp_other or 0.0)),
+            ("__kernel__", float(omp_kernel_mean or 0.0)),
+        ]
+        panel_groups.append({
+            "benchmark": name,
+            "speedup": sp_mean,
+            "speedup_basis": timing0.get("speedup_basis", "total"),
+            "scale_max": scale_max,
+            "arts_segments": arts_segments,
+            "omp_segments": omp_segments,
+            "arts_total": sum(v for _, v in arts_segments),
+            "omp_total": sum(v for _, v in omp_segments),
+        })
+
+        fig_svg = figures_dir / f"{_sanitize_filename(name)}_{arts_t}t_{arts_n}n.svg"
+        _write_per_benchmark_timeline_svg(
+            name,
+            dict(run_arts0.get("init_timings") or {}),
+            dict(run_arts0.get("e2e_timings") or {}),
+            dict(run_arts0.get("kernel_timings") or {}),
+            dict(run_omp0.get("init_timings") or {}),
+            dict(run_omp0.get("e2e_timings") or {}),
+            dict(run_omp0.get("kernel_timings") or {}),
+            speedup=sp_mean,
+            speedup_basis=str(timing0.get("speedup_basis", "total")),
+            svg_path=fig_svg,
+        )
+
+        report_rows.append({
+            "name": name,
+            "benchmark": name,
+            "arts_threads": arts_t,
+            "arts_nodes": arts_n,
+            "omp_threads": omp_t,
+            "launcher": launcher_v,
+            "arts_status": run_arts0.get("status", ""),
+            "omp_status": run_omp0.get("status", ""),
+            "arts_init": (arts_init_mean, arts_init_std),
+            "arts_e2e": (arts_e2e_mean, arts_e2e_std),
+            "arts_kernel": (arts_kernel_mean, arts_kernel_std),
+            "arts_other": arts_other,
+            "omp_init": (omp_init_mean, omp_init_std),
+            "omp_e2e": (omp_e2e_mean, omp_e2e_std),
+            "omp_kernel": (omp_kernel_mean, omp_kernel_std),
+            "omp_other": omp_other,
+            "speedup_mean": sp_mean,
+            "speedup_std": sp_std,
+            "speedup_basis": timing0.get("speedup_basis", "total"),
+            "verification_note": first.get("verification", {}).get("note", ""),
+            "correct": bool(first.get("verification", {}).get("correct", False)),
+            "arts_init_map": run_arts0.get("init_timings") or {},
+            "arts_e2e_map": run_arts0.get("e2e_timings") or {},
+            "arts_kernel_map": run_arts0.get("kernel_timings") or {},
+            "omp_init_map": run_omp0.get("init_timings") or {},
+            "omp_e2e_map": run_omp0.get("e2e_timings") or {},
+            "omp_kernel_map": run_omp0.get("kernel_timings") or {},
+            "figure": fig_svg.name,
+        })
+
+    _write_small_multiples_svg(panel_groups, chart_svg_path)
+    _write_speedup_bar_chart(report_rows, out_speedup_svg)
+
+    meta = data.get("metadata", {})
+    lines: List[str] = []
+    lines.append("# CARTS Benchmarks Report")
+    lines.append("")
+    lines.append(f"- Source JSON: `{input_path}`")
+    lines.append(f"- Timestamp: {meta.get('timestamp', '-')}")
+    lines.append(f"- Size: {meta.get('size', '-')}")
+    lines.append(f"- Runs per config: {meta.get('runs_per_config', '-')}")
+    lines.append(f"- Figures: `{figures_dir.name}/`")
+    lines.append("")
+    lines.append("## Summary Figure (local scale per benchmark)")
+    lines.append("")
+    lines.append(f"![init+e2e small multiples]({chart_svg_path.name})")
+    lines.append("")
+    lines.append("## Speedup Figure (local scale per benchmark)")
+    lines.append("")
+    lines.append(f"![speedup small multiples]({out_speedup_svg.name})")
+    lines.append("")
+    lines.append("## Results (mean ± std, seconds)")
+    lines.append("")
+    lines.append("| Benchmark | t | n | ARTS status | OMP status | ARTS init | ARTS e2e | ARTS kernel | ARTS other | OMP init | OMP e2e | OMP kernel | OMP other | Speedup | Correct |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|")
+    for r in report_rows:
+        speed_txt = "-"
+        if r.get("speedup_mean") is not None:
+            sp_m = float(r["speedup_mean"])
+            sp_s = r.get("speedup_std")
+            if sp_s is None:
+                speed_txt = f"{sp_m:.2f}x ({r['speedup_basis']})"
+            else:
+                speed_txt = f"{sp_m:.2f} ± {float(sp_s):.2f}x ({r['speedup_basis']})"
+        if r["verification_note"] == "Verification disabled":
+            correct_txt = "N/A"
+        else:
+            correct_txt = "YES" if r["correct"] else "NO"
+        lines.append(
+            f"| {r['name']} | {r['arts_threads']} | {r['arts_nodes']} | {r['arts_status']} | {r['omp_status']} | "
+            f"{fmt_mean_std(*r['arts_init'])} | {fmt_mean_std(*r['arts_e2e'])} | {fmt_mean_std(*r['arts_kernel'])} | {fmt_s(r['arts_other'])} | "
+            f"{fmt_mean_std(*r['omp_init'])} | {fmt_mean_std(*r['omp_e2e'])} | {fmt_mean_std(*r['omp_kernel'])} | {fmt_s(r['omp_other'])} | "
+            f"{speed_txt} | {correct_txt} |"
+        )
+    lines.append("")
+    lines.append("## Per-Benchmark Figures")
+    lines.append("")
+    for r in report_rows:
+        lines.append(f"### {r['name']}")
+        lines.append("")
+        lines.append(f"![{r['name']}]({figures_dir.name}/{r['figure']})")
+        lines.append("")
+        lines.append(f"- Config: `threads={r['arts_threads']}`, `nodes={r['arts_nodes']}`, `omp_threads={r['omp_threads']}`, `launcher={r['launcher']}`")
+        lines.append(f"- ARTS init breakdown: {kv_lines(r['arts_init_map'])}")
+        lines.append(f"- ARTS e2e breakdown: {kv_lines(r['arts_e2e_map'])}")
+        lines.append(f"- ARTS kernel breakdown: {kv_lines(r['arts_kernel_map'])}")
+        lines.append(f"- OMP init breakdown: {kv_lines(r['omp_init_map'])}")
+        lines.append(f"- OMP e2e breakdown: {kv_lines(r['omp_e2e_map'])}")
+        lines.append(f"- OMP kernel breakdown: {kv_lines(r['omp_kernel_map'])}")
+        lines.append("")
+
+    output_md.write_text("\n".join(lines))
+    return chart_svg_path, out_speedup_svg, figures_dir
+
 def create_live_table(
     benchmarks: List[str],
     results: Dict[str, BenchmarkResult],
@@ -2139,8 +3418,8 @@ def create_live_table(
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
     table.add_column("Build", justify="center")
-    table.add_column("ARTS Kernel", justify="right")
-    table.add_column("OMP Kernel", justify="right")
+    table.add_column("ARTS E2E", justify="right")
+    table.add_column("OMP E2E", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
@@ -2157,25 +3436,33 @@ def create_live_table(
             else:
                 build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-            # Get kernel times with formatted display (includes count for multiple kernels)
-            arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
-            omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+            # Prefer E2E time for display, fall back to kernel time, then total duration.
+            arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
+            omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
 
-            # Run status with kernel time
+            # Run status with e2e time
             if r.run_arts.status == Status.PASS:
-                if arts_kernel is not None:
-                    run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}"
+                if arts_e2e is not None:
+                    run_arts = f"{status_symbol(r.run_arts.status)} {arts_e2e_str}"
                 else:
-                    run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
+                    arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+                    if arts_kernel is not None:
+                        run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}*"
+                    else:
+                        run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
                     has_fallback = True
             else:
                 run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
 
             if r.run_omp.status == Status.PASS:
-                if omp_kernel is not None:
-                    run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}"
+                if omp_e2e is not None:
+                    run_omp = f"{status_symbol(r.run_omp.status)} {omp_e2e_str}"
                 else:
-                    run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
+                    omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+                    if omp_kernel is not None:
+                        run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}*"
+                    else:
+                        run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
                     has_fallback = True
             else:
                 run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
@@ -2190,22 +3477,17 @@ def create_live_table(
             else:
                 correct = "[red]\u2717 NO[/]"
 
-            # Speedup based on kernel time if available
-            if arts_kernel is not None and omp_kernel is not None and arts_kernel > 0:
-                kernel_speedup = omp_kernel / arts_kernel
-                if kernel_speedup >= 1.0:
-                    speedup = f"[green]{kernel_speedup:.2f}x[/]"
-                elif kernel_speedup >= 0.8:
-                    speedup = f"[yellow]{kernel_speedup:.2f}x[/]"
+            # Speedup (basis chosen in calculate_timing)
+            if r.timing.speedup > 0:
+                if r.timing.speedup >= 1.0:
+                    speedup = f"[green]{r.timing.speedup:.2f}x[/]"
+                elif r.timing.speedup >= 0.8:
+                    speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
                 else:
-                    speedup = f"[red]{kernel_speedup:.2f}x[/]"
-            elif r.timing.speedup > 0:
-                # Fallback to total time speedup
-                if r.timing.speedup >= 1:
-                    speedup = f"[green]{r.timing.speedup:.2f}x[/]*"
-                else:
-                    speedup = f"[yellow]{r.timing.speedup:.2f}x[/]*"
-                has_fallback = True
+                    speedup = f"[red]{r.timing.speedup:.2f}x[/]"
+                if r.timing.speedup_basis != "e2e":
+                    speedup += "*"
+                    has_fallback = True
             else:
                 speedup = "[dim]-[/]"
 
@@ -2263,15 +3545,22 @@ def create_live_table(
                         build = f"[red]✗[/] {build_arts_result.status.value}/{build_omp_result.status.value}"
                 else:
                     build = "[green]✓[/]"
-                # ARTS run completed, show kernel time if available in partial results
+                # ARTS run completed, show e2e time if available in partial results
                 if current_partial and "run_arts" in current_partial:
                     run_arts_result = current_partial["run_arts"]
-                    arts_kernel, arts_kernel_str = format_kernel_time(run_arts_result)
+                    arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
+                    arts_init, arts_init_str = format_init_time(run_arts_result)
                     if run_arts_result.status == Status.PASS:
-                        if arts_kernel is not None:
-                            run_arts = f"{status_symbol(run_arts_result.status)} {arts_kernel_str}"
+                        if arts_e2e is not None:
+                            run_arts = f"{status_symbol(run_arts_result.status)} {arts_e2e_str}"
+                            if arts_init is not None:
+                                run_arts += f" (init {arts_init_str})"
                         else:
-                            run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.duration_sec:.2f}s*"
+                            arts_kernel, arts_kernel_str = format_kernel_time(run_arts_result)
+                            if arts_kernel is not None:
+                                run_arts = f"{status_symbol(run_arts_result.status)} {arts_kernel_str}*"
+                            else:
+                                run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.duration_sec:.2f}s*"
                     else:
                         run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.status.value}"
                 else:
@@ -2309,7 +3598,7 @@ def create_live_table(
     if has_multi_kernel:
         captions.append("[N] = sum of N kernels")
     if has_fallback:
-        captions.append("* = total time (kernel timing unavailable)")
+        captions.append("* = speedup/time not based on e2e")
     if captions:
         table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
 
@@ -2573,10 +3862,29 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
     stats = {}
     for key, runs in groups.items():
         _name, threads, nodes = key
-        # Extract kernel times (use first kernel timing if available)
+        # Extract timings
+        arts_init_times = []
+        omp_init_times = []
+        arts_e2e_times = []
+        omp_e2e_times = []
+        # Keep kernel times as optional context
         arts_kernel_times = []
         omp_kernel_times = []
         for r in runs:
+            arts_init = get_init_time(r.run_arts)
+            omp_init = get_init_time(r.run_omp)
+            if arts_init is not None:
+                arts_init_times.append(arts_init)
+            if omp_init is not None:
+                omp_init_times.append(omp_init)
+
+            arts_e2e = get_e2e_time(r.run_arts)
+            omp_e2e = get_e2e_time(r.run_omp)
+            if arts_e2e is not None:
+                arts_e2e_times.append(arts_e2e)
+            if omp_e2e is not None:
+                omp_e2e_times.append(omp_e2e)
+
             if r.run_arts.kernel_timings:
                 # Use the first kernel timing (most benchmarks have one)
                 first_key = next(iter(r.run_arts.kernel_timings))
@@ -2592,6 +3900,10 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
             config_key = f"{threads}_threads_{nodes}_nodes"
 
         stats[config_key] = {
+            "arts_init_time": compute_stats(arts_init_times),
+            "omp_init_time": compute_stats(omp_init_times),
+            "arts_e2e_time": compute_stats(arts_e2e_times),
+            "omp_e2e_time": compute_stats(omp_e2e_times),
             "arts_kernel_time": compute_stats(arts_kernel_times),
             "omp_kernel_time": compute_stats(omp_kernel_times),
             "speedup": compute_stats(speedups),
@@ -2613,6 +3925,10 @@ def export_json(
     base_size: Optional[int] = None,
     runs_per_config: int = 1,
     artifacts_directory: Optional[str] = None,
+    fixed_threads: Optional[int] = None,
+    fixed_nodes: Optional[int] = None,
+    omp_threads_override: Optional[int] = None,
+    arts_config_override: Optional[str] = None,
 ) -> None:
     """Export results to JSON file with comprehensive reproducibility metadata."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2637,10 +3953,18 @@ def export_json(
     # Add experiment configuration
     if threads_list:
         metadata["thread_sweep"] = threads_list
+    if fixed_threads is not None:
+        metadata["fixed_threads"] = fixed_threads
     if cflags:
         metadata["cflags"] = cflags
     if launcher:
         metadata["launcher"] = launcher
+    if fixed_nodes is not None:
+        metadata["fixed_nodes"] = fixed_nodes
+    if omp_threads_override is not None:
+        metadata["omp_threads_override"] = omp_threads_override
+    if arts_config_override is not None:
+        metadata["arts_config_override"] = arts_config_override
     if weak_scaling:
         metadata["weak_scaling"] = {
             "enabled": True,
@@ -2692,6 +4016,7 @@ def export_json(
             "name": r.name,
             "suite": r.suite,
             "size": r.size,
+            "size_params": r.size_params,
             "config": {
                 "arts_threads": r.config.arts_threads,
                 "arts_nodes": r.config.arts_nodes,
@@ -2713,6 +4038,8 @@ def export_json(
                 "exit_code": r.run_arts.exit_code,
                 "checksum": r.run_arts.checksum,
                 "kernel_timings": r.run_arts.kernel_timings,
+                "e2e_timings": r.run_arts.e2e_timings,
+                "init_timings": r.run_arts.init_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_arts.parallel_task_timing),
             },
             "run_omp": {
@@ -2721,6 +4048,8 @@ def export_json(
                 "exit_code": r.run_omp.exit_code,
                 "checksum": r.run_omp.checksum,
                 "kernel_timings": r.run_omp.kernel_timings,
+                "e2e_timings": r.run_omp.e2e_timings,
+                "init_timings": r.run_omp.init_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
             },
             "timing": {
@@ -2730,6 +4059,10 @@ def export_json(
                 "speedup_basis": r.timing.speedup_basis,
                 "arts_kernel_sec": r.timing.arts_kernel_sec,
                 "omp_kernel_sec": r.timing.omp_kernel_sec,
+                "arts_e2e_sec": r.timing.arts_e2e_sec,
+                "omp_e2e_sec": r.timing.omp_e2e_sec,
+                "arts_init_sec": r.timing.arts_init_sec,
+                "omp_init_sec": r.timing.omp_init_sec,
                 "arts_total_sec": r.timing.arts_total_sec,
                 "omp_total_sec": r.timing.omp_total_sec,
                 "note": r.timing.note,
@@ -2839,7 +4172,7 @@ def run(
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to run"),
     size: str = typer.Option(DEFAULT_SIZE, "--size",
-                             "-s", help="Dataset size: small, medium, large"),
+                             "-s", help="Dataset size: small, medium, large, extralarge"),
     timeout: int = typer.Option(
         DEFAULT_TIMEOUT, "--timeout", "-t", help="Execution timeout in seconds"),
     no_verify: bool = typer.Option(
@@ -2862,10 +4195,10 @@ def run(
         None, "--threads", help="Thread counts: '1,2,4,8' or '1:16:2' for thread sweep"),
     omp_threads: Optional[int] = typer.Option(
         None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
-    launcher: str = typer.Option(
-        "ssh", "--launcher", "-l", help="ARTS launcher: ssh (default), slurm, lsf, local"),
-    node_count: int = typer.Option(
-        1, "--node-count", "-n", help="Number of nodes for distributed execution"),
+    launcher: Optional[str] = typer.Option(
+        None, "--launcher", "-l", help="Override ARTS launcher: ssh, slurm, lsf, local (default: from arts.cfg)"),
+    node_count: Optional[int] = typer.Option(
+        None, "--node-count", "-n", help="Override nodeCount (default: from arts.cfg)"),
     weak_scaling: bool = typer.Option(
         False, "--weak-scaling", help="Enable weak scaling: auto-scale problem size with parallelism"),
     base_size: Optional[int] = typer.Option(
@@ -2880,12 +4213,18 @@ def run(
         None, "--counter-dir", help="Directory for ARTS counter output (n0_t*.json files)"),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark configuration (for statistical significance)"),
+    report: bool = typer.Option(
+        False, "--report", help="Generate a Markdown+SVG report artifact after running"),
+    report_dir: Optional[Path] = typer.Option(
+        None, "--report-dir", help="Directory for report outputs (default: alongside JSON output or CWD)"),
 ):
     """Run benchmarks with verification and timing."""
     verify = not no_verify
     clean = not no_clean
     runner = BenchmarkRunner(
         console, verbose=verbose, quiet=quiet, trace=trace, clean=clean, debug=debug_level)
+
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Parse thread specification
     threads_list = None
@@ -2924,6 +4263,10 @@ def run(
                         f"verify={verify}", f"clean={clean}"]
         if threads_list:
             config_items.append(f"threads={threads}")
+        if launcher is not None:
+            config_items.append(f"launcher={launcher}")
+        if node_count is not None:
+            config_items.append(f"nodes={node_count}")
         if runs > 1:
             config_items.append(f"runs={runs}")
         if cflags:
@@ -2941,7 +4284,17 @@ def run(
     experiment_dir: Optional[Path] = None
     actual_json_path: Optional[Path] = None
 
-    if threads_list and len(bench_list) == 1:
+    threads_override: Optional[int] = None
+    if threads_list and len(bench_list) > 1:
+        if len(threads_list) != 1:
+            console.print(
+                "[red]Error:[/] For multiple benchmarks, `--threads` must specify a single value (e.g., `--threads 8`)."
+            )
+            raise typer.Exit(2)
+        threads_override = int(threads_list[0])
+        threads_list = None
+
+    if threads_list and len(bench_list) == 1 and len(threads_list) > 1:
         # Thread sweep mode for single benchmark
         results, experiment_dir, actual_json_path = runner.run_with_thread_sweep(
             bench_list[0],
@@ -2961,12 +4314,20 @@ def run(
         )
     else:
         # Standard mode
+        if threads_list and len(threads_list) == 1:
+            threads_override = int(threads_list[0])
+            threads_list = None
         results = runner.run_all(
             bench_list,
             size=size,
             timeout=timeout,
             verify=verify,
             arts_config=arts_config,
+            threads_override=threads_override,
+            node_count_override=node_count,
+            launcher_override=launcher,
+            omp_threads_override=omp_threads,
+            counter_dir=counter_dir,
         )
 
     total_duration = time.time() - start_time
@@ -2977,36 +4338,59 @@ def run(
         console.print()
         console.print(create_summary_panel(results, total_duration))
 
-    # Export if requested
-    if output:
-        # Use the actual JSON path (inside experiment dir) if available from thread sweep
-        # Otherwise fall back to output path for standard mode
-        json_output_path = actual_json_path if actual_json_path else output
+    # Always export a JSON artifact (for paper-quality reporting + reproducibility).
+    # If --output is not provided, write `benchmark_results_<timestamp>.json` to CWD.
+    json_output_path = (
+        (actual_json_path if actual_json_path else output)
+        if output
+        else (get_benchmarks_dir() / "results" / f"benchmark_results_{run_timestamp}.json")
+    )
 
-        # artifacts_directory is "." since JSON is now inside the experiment folder
-        # (or None for standard mode which doesn't create experiment dirs)
-        artifacts_dir_name = "." if experiment_dir else None
+    artifacts_dir_name = "." if experiment_dir else None
+    export_json(
+        results,
+        json_output_path,
+        size,
+        total_duration,
+        threads_list,
+        cflags,
+        launcher,
+        weak_scaling,
+        base_size,
+        runs,
+        artifacts_dir_name,
+        fixed_threads=threads_override,
+        fixed_nodes=node_count,
+        omp_threads_override=omp_threads,
+        arts_config_override=str(arts_config) if arts_config else None,
+    )
 
-        export_json(
-            results,
-            json_output_path,
-            size,
-            total_duration,
-            threads_list,
-            cflags,
-            launcher,
-            weak_scaling,
-            base_size,
-            runs,
-            artifacts_dir_name,
-        )
-        # Show output paths
+    if report:
+        if report_dir:
+            out_dir = report_dir
+        elif experiment_dir:
+            out_dir = experiment_dir
+        elif output:
+            out_dir = output.parent
+        else:
+            out_dir = get_benchmarks_dir() / "reports"
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        report_md = out_dir / f"benchmark_report_{run_timestamp}.md"
+        report_svg = out_dir / f"benchmark_report_{run_timestamp}_init_e2e_small_multiples.svg"
+        report_chart, report_speedup = generate_markdown_report(results, report_md, report_svg, size=size)
+        if not quiet:
+            console.print()
+            console.print(f"[green]Report:[/] {report_md}")
+            console.print(f"[green]Chart:[/]  {report_chart}")
+            console.print(f"[green]Speedup:[/] {report_speedup}")
+
+    # Show JSON artifact path last (after live table + optional report).
+    if not quiet:
         console.print()
         if experiment_dir:
             console.print(f"[green]Experiment folder:[/] {experiment_dir}")
-            console.print(f"[green]Results JSON:[/]      {actual_json_path}")
-        else:
-            console.print(f"[green]Results exported to:[/] {json_output_path}")
+        console.print(f"[green]Results JSON:[/]      {json_output_path}")
 
     # Exit with error if any failures
     failed = sum(1 for r in results if r.run_arts.status in (
@@ -3020,7 +4404,7 @@ def build(
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to build"),
     size: str = typer.Option(DEFAULT_SIZE, "--size",
-                             "-s", help="Dataset size: small, medium, large"),
+                             "-s", help="Dataset size: small, medium, large, extralarge"),
     openmp: bool = typer.Option(
         False, "--openmp", help="Build OpenMP version only"),
     arts: bool = typer.Option(False, "--arts", help="Build ARTS version only"),
@@ -3121,17 +4505,21 @@ def report(
     input: Optional[Path] = typer.Option(
         None, "--input", "-i", help="Input JSON file"),
     format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table, json, csv"),
+        "table", "--format", "-f", help="Output format: table, bars, detailed, json, csv"),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o", help="Output file"),
 ):
     """View or export benchmark results."""
     if not input:
-        # Look for most recent results file
-        results_files = sorted(Path(".").glob(
-            "benchmark_results_*.json"), reverse=True)
-        if results_files:
-            input = results_files[0]
+        # Look for most recent results file in common locations (CWD and
+        # carts-benchmarks/results).
+        candidates: List[Path] = []
+        candidates.extend(Path(".").glob("benchmark_results_*.json"))
+        candidates.extend((get_benchmarks_dir() / "results").glob("benchmark_results_*.json"))
+        candidates = [p for p in candidates if p.exists()]
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            input = candidates[0]
         else:
             console.print(
                 "[yellow]No results file found. Run benchmarks first.[/]")
@@ -3140,12 +4528,118 @@ def report(
     with open(input) as f:
         data = json.load(f)
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_dir = output.parent if output else input.parent
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_md = report_dir / f"benchmark_report_{timestamp}.md"
+    report_chart, report_speedup, figures_dir = generate_markdown_report_from_json(
+        data,
+        input_path=input,
+        output_md=report_md,
+    )
+
     if format == "json":
         if output:
             with open(output, "w") as f:
                 json.dump(data, f, indent=2)
         else:
             console.print_json(data=data)
+    elif format == "bars":
+        results = data.get("results", [])
+        if not results:
+            console.print("[yellow]No results to display.[/]")
+            raise typer.Exit(1)
+
+        max_total = 0.0
+        for r in results:
+            timing = r.get("timing", {})
+            for init_key, e2e_key in (
+                ("arts_init_sec", "arts_e2e_sec"),
+                ("omp_init_sec", "omp_e2e_sec"),
+            ):
+                init_val = float(timing.get(init_key) or 0.0)
+                e2e_val = float(timing.get(e2e_key) or 0.0)
+                max_total = max(max_total, init_val + e2e_val)
+
+        chart = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        chart.add_column("Benchmark", style="cyan", no_wrap=True)
+        chart.add_column("ARTS init+e2e")
+        chart.add_column("OMP init+e2e")
+        for r in results:
+            timing = r.get("timing", {})
+            chart.add_row(
+                r.get("name", ""),
+                _render_init_e2e_bar(timing.get("arts_init_sec"), timing.get("arts_e2e_sec"), max_total),
+                _render_init_e2e_bar(timing.get("omp_init_sec"), timing.get("omp_e2e_sec"), max_total),
+            )
+        chart.caption = "[dim]Bar colors: init=red, e2e=green[/]"
+        console.print(chart)
+    elif format == "detailed":
+        results = data.get("results", [])
+        if not results:
+            console.print("[yellow]No results to display.[/]")
+            raise typer.Exit(1)
+
+        def _sum_and_count(d: Any) -> Tuple[Optional[float], int]:
+            if not isinstance(d, dict) or not d:
+                return None, 0
+            vals = []
+            for v in d.values():
+                try:
+                    vals.append(float(v))
+                except Exception:
+                    pass
+            return (sum(vals), len(vals)) if vals else (None, 0)
+
+        table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
+        table.add_column("Benchmark", style="cyan", no_wrap=True)
+        table.add_column("ARTS init", justify="right")
+        table.add_column("ARTS e2e", justify="right")
+        table.add_column("ARTS kernel", justify="right")
+        table.add_column("OMP init", justify="right")
+        table.add_column("OMP e2e", justify="right")
+        table.add_column("OMP kernel", justify="right")
+        table.add_column("Speedup", justify="right")
+
+        for r in results:
+            timing = r.get("timing", {})
+            arts = r.get("run_arts", {})
+            omp = r.get("run_omp", {})
+
+            arts_init, arts_init_n = _sum_and_count(arts.get("init_timings"))
+            arts_e2e, arts_e2e_n = _sum_and_count(arts.get("e2e_timings"))
+            arts_kernel, arts_kernel_n = _sum_and_count(arts.get("kernel_timings"))
+            omp_init, omp_init_n = _sum_and_count(omp.get("init_timings"))
+            omp_e2e, omp_e2e_n = _sum_and_count(omp.get("e2e_timings"))
+            omp_kernel, omp_kernel_n = _sum_and_count(omp.get("kernel_timings"))
+
+            def _fmt(v: Optional[float], n: int) -> str:
+                if v is None:
+                    return "[dim]-[/]"
+                if n > 1:
+                    return f"{v:.4f}s [{n}]"
+                return f"{v:.4f}s"
+
+            sp = timing.get("speedup")
+            basis = timing.get("speedup_basis", "total")
+            if sp is None or sp == 0:
+                sp_str = "[dim]-[/]"
+            else:
+                sp_val = float(sp)
+                sp_str = f"{sp_val:.2f}x ({basis})"
+
+            table.add_row(
+                r.get("name", ""),
+                _fmt(arts_init, arts_init_n),
+                _fmt(arts_e2e, arts_e2e_n),
+                _fmt(arts_kernel, arts_kernel_n),
+                _fmt(omp_init, omp_init_n),
+                _fmt(omp_e2e, omp_e2e_n),
+                _fmt(omp_kernel, omp_kernel_n),
+                sp_str,
+            )
+
+        console.print(table)
     elif format == "csv":
         import csv
         rows = []
@@ -3164,6 +4658,10 @@ def report(
                 "speedup_basis": timing.get("speedup_basis", "total"),
                 "arts_kernel": timing.get("arts_kernel_sec"),
                 "omp_kernel": timing.get("omp_kernel_sec"),
+                "arts_init": timing.get("arts_init_sec"),
+                "omp_init": timing.get("omp_init_sec"),
+                "arts_e2e": timing.get("arts_e2e_sec"),
+                "omp_e2e": timing.get("omp_e2e_sec"),
                 "arts_total": timing.get("arts_total_sec"),
                 "omp_total": timing.get("omp_total_sec"),
                 "speedup": timing.get("speedup"),
@@ -3194,6 +4692,11 @@ def report(
             title="Summary",
         ))
 
+    console.print()
+    console.print(f"[green]Report:[/] {report_md}")
+    console.print(f"[green]Chart:[/]  {report_chart}")
+    console.print(f"[green]Speedup:[/] {report_speedup}")
+    return
 
 @app.command()
 def analyze(

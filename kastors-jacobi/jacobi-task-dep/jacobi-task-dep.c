@@ -1,7 +1,7 @@
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 // Sequential version of sweep for verification
 static void sweep_seq(int nx, int ny, double dx, double dy, double **f,
@@ -63,6 +63,9 @@ static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
 }
 
 int main(void) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
 #ifdef SIZE
   int nx = SIZE;
   int ny = SIZE;
@@ -79,6 +82,9 @@ int main(void) {
   printf("Jacobi Task-Dep \n");
   printf("Grid size: %d x %d\n", nx, ny);
   printf("Iterations: %d\n", itnew);
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("jacobi-task-dep");
 
   // Allocate 2D arrays
   double **f = (double **)malloc(nx * sizeof(double *));
@@ -104,10 +110,17 @@ int main(void) {
   }
 
   printf("Running parallel version with task dependencies...\n");
-  CARTS_KERNEL_TIMER_START("sweep");
-  sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  CARTS_KERNEL_TIMER_STOP("sweep");
 
+  // Kernel timing (just the compute kernel)
+  CARTS_KERNEL_TIMER_START("jacobi-task-dep");
+  sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
+  CARTS_KERNEL_TIMER_STOP("jacobi-task-dep");
+
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  // Verification (not timed)
   // Save parallel result
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {

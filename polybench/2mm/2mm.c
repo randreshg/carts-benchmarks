@@ -33,11 +33,8 @@ static void free_matrix(DATA_TYPE **matrix, int rows) {
 
 /* Array initialization. */
 static void init_array(int ni, int nj, int nk, int nl, DATA_TYPE *alpha,
-                       DATA_TYPE *beta,
-                       DATA_TYPE **A,
-                       DATA_TYPE **B,
-                       DATA_TYPE **C,
-                       DATA_TYPE **D) {
+                       DATA_TYPE *beta, DATA_TYPE **A, DATA_TYPE **B,
+                       DATA_TYPE **C, DATA_TYPE **D) {
   int i, j;
 
   *alpha = 32412;
@@ -58,8 +55,7 @@ static void init_array(int ni, int nj, int nk, int nl, DATA_TYPE *alpha,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
-static void print_array(int ni, int nl,
-                        DATA_TYPE **D) {
+static void print_array(int ni, int nl, DATA_TYPE **D) {
   int i, j;
 
   for (i = 0; i < ni; i++)
@@ -74,12 +70,8 @@ static void print_array(int ni, int nl,
 /* Main computational kernel. The whole function will be timed,
    including the call and return. */
 static void kernel_2mm(int ni, int nj, int nk, int nl, DATA_TYPE alpha,
-                       DATA_TYPE beta,
-                       DATA_TYPE **tmp,
-                       DATA_TYPE **A,
-                       DATA_TYPE **B,
-                       DATA_TYPE **C,
-                       DATA_TYPE **D) {
+                       DATA_TYPE beta, DATA_TYPE **tmp, DATA_TYPE **A,
+                       DATA_TYPE **B, DATA_TYPE **C, DATA_TYPE **D) {
   int i, j, k;
 #pragma scop
 /* D := alpha*A*B*C + beta*D */
@@ -104,11 +96,17 @@ static void kernel_2mm(int ni, int nj, int nk, int nl, DATA_TYPE alpha,
 }
 
 int main(int argc, char **argv) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   /* Retrieve problem size. */
   int ni = NI;
   int nj = NJ;
   int nk = NK;
   int nl = NL;
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("2mm");
 
   /* Variable declaration/allocation. */
   DATA_TYPE alpha;
@@ -138,15 +136,19 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("kernel_2mm");
+  CARTS_KERNEL_TIMER_START("2mm");
   kernel_2mm(ni, nj, nk, nl, alpha, beta, tmp, A, B, C, D);
-  CARTS_KERNEL_TIMER_STOP("kernel_2mm");
+  CARTS_KERNEL_TIMER_STOP("2mm");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  /* Compute checksum inline */
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  /* Verification (not timed) */
   double checksum = 0.0;
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nl; j++) {

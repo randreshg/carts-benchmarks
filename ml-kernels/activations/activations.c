@@ -254,6 +254,8 @@ static void print_stats(const char *name, float *x, int n, int print_samples) {
 }
 
 int main(int argc, char **argv) {
+  CARTS_BENCHMARKS_START();
+
   int size = SIZE;
   int softmax_size = 100; // Smaller size for softmax (more interpretable)
 
@@ -262,6 +264,8 @@ int main(int argc, char **argv) {
   printf("Array size: %d elements\n", size);
   printf("Softmax size: %d elements\n", softmax_size);
   printf("\n");
+
+  CARTS_E2E_TIMER_START("activations_setup");
 
   // Allocate memory
   float *input = (float *)malloc(size * sizeof(float));
@@ -272,15 +276,19 @@ int main(int argc, char **argv) {
   init_data(input, size);
   init_data(softmax_input, softmax_size);
 
+  CARTS_E2E_TIMER_STOP();
+
   // Print input statistics
   print_stats("Input", input, size, 10);
 
   // Test ReLU
   printf("\n--- Testing ReLU ---\n");
+  CARTS_E2E_TIMER_START("activations_relu");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("relu");
   activate_relu(output, size);
   CARTS_KERNEL_TIMER_STOP("relu");
+  CARTS_E2E_TIMER_STOP();
   print_stats("ReLU Output", output, size, 10);
 
   // Compute checksum inline
@@ -292,10 +300,12 @@ int main(int argc, char **argv) {
 
   // Test Leaky ReLU
   printf("\n--- Testing Leaky ReLU ---\n");
+  CARTS_E2E_TIMER_START("activations_leaky_relu");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("leaky_relu");
   activate_leaky(output, size);
   CARTS_KERNEL_TIMER_STOP("leaky_relu");
+  CARTS_E2E_TIMER_STOP();
   print_stats("Leaky ReLU Output", output, size, 10);
 
   // Compute checksum inline
@@ -307,10 +317,12 @@ int main(int argc, char **argv) {
 
   // Test ReLU6
   printf("\n--- Testing ReLU6 ---\n");
+  CARTS_E2E_TIMER_START("activations_relu6");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("relu6");
   activate_relu6(output, size);
   CARTS_KERNEL_TIMER_STOP("relu6");
+  CARTS_E2E_TIMER_STOP();
   print_stats("ReLU6 Output", output, size, 10);
 
   // Compute checksum inline
@@ -322,10 +334,12 @@ int main(int argc, char **argv) {
 
   // Test GELU
   printf("\n--- Testing GELU ---\n");
+  CARTS_E2E_TIMER_START("activations_gelu");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("gelu");
   activate_gelu(output, size);
   CARTS_KERNEL_TIMER_STOP("gelu");
+  CARTS_E2E_TIMER_STOP();
   print_stats("GELU Output", output, size, 10);
 
   // Compute checksum inline
@@ -337,10 +351,12 @@ int main(int argc, char **argv) {
 
   // Test GELU Fast
   printf("\n--- Testing GELU (Fast) ---\n");
+  CARTS_E2E_TIMER_START("activations_gelu_fast");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("gelu_fast");
   activate_gelu_fast(output, size);
   CARTS_KERNEL_TIMER_STOP("gelu_fast");
+  CARTS_E2E_TIMER_STOP();
   print_stats("GELU Fast Output", output, size, 10);
 
   // Compute checksum inline
@@ -352,10 +368,12 @@ int main(int argc, char **argv) {
 
   // Test Sigmoid
   printf("\n--- Testing Sigmoid ---\n");
+  CARTS_E2E_TIMER_START("activations_sigmoid");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("sigmoid");
   activate_sigmoid(output, size);
   CARTS_KERNEL_TIMER_STOP("sigmoid");
+  CARTS_E2E_TIMER_STOP();
   print_stats("Sigmoid Output", output, size, 10);
 
   // Compute checksum inline
@@ -367,10 +385,12 @@ int main(int argc, char **argv) {
 
   // Test Tanh
   printf("\n--- Testing Tanh ---\n");
+  CARTS_E2E_TIMER_START("activations_tanh");
   copy_array(output, input, size);
   CARTS_KERNEL_TIMER_START("tanh");
   activate_tanh(output, size);
   CARTS_KERNEL_TIMER_STOP("tanh");
+  CARTS_E2E_TIMER_STOP();
   print_stats("Tanh Output", output, size, 10);
 
   // Compute checksum inline using sum of absolute values for stability.
@@ -383,9 +403,11 @@ int main(int argc, char **argv) {
 
   // Test Softmax
   printf("\n--- Testing Softmax ---\n");
+  CARTS_E2E_TIMER_START("activations_softmax");
   CARTS_KERNEL_TIMER_START("softmax");
   softmax(softmax_input, softmax_size);
   CARTS_KERNEL_TIMER_STOP("softmax");
+  CARTS_E2E_TIMER_STOP();
   print_stats("Softmax Output", softmax_input, softmax_size, 10);
 
   // Compute checksum inline

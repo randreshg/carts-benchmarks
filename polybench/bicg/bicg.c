@@ -18,8 +18,8 @@
 
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 4000. */
-#include "bicg.h"
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "bicg.h"
 
 /* Array initialization. */
 static void init_array(int nx, int ny, DATA_TYPE **A, DATA_TYPE *r,
@@ -80,9 +80,15 @@ static void kernel_bicg(int nx, int ny, DATA_TYPE **A, DATA_TYPE *s,
 }
 
 int main(int argc, char **argv) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   /* Retrieve problem size. */
   int nx = NX;
   int ny = NY;
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("bicg");
 
   /* Variable declaration/allocation. */
   DATA_TYPE **A = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
@@ -90,12 +96,12 @@ int main(int argc, char **argv) {
   DATA_TYPE *q = (DATA_TYPE *)malloc(nx * sizeof(DATA_TYPE));
   DATA_TYPE *p = (DATA_TYPE *)malloc(ny * sizeof(DATA_TYPE));
   DATA_TYPE *r = (DATA_TYPE *)malloc(nx * sizeof(DATA_TYPE));
-  
+
   if (!A || !s || !q || !p || !r) {
     fprintf(stderr, "Memory allocation failed\n");
     return 1;
   }
-  
+
   for (int i = 0; i < nx; i++) {
     A[i] = (DATA_TYPE *)malloc(ny * sizeof(DATA_TYPE));
   }
@@ -107,15 +113,19 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("kernel_bicg");
+  CARTS_KERNEL_TIMER_START("bicg");
   kernel_bicg(nx, ny, A, s, q, p, r);
-  CARTS_KERNEL_TIMER_STOP("kernel_bicg");
+  CARTS_KERNEL_TIMER_STOP("bicg");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  /* Compute checksum inline */
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  /* Verification (not timed) */
   double checksum = 0.0;
   for (int i = 0; i < ny; i++) {
     checksum += s[i];

@@ -17,9 +17,12 @@ carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8
 # Run multiple times for statistical significance
 carts benchmarks run polybench/gemm --size medium --threads 4 --runs 5
 
-# Export results to JSON
-carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 \
-    -o results/gemm_scaling.json
+# A JSON results file is always produced (default: carts-benchmarks/results/).
+# Use --output to choose a custom location/name.
+carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 -o results/gemm_scaling.json
+
+# Generate a paper-friendly report (Markdown + SVG figures)
+carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --report
 ```
 
 ## Commands
@@ -55,9 +58,9 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--threads` | | Thread counts: `1,2,4,8` or `1:16:2` for sweep |
 | `--runs` | `-r` | Number of runs per configuration (default: 1) |
 | `--omp-threads` | | OpenMP thread count (default: same as ARTS threads) |
-| `--launcher` | `-l` | ARTS launcher: `ssh`, `slurm`, `lsf`, `local` (default: ssh) |
-| `--node-count` | `-n` | Number of nodes for distributed execution (default: 1) |
-| `--output` | `-o` | Export results to JSON file |
+| `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
+| `--node-count` | `-n` | Override ARTS `nodeCount` (default: from benchmark `arts.cfg`) |
+| `--output` | `-o` | Write results JSON to a custom path |
 | `--trace` | | Show benchmark output (kernel timing and checksum) |
 | `--verbose` | `-v` | Verbose output |
 | `--quiet` | `-q` | Minimal output (CI mode) |
@@ -135,7 +138,7 @@ carts benchmarks run polybench/gemm --size small --threads 2 --debug=1
 
 # Debug level 2: write full output to log files
 carts benchmarks run polybench/gemm --size small --threads 2 --debug=2
-# Check logs at: polybench/gemm/logs/arts_2t.log, omp_2t.log
+# Check logs at: polybench/gemm/logs/arts.log and polybench/gemm/logs/omp.log
 
 # Enable ARTS counters (requires ARTS built with --counters=1)
 carts benchmarks run polybench/gemm --size medium --threads 4 \

@@ -1,3 +1,11 @@
 EXAMPLE_NAME := jacobi2d
 SRC := jacobi2d.c
+
+# Size configurations - can be overridden via command line
+# SMALL: N=256, MEDIUM: N=1024, LARGE: N=2048, EXTRALARGE: N=4096
+SMALL_CFLAGS ?= -DN=256 -DTSTEPS=50
+MEDIUM_CFLAGS ?= -DN=1024 -DTSTEPS=100
+LARGE_CFLAGS ?= -DN=2048 -DTSTEPS=200
+EXTRALARGE_CFLAGS ?= -DN=4096 -DTSTEPS=400
+
 include ../carts.mk

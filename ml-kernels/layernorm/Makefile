@@ -1,3 +1,12 @@
 EXAMPLE_NAME := layernorm
 SRC := layernorm.c
+
+# Size configurations - can be overridden via command line
+# Total elements = BATCH * HIDDEN
+# SMALL: 64*2048 = 128K, MEDIUM: 256*4096 = 1M, LARGE: 1024*8192 = 8M, EXTRALARGE: 2048*16384 = 32M
+SMALL_CFLAGS ?= -DBATCH=64 -DHIDDEN=2048
+MEDIUM_CFLAGS ?= -DBATCH=256 -DHIDDEN=4096
+LARGE_CFLAGS ?= -DBATCH=1024 -DHIDDEN=8192
+EXTRALARGE_CFLAGS ?= -DBATCH=2048 -DHIDDEN=16384
+
 include ../carts.mk

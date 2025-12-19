@@ -54,6 +54,10 @@ static void seissol_volume_integral(float **fluxOut,
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
+  CARTS_E2E_TIMER_START("seissol_volume_integral");
+
   // Allocate 2D arrays
   float **dofs = (float **)malloc(N_ELEMENTS * sizeof(float *));
   float **gradMatrix = (float **)malloc(N_QUAD * sizeof(float *));
@@ -80,6 +84,8 @@ int main(void) {
   CARTS_KERNEL_TIMER_START("seissol_volume_integral");
   seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
   CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
+
+  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   float checksum = 0.0f;

@@ -70,6 +70,8 @@ static void rhs(int nx, int ny, double **f, int block_size) {
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
 #else
@@ -80,6 +82,8 @@ int main(void) {
   int block_size = 10;
   double dx = 1.0 / (nx - 1);
   double dy = 1.0 / (ny - 1);
+
+  CARTS_E2E_TIMER_START("poisson-for");
 
   // Allocate 2D arrays
   double **f = (double **)malloc(nx * sizeof(double *));
@@ -119,6 +123,8 @@ int main(void) {
   CARTS_KERNEL_TIMER_START("sweep");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
   CARTS_KERNEL_TIMER_STOP("sweep");
+
+  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   double checksum = 0.0;

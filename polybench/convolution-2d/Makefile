@@ -1,3 +1,11 @@
 EXAMPLE_NAME := convolution-2d
 SRC := convolution-2d.c
+
+# Size configurations - can be overridden via command line
+# SMALL: 1024x1024, MEDIUM: 2048x2048, LARGE: 4096x4096, EXTRALARGE: 8192x8192
+SMALL_CFLAGS ?= -DSMALL_DATASET
+MEDIUM_CFLAGS ?= -DSTANDARD_DATASET
+LARGE_CFLAGS ?= -DLARGE_DATASET
+EXTRALARGE_CFLAGS ?= -DEXTRALARGE_DATASET
+
 include ../carts.mk

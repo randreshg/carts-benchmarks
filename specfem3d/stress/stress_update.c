@@ -84,6 +84,10 @@ static void specfem3d_update_stress(float ***sxx, float ***syy, float ***szz,
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
+  CARTS_E2E_TIMER_START("specfem3d_update_stress");
+
   // Allocate 3D arrays
   float ***vx = (float ***)malloc(NX * sizeof(float **));
   float ***vy = (float ***)malloc(NX * sizeof(float **));
@@ -132,6 +136,8 @@ int main(void) {
   CARTS_KERNEL_TIMER_START("specfem3d_update_stress");
   specfem3d_update_stress(sxx, syy, szz, sxy, sxz, syz, vx, vy, vz, mu, lambda);
   CARTS_KERNEL_TIMER_STOP("specfem3d_update_stress");
+
+  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   float checksum = 0.0f;

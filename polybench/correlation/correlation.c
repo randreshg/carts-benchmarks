@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "correlation.h"
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "correlation.h"
 
 static void print_array(int m, int n, DATA_TYPE **corr, const char *name) {
   (void)name;
@@ -73,18 +73,19 @@ static void kernel_correlation(int m, int n, DATA_TYPE **data, DATA_TYPE **corr,
 }
 
 int main(int argc, char **argv) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   int m = M;
   int n = N;
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("correlation");
 
   DATA_TYPE **data = (DATA_TYPE **)malloc(m * sizeof(DATA_TYPE *));
   DATA_TYPE **corr = (DATA_TYPE **)malloc(m * sizeof(DATA_TYPE *));
   DATA_TYPE *mean = (DATA_TYPE *)malloc(m * sizeof(DATA_TYPE));
   DATA_TYPE *stddev = (DATA_TYPE *)malloc(m * sizeof(DATA_TYPE));
-
-  // if (!data || !corr || !mean || !stddev) {
-  //   fprintf(stderr, "Memory allocation failed\n");
-  //   return 1;
-  // }
 
   for (int i = 0; i < m; i++) {
     data[i] = (DATA_TYPE *)malloc(n * sizeof(DATA_TYPE));
@@ -93,11 +94,15 @@ int main(int argc, char **argv) {
 
   init_array(m, n, data);
 
-  CARTS_KERNEL_TIMER_START("kernel_correlation");
+  CARTS_KERNEL_TIMER_START("correlation");
   kernel_correlation(m, n, data, corr, mean, stddev);
-  CARTS_KERNEL_TIMER_STOP("kernel_correlation");
+  CARTS_KERNEL_TIMER_STOP("correlation");
 
-  /* Compute checksum inline (CARTS limitation: no helper functions) */
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  /* Verification (not timed) */
   double checksum = 0.0;
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < m; j++) {

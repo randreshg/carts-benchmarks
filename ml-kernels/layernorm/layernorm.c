@@ -1,7 +1,7 @@
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 #ifndef BATCH
 #define BATCH 16
@@ -66,6 +66,12 @@ static float checksum(float **x) {
 }
 
 int main(void) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("layernorm");
+
   float **x = (float **)malloc(BATCH * sizeof(float *));
   float *gamma = (float *)malloc(sizeof(float) * HIDDEN);
   float *beta = (float *)malloc(sizeof(float) * HIDDEN);
@@ -80,14 +86,19 @@ int main(void) {
   }
 
   init(x, gamma, beta);
+
+  // Kernel timing (just the compute kernel)
   CARTS_KERNEL_TIMER_START("layernorm");
   layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
   CARTS_KERNEL_TIMER_STOP("layernorm");
 
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  // Verification (not timed)
   printf("layernorm checksum=%f\n", checksum(x));
 
-  // Compute checksum inline using sum of absolute values for stability.
-  // Normalized data is centered around 0, so plain sum would be ~0.
   double checksum_value = 0.0;
   for (int b = 0; b < BATCH; b++) {
     for (int h = 0; h < HIDDEN; h++) {

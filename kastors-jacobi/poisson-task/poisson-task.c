@@ -107,6 +107,8 @@ static void rhs(int nx, int ny, double **f) {
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
   int nx = SIZE;
   int ny = SIZE;
   int itold = 0;
@@ -116,6 +118,8 @@ int main(void) {
 
   printf("Poisson Task\n");
   printf("Grid: %d x %d, Iterations: %d\n", nx, ny, itnew);
+
+  CARTS_E2E_TIMER_START("poisson-task");
 
   // Allocate arrays
   double **f = (double **)malloc(nx * sizeof(double *));
@@ -156,6 +160,8 @@ int main(void) {
   CARTS_KERNEL_TIMER_START("sweep");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew);
   CARTS_KERNEL_TIMER_STOP("sweep");
+
+  CARTS_E2E_TIMER_STOP();
 
   // Save result
   for (int i = 0; i < nx; i++) {

@@ -78,6 +78,10 @@ static void specfem_velocity_update(float ***vx, float ***vy, float ***vz,
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
+  CARTS_E2E_TIMER_START("specfem_velocity_update");
+
   // Allocate 3D arrays
   float ***vx = (float ***)malloc(NX * sizeof(float **));
   float ***vy = (float ***)malloc(NX * sizeof(float **));
@@ -120,6 +124,8 @@ int main(void) {
   CARTS_KERNEL_TIMER_START("specfem_velocity_update");
   specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
   CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
+
+  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   float checksum = 0.0f;

@@ -103,6 +103,10 @@ static void sw4lite_rhs4sg_base(float ****rhs,
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
+  CARTS_E2E_TIMER_START("sw4lite_rhs4sg_base");
+
   // Allocate 4D arrays for u and rhs [COMP][NX][NY][NZ]
   float ****u = (float ****)malloc(COMP * sizeof(float ***));
   float ****rhs = (float ****)malloc(COMP * sizeof(float ***));
@@ -138,13 +142,15 @@ int main(void) {
   sw4lite_rhs4sg_base(rhs, u, mu, lambda, 1.0f);
   CARTS_KERNEL_TIMER_STOP("sw4lite_rhs4sg_base");
 
-  // Compute checksum inline
-  float checksum = 0.0f;
+  CARTS_E2E_TIMER_STOP();
+
+  // Compute checksum inline using double for better precision with large arrays
+  double checksum = 0.0;
   for (int c = 0; c < COMP; ++c) {
     for (int i = 0; i < NX; ++i) {
       for (int j = 0; j < NY; ++j) {
         for (int k = 0; k < NZ; ++k) {
-          checksum += rhs[c][i][j][k];
+          checksum += (double)rhs[c][i][j][k];
         }
       }
     }

@@ -1,9 +1,9 @@
 /* PolyBench-like GEMM (single-file, OpenMP) */
 
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 #ifndef NI
 #define NI 512
@@ -49,6 +49,12 @@ static float checksum(float **C) {
 }
 
 int main(void) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("gemm");
+
   float **A = (float **)malloc(NI * sizeof(float *));
   float **B = (float **)malloc(NK * sizeof(float *));
   float **C = (float **)malloc(NI * sizeof(float *));
@@ -63,11 +69,16 @@ int main(void) {
 
   init(A, B, C);
 
+  // Kernel timing (just the compute kernel)
   CARTS_KERNEL_TIMER_START("gemm");
   gemm(C, (const float **)A, (const float **)B, 1.0f, 0.0f);
   CARTS_KERNEL_TIMER_STOP("gemm");
 
-  // Compute checksum inline
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  // Verification (not timed)
   double checksum = 0.0;
   for (int i = 0; i < NI; i++) {
     for (int j = 0; j < NJ; j++) {

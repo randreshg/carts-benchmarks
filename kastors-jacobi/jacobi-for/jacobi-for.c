@@ -7,9 +7,9 @@
  * Author: John Burkardt (modified by KaStORS team)
  */
 
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
                   int itnew, double **u, double **unew, int block_size) {
@@ -40,6 +40,9 @@ static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
 }
 
 int main(void) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
 #else
@@ -51,9 +54,10 @@ int main(void) {
   double dx = 1.0 / (nx - 1);
   double dy = 1.0 / (ny - 1);
 
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("jacobi-for");
+
   // Allocate 2D arrays
-  /// malloc(N*M) -> matrix(i*M + j)
-  /// double matrix[N][M] -> matrix[i][j]
   double **f = (double **)malloc(nx * sizeof(double *));
   double **u = (double **)malloc(nx * sizeof(double *));
   double **unew = (double **)malloc(nx * sizeof(double *));
@@ -73,11 +77,15 @@ int main(void) {
     }
   }
 
-  CARTS_KERNEL_TIMER_START("sweep");
+  CARTS_KERNEL_TIMER_START("jacobi-for");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  CARTS_KERNEL_TIMER_STOP("sweep");
+  CARTS_KERNEL_TIMER_STOP("jacobi-for");
 
-  // Compute checksum inline
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  // Verification (not timed)
   double checksum = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {

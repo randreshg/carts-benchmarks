@@ -85,6 +85,10 @@ static void sw4lite_vel4sg_update(float ***vx, float ***vy,
 }
 
 int main(void) {
+  CARTS_BENCHMARKS_START();
+
+  CARTS_E2E_TIMER_START("sw4lite_vel4sg_update");
+
   // Allocate 3D arrays
   float ***vx = (float ***)malloc(NX * sizeof(float **));
   float ***vy = (float ***)malloc(NX * sizeof(float **));
@@ -127,6 +131,8 @@ int main(void) {
   CARTS_KERNEL_TIMER_START("sw4lite_vel4sg_update");
   sw4lite_vel4sg_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
   CARTS_KERNEL_TIMER_STOP("sw4lite_vel4sg_update");
+
+  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   float checksum = 0.0f;

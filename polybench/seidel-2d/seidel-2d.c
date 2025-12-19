@@ -1,9 +1,9 @@
 /* POLYBENCH - Seidel 2D
  */
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 #ifndef N
 #define N 1000
@@ -16,8 +16,14 @@
 #endif
 
 int main(int argc, char **argv) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   int n = N;
   int tsteps = TSTEPS;
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("seidel-2d");
 
   /* Pointer-to-pointer allocation */
   DATA_TYPE **A = (DATA_TYPE **)malloc(n * sizeof(DATA_TYPE *));
@@ -32,7 +38,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  CARTS_KERNEL_TIMER_START("kernel_seidel_2d");
+  CARTS_KERNEL_TIMER_START("seidel-2d");
 
   /* Seidel-2D kernel - j loop is sequential due to A[i][j-1] dependency */
   for (int t = 0; t < tsteps; t++) {
@@ -47,9 +53,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  CARTS_KERNEL_TIMER_STOP("kernel_seidel_2d");
+  CARTS_KERNEL_TIMER_STOP("seidel-2d");
 
-  /* Compute checksum */
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  /* Verification (not timed) */
   double checksum = 0.0;
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < n; j++) {

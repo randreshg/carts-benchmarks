@@ -17,8 +17,8 @@
 
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 50x1000x1000. */
-#include "fdtd-2d.h"
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "fdtd-2d.h"
 
 /* Array initialization. */
 static void init_array(int tmax, int nx, int ny, DATA_TYPE **ex, DATA_TYPE **ey,
@@ -83,21 +83,22 @@ static void kernel_fdtd_2d(int tmax, int nx, int ny, DATA_TYPE **ex,
 }
 
 int main(int argc, char **argv) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   /* Retrieve problem size. */
   int tmax = TMAX;
   int nx = NX;
   int ny = NY;
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("fdtd-2d");
 
   /* Variable declaration/allocation. */
   DATA_TYPE **ex = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
   DATA_TYPE **ey = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
   DATA_TYPE **hz = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
   DATA_TYPE *_fict_ = (DATA_TYPE *)malloc(tmax * sizeof(DATA_TYPE));
-
-  // if (!ex || !ey || !hz || !_fict_) {
-  //   fprintf(stderr, "Memory allocation failed\n");
-  //   return 1;
-  // }
 
   for (int i = 0; i < nx; i++) {
     ex[i] = (DATA_TYPE *)malloc(ny * sizeof(DATA_TYPE));
@@ -112,15 +113,19 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("kernel_fdtd_2d");
+  CARTS_KERNEL_TIMER_START("fdtd-2d");
   kernel_fdtd_2d(tmax, nx, ny, ex, ey, hz, _fict_);
-  CARTS_KERNEL_TIMER_STOP("kernel_fdtd_2d");
+  CARTS_KERNEL_TIMER_STOP("fdtd-2d");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  /* Compute checksum inline (CARTS limitation: no helper functions) */
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  /* Verification (not timed) */
   double checksum = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {

@@ -1,9 +1,9 @@
 /* PolyBench-like 2D Jacobi */
 
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 #ifndef N
 #define N 1024
@@ -13,6 +13,12 @@
 #endif
 
 int main(void) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("jacobi2d");
+
   float **A = (float **)malloc(N * sizeof(float *));
   float **B = (float **)malloc(N * sizeof(float *));
 
@@ -55,7 +61,11 @@ int main(void) {
 
   CARTS_KERNEL_TIMER_STOP("jacobi2d");
 
-  // Compute checksum - result is in A if TSTEPS is even, B if odd
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
+
+  // Verification (not timed) - result is in A if TSTEPS is even, B if odd
   double checksum = 0.0;
   if (TSTEPS % 2 == 0) {
     // Even TSTEPS: last write was to A

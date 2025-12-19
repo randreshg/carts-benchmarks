@@ -1,25 +1,40 @@
 /* Transformer model implementation for carts benchmarks */
 
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <math.h>
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
+// Size configuration - can be overridden via compiler flags
+#ifndef DIM
 #define DIM 64
+#endif
+#ifndef HIDDEN_DIM
 #define HIDDEN_DIM 256
+#endif
+#ifndef N_LAYERS
 #define N_LAYERS 2
+#endif
+#ifndef N_HEADS
 #define N_HEADS 4
+#endif
+#ifndef N_KV_HEADS
 #define N_KV_HEADS 4
+#endif
+#ifndef VOCAB_SIZE
 #define VOCAB_SIZE 256
+#endif
+#ifndef SEQ_LEN
 #define SEQ_LEN 32
+#endif
 
 #define KV_DIM ((DIM * N_KV_HEADS) / N_HEADS)
 #define KV_MUL (N_HEADS / N_KV_HEADS)
 #define HEAD_SIZE (DIM / N_HEADS)
 
 // ============================================================================
-// Memory allocation helpers 
+// Memory allocation helpers
 // ============================================================================
 
 static float **alloc_2d(int rows, int cols) {
@@ -57,7 +72,6 @@ static void free_3d(float ***arr, int d1, int d2) {
   }
   free(arr);
 }
-
 
 // ============================================================================
 // Helper functions
@@ -203,8 +217,8 @@ static void initialize_test_data(float **token_embedding_table,
 
 static float *forward(
     // Model weights
-    float **token_embedding_table, float **rms_att_weight, float **rms_ffn_weight,
-    float ***wq, float ***wk, float ***wv, float ***wo,
+    float **token_embedding_table, float **rms_att_weight,
+    float **rms_ffn_weight, float ***wq, float ***wk, float ***wv, float ***wo,
     float ***w1, float ***w2, float ***w3, float *rms_final_weight,
     // State buffers
     float *x, float *xb, float *xb2, float *hb, float *hb2, float *q_buf,
@@ -227,7 +241,8 @@ static float *forward(
     matmul(key_cache[l][pos], xb, wk[l], DIM, KV_DIM);
     matmul(value_cache[l][pos], xb, wv[l], DIM, KV_DIM);
 
-    // RoPE relative positional encoding: complex-valued rotate q and k in each head
+    // RoPE relative positional encoding: complex-valued rotate q and k in each
+    // head
     for (int i = 0; i < DIM; i += 2) {
       int head_dim = i % HEAD_SIZE;
       float freq = 1.0f / powf(10000.0f, (float)head_dim / (float)HEAD_SIZE);
@@ -337,10 +352,16 @@ static float *forward(
 // ============================================================================
 
 int main(void) {
+  // Pre-warm OMP thread pool for fair comparison (must be first)
+  CARTS_BENCHMARKS_START();
+
   printf("Testing isolated Transformer neural network functions\n");
   printf("Configuration: dim=%d, hidden_dim=%d, n_layers=%d, n_heads=%d, "
          "vocab_size=%d\n",
          DIM, HIDDEN_DIM, N_LAYERS, N_HEADS, VOCAB_SIZE);
+
+  // E2E timing: includes DB creation (malloc/init) + kernel
+  CARTS_E2E_TIMER_START("transformer");
 
   // Allocate model weights using pointer-to-pointer pattern
   float **token_embedding_table = alloc_2d(VOCAB_SIZE, DIM);
@@ -380,12 +401,16 @@ int main(void) {
   int test_token = 42;
   int test_pos = 0;
 
-  CARTS_KERNEL_TIMER_START("transformer_forward");
+  CARTS_KERNEL_TIMER_START("transformer");
   float *logits_out =
       forward(token_embedding_table, rms_att_weight, rms_ffn_weight, wq, wk, wv,
               wo, w1, w2, w3, rms_final_weight, x, xb, xb2, hb, hb2, q_buf,
               att_buf, logits, key_cache, value_cache, test_token, test_pos);
-  CARTS_KERNEL_TIMER_STOP("transformer_forward");
+  CARTS_KERNEL_TIMER_STOP("transformer");
+
+  // E2E stops after kernel, before verification/memfree
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   printf("Forward pass completed. First 10 logits: ");
   for (int i = 0; i < 10; i++) {
@@ -393,7 +418,7 @@ int main(void) {
   }
   printf("\n");
 
-  // Compute checksum of logits
+  // Verification (not timed)
   float checksum = 0.0f;
   for (int i = 0; i < VOCAB_SIZE; i++) {
     checksum += logits_out[i];
@@ -417,8 +442,12 @@ int main(void) {
 
   // Matmul test with 2D array
   float **test_w = alloc_2d(2, 3);
-  test_w[0][0] = 1.0f; test_w[0][1] = 2.0f; test_w[0][2] = 3.0f;
-  test_w[1][0] = 4.0f; test_w[1][1] = 5.0f; test_w[1][2] = 6.0f;
+  test_w[0][0] = 1.0f;
+  test_w[0][1] = 2.0f;
+  test_w[0][2] = 3.0f;
+  test_w[1][0] = 4.0f;
+  test_w[1][1] = 5.0f;
+  test_w[1][2] = 6.0f;
   float test_vec[3] = {1.0f, 1.0f, 1.0f};
   float test_result[2];
   matmul(test_result, test_vec, test_w, 3, 2);
