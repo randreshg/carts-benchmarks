@@ -35,9 +35,7 @@ OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp
 
 # Auto-detect arts.cfg
 ARTS_CFG ?= $(firstword $(wildcard arts.cfg))
-ifneq ($(strip $(ARTS_CFG)),)
-  ARTS_CFG_ARG := --arts-config $(ARTS_CFG)
-endif
+ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
 
 # Compile flags for carts execute (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
@@ -121,19 +119,19 @@ extralarge:
 # Build only ARTS with size
 small-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with SMALL size"
-	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 medium-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with MEDIUM size"
-	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 large-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with LARGE size"
-	$(MAKE) all CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 extralarge-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with EXTRALARGE size"
-	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 # Build only OpenMP with size
 small-openmp:
@@ -152,7 +150,7 @@ extralarge-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with EXTRALARGE size"
 	$(MAKE) openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
-# Build and run both variants with size (preserves OMP_WAIT_POLICY=ACTIVE)
+# Build and run both variants with size
 run-small: small
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (SMALL)..."
 	./$(ARTS_BINARY)

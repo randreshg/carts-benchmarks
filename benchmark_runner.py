@@ -54,6 +54,7 @@ VERSION = "0.1.0"
 DEFAULT_TIMEOUT = 60
 DEFAULT_SIZE = "small"
 DEFAULT_TOLERANCE = 1e-2  # 1% tolerance for FP operation ordering differences
+DEFAULT_ARTS_CONFIG = Path(__file__).parent / "arts.cfg"
 
 CHECKSUM_PATTERNS = [
     r"checksum[:\s]*=?\s*([0-9.eE+-]+)",
@@ -452,58 +453,74 @@ def get_weak_scaling_cflags(
 
 
 def generate_arts_config(
-    base_path: Optional[Path],
+    base_path: Path,
     threads: int,
     counter_dir: Optional[Path] = None,
     launcher: str = "ssh",
-    node_count: int = 1,
+    nodes_override: Optional[int] = None,
 ) -> Path:
-    """Generate temporary arts.cfg with specific configuration.
+    """Generate temporary arts.cfg with specific configuration from a template.
 
-    The generated config must include all required ARTS keys:
-    - launcher: Required (ARTS dereferences without null check in Config.c:621)
-    - threads: Worker thread count per node
-    - nodeCount: Number of nodes (1 for single-node)
-    - masterNode: Primary node for coordination
+    The base_path must be a valid config file that serves as a template.
+    This ensures proper node hostnames are preserved for the SSH launcher.
+
+    Args:
+        base_path: Template config file (required). Must contain nodes= with hostnames.
+        threads: Worker thread count per node.
+        counter_dir: Optional directory for counter output.
+        launcher: ARTS launcher type (ssh, slurm, lsf, local).
+        nodes_override: If set, use only the first N nodes from the template's nodes= list.
 
     Note: For Slurm, nodeCount in config is IGNORED - ARTS reads SLURM_NNODES
     from environment (set by srun). The launcher controls HOW we invoke the
     executable, not just what's in the config.
     """
-    if base_path and base_path.exists():
-        content = base_path.read_text()
-    else:
-        # Default config with ALL required keys
-        # ARTS requires launcher to be set (Config.c:621 dereferences without null check)
-        # NOTE: launcher=local with ports=0 causes segfaults on shutdown
-        content = f"""[ARTS]
-threads=1
-nodeCount=1
-launcher={launcher}
-masterNode=localhost
-tMT=0
-outgoing=1
-incoming=1
-ports=1
-"""
+    if not base_path.exists():
+        raise ValueError(f"Config template not found: {base_path}")
+
+    content = base_path.read_text()
 
     # Update threads
-    if re.search(r'^threads=', content, re.MULTILINE):
+    if re.search(r'^threads\s*=', content, re.MULTILINE):
         content = re.sub(
-            r'^threads=\d+', f'threads={threads}', content, flags=re.MULTILINE)
+            r'^threads\s*=\s*\d+', f'threads={threads}', content, flags=re.MULTILINE)
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
 
-    # Update nodeCount
-    if re.search(r'^nodeCount=', content, re.MULTILINE):
-        content = re.sub(
-            r'^nodeCount=\d+', f'nodeCount={node_count}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
+    # Handle nodes override: truncate the nodes= list and update nodeCount
+    if nodes_override is not None:
+        all_nodes = get_arts_cfg_nodes(base_path)
+        if nodes_override > len(all_nodes):
+            raise ValueError(
+                f"Requested --nodes {nodes_override} but config '{base_path}' only has {len(all_nodes)} node(s).\n"
+                f"Use --arts-config to specify a config template with sufficient nodes.\n"
+                f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
+            )
+        truncated = all_nodes[:nodes_override]
+        truncated_str = ",".join(truncated)
+
+        # Update nodes= line
+        if re.search(r'^nodes\s*=', content, re.MULTILINE):
+            content = re.sub(
+                r'^nodes\s*=.*$', f'nodes={truncated_str}', content, flags=re.MULTILINE)
+        else:
+            content = content.replace('[ARTS]', f'[ARTS]\nnodes={truncated_str}')
+
+        # Update nodeCount
+        if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
+            content = re.sub(
+                r'^nodeCount\s*=\s*\d+', f'nodeCount={nodes_override}', content, flags=re.MULTILINE)
+        else:
+            content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={nodes_override}')
+
+        # Update masterNode to first node in truncated list
+        if re.search(r'^masterNode\s*=', content, re.MULTILINE):
+            content = re.sub(
+                r'^masterNode\s*=.*$', f'masterNode={truncated[0]}', content, flags=re.MULTILINE)
 
     # Update launcher
-    if re.search(r'^launcher=', content, re.MULTILINE):
-        content = re.sub(r'^launcher=\w+',
+    if re.search(r'^launcher\s*=', content, re.MULTILINE):
+        content = re.sub(r'^launcher\s*=\s*\w+',
                          f'launcher={launcher}', content, flags=re.MULTILINE)
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nlauncher={launcher}')
@@ -512,8 +529,14 @@ ports=1
     if counter_dir:
         content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
 
-    # Write to temp file
-    temp_path = Path(tempfile.mkdtemp()) / f"arts_{threads}t_{node_count}n.cfg"
+    # Determine node count for filename
+    node_count = nodes_override if nodes_override else get_arts_cfg_int(base_path, "nodeCount") or 1
+
+    # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
+    # The carts-benchmarks directory is shared across all nodes via mounted volume
+    generated_configs_dir = Path(__file__).parent / ".generated_configs"
+    generated_configs_dir.mkdir(exist_ok=True)
+    temp_path = generated_configs_dir / f"arts_{threads}t_{node_count}n.cfg"
     temp_path.write_text(content)
     return temp_path
 
@@ -564,6 +587,16 @@ def get_arts_cfg_str(path: Optional[Path], key: str) -> Optional[str]:
     vals = parse_arts_cfg(path)
     v = vals.get(key)
     return v if v else None
+
+
+def get_arts_cfg_nodes(path: Optional[Path]) -> List[str]:
+    """Parse nodes= field from arts.cfg into list of hostnames.
+
+    Returns list of hostnames from the nodes= field, or ["localhost"] if not found.
+    """
+    cfg = parse_arts_cfg(path)
+    nodes_str = cfg.get("nodes", "localhost")
+    return [n.strip() for n in nodes_str.split(",") if n.strip()]
 
 
 # Counter level mapping
@@ -1026,7 +1059,7 @@ class BenchmarkRunner:
         timeout: int = DEFAULT_TIMEOUT,
         omp_threads: Optional[int] = None,
         launcher: Optional[str] = None,
-        node_count: Optional[int] = None,
+        nodes: Optional[int] = None,
         weak_scaling: bool = False,
         base_size: Optional[int] = None,
         runs: int = 1,
@@ -1040,7 +1073,7 @@ class BenchmarkRunner:
                         comparing ARTS scaling against OpenMP at its optimal.
             launcher: Optional override for launcher (default: from arts.cfg).
                       For Slurm, this controls how the executable is invoked (via srun).
-            node_count: Optional override for nodeCount (default: from arts.cfg).
+            nodes: Optional override for nodeCount (default: from arts.cfg).
             weak_scaling: If True, scale problem size with parallelism.
             base_size: Base problem size for weak scaling.
             runs: Number of times to run each configuration.
@@ -1058,15 +1091,21 @@ class BenchmarkRunner:
 
         bench_path = self.benchmarks_dir / name
 
-        # Default: use the benchmark's own arts.cfg as the base config.
-        if base_config is None:
+        # Determine effective config template:
+        # 1. Use explicitly provided base_config
+        # 2. Fall back to benchmark's own arts.cfg
+        # 3. Fall back to default carts-benchmarks config
+        effective_config = base_config
+        if effective_config is None:
             candidate = bench_path / "arts.cfg"
             if candidate.exists():
-                base_config = candidate
+                effective_config = candidate
+            else:
+                effective_config = DEFAULT_ARTS_CONFIG
 
-        base_nodes = get_arts_cfg_int(base_config, "nodeCount") or 1
-        base_launcher = get_arts_cfg_str(base_config, "launcher") or "ssh"
-        desired_nodes = node_count if node_count is not None else base_nodes
+        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
+        base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
+        desired_nodes = nodes if nodes is not None else base_nodes
         desired_launcher = launcher if launcher is not None else base_launcher
 
         # Create timestamped experiment directory ONCE per experiment
@@ -1078,8 +1117,9 @@ class BenchmarkRunner:
 
         for threads in threads_list:
             # Generate arts.cfg with thread count, launcher, and node count
+            # Pass nodes (CLI override) instead of desired_nodes to avoid unnecessary nodes= modification
             arts_cfg = generate_arts_config(
-                base_config, threads, counter_dir, desired_launcher, desired_nodes
+                effective_config, threads, counter_dir, desired_launcher, nodes
             )
 
             # Compute effective cflags (may include weak scaling size overrides)
@@ -1161,8 +1201,8 @@ class BenchmarkRunner:
                         build_arts.executable,
                         timeout,
                         env=arts_env,
-                        launcher=launcher,
-                        node_count=node_count,
+                        launcher=desired_launcher,
+                        node_count=desired_nodes,
                         threads=threads,
                         log_file=arts_log,
                     )
@@ -1688,7 +1728,7 @@ class BenchmarkRunner:
         verify: bool = True,
         arts_config: Optional[Path] = None,
         threads_override: Optional[int] = None,
-        node_count_override: Optional[int] = None,
+        nodes_override: Optional[int] = None,
         launcher_override: Optional[str] = None,
         omp_threads_override: Optional[int] = None,
         counter_dir: Optional[Path] = None,
@@ -1707,37 +1747,44 @@ class BenchmarkRunner:
         bench_path = self.benchmarks_dir / name
         suite = name.split("/")[0] if "/" in name else ""
 
-        # Determine the effective ARTS config for this benchmark.
-        # Default: use the benchmark's own arts.cfg (if present).
-        base_cfg = arts_config
-        if base_cfg is None:
+        # Determine effective config template:
+        # 1. Use explicitly provided arts_config
+        # 2. Fall back to benchmark's own arts.cfg
+        # 3. Fall back to default carts-benchmarks config
+        effective_config = arts_config
+        if effective_config is None:
             candidate = bench_path / "arts.cfg"
             if candidate.exists():
-                base_cfg = candidate
+                effective_config = candidate
+            else:
+                effective_config = DEFAULT_ARTS_CONFIG
 
-        base_threads = get_arts_cfg_int(base_cfg, "threads") or 1
-        base_nodes = get_arts_cfg_int(base_cfg, "nodeCount") or 1
-        base_launcher = get_arts_cfg_str(base_cfg, "launcher") or "ssh"
+        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
+        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
+        base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
 
         desired_threads = threads_override if threads_override is not None else base_threads
-        desired_nodes = node_count_override if node_count_override is not None else base_nodes
+        desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
 
-        # If the benchmark has no arts.cfg, always generate a minimal one to avoid
-        # ARTS dereferencing a missing launcher field.
-        need_generated = (base_cfg is None)
-        if threads_override is not None or node_count_override is not None or launcher_override is not None:
+        # Generate config with overrides only if values actually differ from base
+        need_generated = False
+        if threads_override is not None and threads_override != base_threads:
+            need_generated = True
+        if nodes_override is not None and nodes_override != base_nodes:
+            need_generated = True
+        if launcher_override is not None and launcher_override != base_launcher:
             need_generated = True
         if counter_dir is not None:
             need_generated = True
 
-        effective_arts_cfg: Optional[Path]
+        effective_arts_cfg: Path
         if need_generated:
             effective_arts_cfg = generate_arts_config(
-                base_cfg, desired_threads, counter_dir, desired_launcher, desired_nodes
+                effective_config, desired_threads, counter_dir, desired_launcher, nodes_override
             )
         else:
-            effective_arts_cfg = base_cfg
+            effective_arts_cfg = effective_config
 
         # Clean before building to avoid stale artifacts
         if self.clean:
@@ -1891,7 +1938,7 @@ class BenchmarkRunner:
         verify: bool = True,
         arts_config: Optional[Path] = None,
         threads_override: Optional[int] = None,
-        node_count_override: Optional[int] = None,
+        nodes_override: Optional[int] = None,
         launcher_override: Optional[str] = None,
         omp_threads_override: Optional[int] = None,
         counter_dir: Optional[Path] = None,
@@ -1912,7 +1959,7 @@ class BenchmarkRunner:
                     verify,
                     arts_config,
                     threads_override,
-                    node_count_override,
+                    nodes_override,
                     launcher_override,
                     omp_threads_override,
                     counter_dir,
@@ -1956,7 +2003,7 @@ class BenchmarkRunner:
                     verify,
                     arts_config,
                     threads_override,
-                    node_count_override,
+                    nodes_override,
                     launcher_override,
                     omp_threads_override,
                     counter_dir,
@@ -2159,7 +2206,7 @@ def _run_single_worker(
     verify: bool,
     arts_config: Optional[str],
     threads_override: Optional[int] = None,
-    node_count_override: Optional[int] = None,
+    nodes_override: Optional[int] = None,
     launcher_override: Optional[str] = None,
     omp_threads_override: Optional[int] = None,
     counter_dir: Optional[str] = None,
@@ -2176,7 +2223,7 @@ def _run_single_worker(
         verify,
         Path(arts_config) if arts_config else None,
         threads_override,
-        node_count_override,
+        nodes_override,
         launcher_override,
         omp_threads_override,
         Path(counter_dir) if counter_dir else None,
@@ -4197,8 +4244,8 @@ def run(
         None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
     launcher: Optional[str] = typer.Option(
         None, "--launcher", "-l", help="Override ARTS launcher: ssh, slurm, lsf, local (default: from arts.cfg)"),
-    node_count: Optional[int] = typer.Option(
-        None, "--node-count", "-n", help="Override nodeCount (default: from arts.cfg)"),
+    nodes: Optional[int] = typer.Option(
+        None, "--nodes", "-n", help="Override nodeCount from config (uses first N nodes)"),
     weak_scaling: bool = typer.Option(
         False, "--weak-scaling", help="Enable weak scaling: auto-scale problem size with parallelism"),
     base_size: Optional[int] = typer.Option(
@@ -4265,8 +4312,8 @@ def run(
             config_items.append(f"threads={threads}")
         if launcher is not None:
             config_items.append(f"launcher={launcher}")
-        if node_count is not None:
-            config_items.append(f"nodes={node_count}")
+        if nodes is not None:
+            config_items.append(f"nodes={nodes}")
         if runs > 1:
             config_items.append(f"runs={runs}")
         if cflags:
@@ -4294,41 +4341,45 @@ def run(
         threads_override = int(threads_list[0])
         threads_list = None
 
-    if threads_list and len(bench_list) == 1 and len(threads_list) > 1:
-        # Thread sweep mode for single benchmark
-        results, experiment_dir, actual_json_path = runner.run_with_thread_sweep(
-            bench_list[0],
-            size,
-            threads_list,
-            arts_config,
-            cflags or "",
-            counter_dir,
-            timeout,
-            omp_threads,
-            launcher,
-            node_count,
-            weak_scaling,
-            base_size,
-            runs,
-            output,  # Pass output_path for artifact organization
-        )
-    else:
-        # Standard mode
-        if threads_list and len(threads_list) == 1:
-            threads_override = int(threads_list[0])
-            threads_list = None
-        results = runner.run_all(
-            bench_list,
-            size=size,
-            timeout=timeout,
-            verify=verify,
-            arts_config=arts_config,
-            threads_override=threads_override,
-            node_count_override=node_count,
-            launcher_override=launcher,
-            omp_threads_override=omp_threads,
-            counter_dir=counter_dir,
-        )
+    try:
+        if threads_list and len(bench_list) == 1 and len(threads_list) > 1:
+            # Thread sweep mode for single benchmark
+            results, experiment_dir, actual_json_path = runner.run_with_thread_sweep(
+                bench_list[0],
+                size,
+                threads_list,
+                arts_config,
+                cflags or "",
+                counter_dir,
+                timeout,
+                omp_threads,
+                launcher,
+                nodes,
+                weak_scaling,
+                base_size,
+                runs,
+                output,  # Pass output_path for artifact organization
+            )
+        else:
+            # Standard mode
+            if threads_list and len(threads_list) == 1:
+                threads_override = int(threads_list[0])
+                threads_list = None
+            results = runner.run_all(
+                bench_list,
+                size=size,
+                timeout=timeout,
+                verify=verify,
+                arts_config=arts_config,
+                threads_override=threads_override,
+                nodes_override=nodes,
+                launcher_override=launcher,
+                omp_threads_override=omp_threads,
+                counter_dir=counter_dir,
+            )
+    except ValueError as e:
+        console.print(f"\n[red]Error:[/] {e}")
+        raise typer.Exit(1)
 
     total_duration = time.time() - start_time
 
@@ -4360,7 +4411,7 @@ def run(
         runs,
         artifacts_dir_name,
         fixed_threads=threads_override,
-        fixed_nodes=node_count,
+        fixed_nodes=nodes,
         omp_threads_override=omp_threads,
         arts_config_override=str(arts_config) if arts_config else None,
     )
