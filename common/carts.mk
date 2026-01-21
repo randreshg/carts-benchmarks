@@ -40,6 +40,8 @@ ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
 
 # Compile flags for carts execute (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
+# Extra carts execute flags (e.g., --partition-fallback=fine)
+EXECUTE_ARGS ?=
 
 # Compile flags for OpenMP reference
 OMP_FLAGS := -fopenmp -O3 $(INCLUDES) $(CFLAGS) -lm -lcartsbenchmarks
@@ -50,7 +52,7 @@ OMP_FLAGS := -fopenmp -O3 $(INCLUDES) $(CFLAGS) -lm -lcartsbenchmarks
 all: | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
 	@$(CARTS) execute $(if $(LDFLAGS),--compile-args "$(LDFLAGS)") \
-		$(SRC) -O3 $(ARTS_CFG_ARG) $(EXECUTE_FLAGS) \
+		$(EXECUTE_ARGS) $(SRC) -O3 $(ARTS_CFG_ARG) $(EXECUTE_FLAGS) \
 		> $(LOG_DIR)/build.log 2>&1 || (cat $(LOG_DIR)/build.log >&2; exit 1)
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 

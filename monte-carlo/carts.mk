@@ -13,5 +13,8 @@ INCLUDES ?= -I$(MONTE_CARLO_ROOT)/common
 ifneq ($(wildcard $(MONTE_CARLO_ROOT)/arts.cfg),)
   ARTS_CFG ?= $(MONTE_CARLO_ROOT)/arts.cfg
 endif
+ifneq ($(wildcard $(BENCHMARKS_ROOT)/arts.cfg),)
+  ARTS_CFG ?= $(BENCHMARKS_ROOT)/arts.cfg
+endif
 
 include $(BENCHMARKS_ROOT)/common/carts.mk

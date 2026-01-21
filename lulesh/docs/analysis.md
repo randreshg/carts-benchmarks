@@ -2,10 +2,32 @@
 
 Walk through these steps and fix any problem that you find in the way
 
+---
+
+## Bug Fix: ARTS crash with indirect indices (Fixed)
+
+**Problem:** `lulesh_arts` crashed in `__arts_edt_3` with a null dependency
+pointer.
+
+**Root Cause:** dbpartitioning allowed chunked acquires when the index was
+derived from a memory load (indirect gather via `nodelist`). The dependency
+indexing then referenced depv slots that were never acquired.
+
+**Fix:** Treat indirect indices (values derived from `memref.load`/`llvm.load`)
+as non-partitionable by default. This keeps arrays like `x/y/z` coarse even
+when offset/size hints exist. Use `--partition-fallback=fine` to allow
+element-wise partitioning for non-affine accesses when you want to explore
+performance tradeoffs.
+
+**Result:** `carts benchmarks run lulesh --size small` passes (ARTS+OMP
+verification succeeds).
+
+---
+
 1. **Navigate to the lulesh example directory:**
 
    ```bash
-   cd ~/Documents/carts/external/carts-benchmarks/lulesh
+   cd /Users/randreshg/Documents/carts/external/carts-benchmarks/lulesh
    ```
 
 2. **Build carts if any changes were made:**
@@ -43,61 +65,34 @@ Walk through these steps and fix any problem that you find in the way
    in `elementSizes[...]`, and that `arts.db_ref` indexes the outer dimension
    before accessing the inner memref.
 
+   If you need to inspect initialization values, enable the debug prints:
+   ```bash
+   CARTS_LULESH_DEBUG=1 ./lulesh_arts -s 3 -i 1
+   ```
+   This prints `e/p/q/v/volo/nodalMass` and `nodelist` values after init.
+
 4. **Concurrency-opt checkpoint**
    ```bash
    carts run lulesh.mlir --concurrency-opt &> lulesh_concurrency_opt.mlir
    ```
-   Check that arrays tied to the parallel loop are chunked (non-zero
-   `arts.partition = #arts.promotion_mode<chunked>` and `db_acquire` offsets
-   are not always 0). If everything is coarse, inspect the access pattern
-   and offset hints for the first dynamic index.
-
-5. **Relax partitioning heuristics (dbpartitioning)**
-   If allocations are still coarse-grained, relax the heuristics so chunking
-   is allowed when offsets/sizes clearly map to the parallel loop.
-
-   Inspect partitioning signals:
+   Check that arrays tied to the parallel loop are chunked only when the
+   access is direct. For indirect gathers (e.g., `x/y/z` indexed by
+   `nodelist`), `arts.partition` should be `none` (coarse) and `db_acquire`
+   offsets should be `%c0` by default. To experiment with element-wise fallback:
    ```bash
-   rg -n "arts.db_alloc|arts.db_acquire|arts.partition" lulesh_concurrency_opt.mlir
+   carts run lulesh.mlir --concurrency-opt --partition-fallback=fine \
+     &> lulesh_concurrency_opt_fine.mlir
    ```
 
-   Update the decision rules (see `docs/heuristics/partitioning/partitioning.md`):
-   - Treat an allocation as chunkable if at least one acquire has valid
-     `offset_hints`/`size_hints` and passes offset validation.
-   - Allow coarse acquires to coexist with a chunked allocation (full acquire
-     for non-parallel regions), instead of forcing coarse for the entire DB.
-   - If metadata for distinct allocations is merged (e.g., helper allocation
-     wrappers), include callsite info in the allocation id so heuristics see
-     the correct per-array access pattern.
-
-   Re-run `--concurrency-opt` and confirm arrays tied to parallel loops
-   get `arts.partition = #arts.promotion_mode<chunked>`.
-
-6. **Optional: print init values**
-   The code includes debug hooks for initialization and per-cycle summaries.
-   Enable them with:
-   ```bash
-   CARTS_LULESH_DEBUG=1 artsConfig=arts.cfg ./lulesh_arts -s 3 -i 5
-   ```
-
-7. **Finally lets carts execute and check**
+5. **Finally lets carts execute and check**
 
    ```bash
    carts execute lulesh.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    artsConfig=arts.cfg ./lulesh_arts -s 3 -i 5
    ```
 
-8. **Run with carts benchmarks and check**
+6. **Run with carts benchmarks and check**
 
    ```bash
    carts benchmarks run lulesh --size small
    ```
-
-Notes
-
-- LULESH uses array-of-arrays (e.g., `Index_t **nodelist`, `Real_t **fx_elem`)
-  so `canonicalize-memrefs` can materialize explicit memref dimensions.
-- `CARTS_QSTOP` can be overridden with `-DCARTS_QSTOP=...`. The Makefile sets
-  `-DCARTS_QSTOP=1.0e+30`.
-- `carts benchmarks run` uses `SMALL_ARGS`, `MEDIUM_ARGS`, etc from the
-  Makefile (e.g., `SMALL_ARGS := -s 10 -i 10`).

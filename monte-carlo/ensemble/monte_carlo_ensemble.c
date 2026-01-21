@@ -63,12 +63,17 @@ int main(int argc, char *argv[]) {
     CARTS_E2E_TIMER_START("monte_carlo_ensemble");
 
     double global_sum = 0.0;
+    double *sample_sums = (double *)malloc(num_samples * sizeof(double));
+    if (!sample_sums) {
+        fprintf(stderr, "Failed to allocate sample_sums\n");
+        return 1;
+    }
 
     CARTS_KERNEL_TIMER_START("parallel_samples");
 
     /* Process samples in parallel - state allocated INSIDE loop */
     /* This is the key pattern for distributed scaling */
-    #pragma omp parallel for reduction(+: global_sum) schedule(dynamic)
+    #pragma omp parallel for schedule(dynamic)
     for (unsigned s = 0; s < num_samples; s++) {
         /* Allocate sample state INSIDE loop (distributed by CARTS) */
         /* Using array-of-arrays pattern required by CARTS */
@@ -86,13 +91,18 @@ int main(int argc, char *argv[]) {
 
         /* Reduce sample result and accumulate */
         double sample_result = reduce_state(state, state_dim);
-        global_sum += sample_result;
+        sample_sums[s] = sample_result;
 
         /* Free local state */
         free_state(state, state_dim);
     }
 
     CARTS_KERNEL_TIMER_STOP("parallel_samples");
+
+    for (unsigned s = 0; s < num_samples; s++) {
+        global_sum += sample_sums[s];
+    }
+    free(sample_sums);
 
     CARTS_E2E_TIMER_STOP();
 

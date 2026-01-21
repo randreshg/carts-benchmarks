@@ -52,7 +52,7 @@ int main(int argc, char *argv[]) {
     CARTS_E2E_TIMER_START("graph_gen");
 
     /* Allocate outer arrays (vertex pointers and counts) */
-    uint64_t **adj_list = (uint64_t **)malloc(num_vertices * sizeof(uint64_t*));
+    uint64_t **adj_list = (uint64_t **)malloc(num_vertices * sizeof(uint64_t *));
     uint64_t *adj_count = (uint64_t *)malloc(num_vertices * sizeof(uint64_t));
 
     /* Total edges generated (for checksum) */
@@ -60,11 +60,9 @@ int main(int argc, char *argv[]) {
 
     CARTS_KERNEL_TIMER_START("parallel_gen");
 
-    /* Generate edges - each vertex's neighbors allocated INSIDE loop */
-    /* This is the key pattern for distributed scaling */
-    #pragma omp parallel for schedule(dynamic) reduction(+: total_edges)
+    /* Generate edges - allocate adjacency list INSIDE loop */
+    #pragma omp parallel for schedule(dynamic)
     for (uint64_t v = 0; v < num_vertices; v++) {
-        /* Allocate this vertex's adjacency list INSIDE loop (distributed by CARTS) */
         adj_list[v] = (uint64_t *)malloc(edges_per_vertex * sizeof(uint64_t));
         adj_count[v] = 0;
 
@@ -73,13 +71,15 @@ int main(int argc, char *argv[]) {
             uint64_t target = rmat_target(v, num_vertices, e);
             adj_list[v][adj_count[v]++] = target;
         }
-
-        total_edges += adj_count[v];
     }
 
     CARTS_KERNEL_TIMER_STOP("parallel_gen");
 
     CARTS_E2E_TIMER_STOP();
+
+    for (uint64_t v = 0; v < num_vertices; v++) {
+        total_edges += adj_count[v];
+    }
 
     /* Compute checksum */
     double checksum = (double)total_edges;

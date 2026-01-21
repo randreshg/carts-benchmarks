@@ -970,6 +970,7 @@ class BenchmarkRunner:
         variant: str = "arts",
         arts_config: Optional[Path] = None,
         cflags: str = "",
+        arts_exec_args: Optional[str] = None,
     ) -> BuildResult:
         """Build a single benchmark using make."""
         bench_path = self.benchmarks_dir / name
@@ -1023,6 +1024,9 @@ class BenchmarkRunner:
         # Add ARTS config override if provided
         if arts_config and variant != "openmp":
             cmd.append(f"ARTS_CFG={arts_config}")
+        if arts_exec_args and variant != "openmp":
+            escaped_args = arts_exec_args.replace("\\", "\\\\").replace(" ", "\\ ")
+            cmd.append(f"EXECUTE_ARGS={escaped_args}")
 
         # Debug output level 1: show commands
         if self.debug >= 1:
@@ -1116,6 +1120,7 @@ class BenchmarkRunner:
         base_size: Optional[int] = None,
         runs: int = 1,
         output_path: Optional[Path] = None,
+        arts_exec_args: Optional[str] = None,
     ) -> Tuple[List[BenchmarkResult], Optional[Path], Optional[Path]]:
         """Run benchmark with multiple thread configurations.
 
@@ -1198,7 +1203,7 @@ class BenchmarkRunner:
 
             # Build both variants ONCE per thread config (with potentially different cflags per thread count)
             build_arts = self.build_benchmark(
-                name, size, "arts", arts_cfg, effective_cflags)
+                name, size, "arts", arts_cfg, effective_cflags, arts_exec_args)
             build_omp = self.build_benchmark(
                 name, size, "openmp", None, effective_cflags)
 
@@ -1798,6 +1803,7 @@ class BenchmarkRunner:
         launcher_override: Optional[str] = None,
         omp_threads_override: Optional[int] = None,
         counter_dir: Optional[Path] = None,
+        arts_exec_args: Optional[str] = None,
         phase_callback: Optional[Callable[[Phase], None]] = None,
         partial_results: Optional[Dict[str, Any]] = None,
     ) -> BenchmarkResult:
@@ -1860,7 +1866,7 @@ class BenchmarkRunner:
         if phase_callback:
             phase_callback(Phase.BUILD_ARTS)
         build_arts = self.build_benchmark(
-            name, size, "arts", effective_arts_cfg)
+            name, size, "arts", effective_arts_cfg, "", arts_exec_args)
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
@@ -2019,6 +2025,7 @@ class BenchmarkRunner:
         launcher_override: Optional[str] = None,
         omp_threads_override: Optional[int] = None,
         counter_dir: Optional[Path] = None,
+        arts_exec_args: Optional[str] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2040,6 +2047,7 @@ class BenchmarkRunner:
                     launcher_override,
                     omp_threads_override,
                     counter_dir,
+                    arts_exec_args,
                 )
                 results_list.append(result)
             self.results = results_list
@@ -2085,6 +2093,7 @@ class BenchmarkRunner:
                     launcher_override,
                     omp_threads_override,
                     counter_dir,
+                    arts_exec_args,
                     phase_callback,
                     current_partial[0],
                 )
@@ -4430,6 +4439,8 @@ def run(
         None, "--base-size", help="Base problem size for weak scaling (at base parallelism)"),
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
+    arts_exec_args: Optional[str] = typer.Option(
+        None, "--arts-exec-args", help="Extra carts execute args (e.g., '--partition-fallback=fine')"),
     debug_level: int = typer.Option(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=full output"),
     counters: int = typer.Option(
@@ -4498,6 +4509,8 @@ def run(
             config_items.append(f"runs={runs}")
         if cflags:
             config_items.append(f"cflags={cflags}")
+        if arts_exec_args:
+            config_items.append(f"arts-exec-args={arts_exec_args}")
         if debug_level > 0:
             config_items.append(f"debug={debug_level}")
         if counters > 0:
@@ -4587,6 +4600,7 @@ def run(
                 base_size,
                 runs,
                 output,  # Pass output_path for artifact organization
+                arts_exec_args,
             )
         else:
             # Standard mode
@@ -4604,6 +4618,7 @@ def run(
                 launcher_override=launcher,
                 omp_threads_override=omp_threads,
                 counter_dir=counter_dir,
+                arts_exec_args=arts_exec_args,
             )
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")

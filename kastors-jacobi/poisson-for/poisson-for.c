@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
+static int carts_debug_enabled(const char *name) {
+  const char *val = getenv(name);
+  return val && val[0] != '\0';
+}
+
 static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
                   int itnew, double **u, double **unew, int block_size) {
   int i, j, it;
@@ -24,6 +29,16 @@ static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
       }
     }
 
+    if (carts_debug_enabled("CARTS_DEBUG_SWEEP")) {
+      double u_sum = 0.0;
+      for (i = 0; i < nx; i++) {
+        for (j = 0; j < ny; j++) {
+          u_sum += u[i][j];
+        }
+      }
+      printf("u_sum_it%d: %.9e\n", it, u_sum);
+    }
+
     // Compute a new estimate
 #pragma omp parallel for private(j)
     for (i = 0; i < nx; i++) {
@@ -35,6 +50,16 @@ static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
                                u[i + 1][j] + f[i][j] * dx * dy);
         }
       }
+    }
+
+    if (carts_debug_enabled("CARTS_DEBUG_SWEEP")) {
+      double iter_sum = 0.0;
+      for (i = 0; i < nx; i++) {
+        for (j = 0; j < ny; j++) {
+          iter_sum += unew[i][j];
+        }
+      }
+      printf("unew_sum_it%d: %.9e\n", it, iter_sum);
     }
   }
 }
@@ -108,6 +133,16 @@ int main(void) {
   // Set the right hand side array F
   rhs(nx, ny, f, block_size);
 
+  if (carts_debug_enabled("CARTS_DEBUG_INIT")) {
+    double f_sum = 0.0;
+    for (int i = 0; i < nx; i++) {
+      for (int j = 0; j < ny; j++) {
+        f_sum += f[i][j];
+      }
+    }
+    CARTS_BENCH_RESULT("f_init_sum", f_sum);
+  }
+
   // Set the initial solution estimate UNEW
   // We are "allowed" to pick up the boundary conditions exactly
   for (int i = 0; i < nx; i++) {
@@ -118,6 +153,16 @@ int main(void) {
         unew[i][j] = 0.0;
       }
     }
+  }
+
+  if (carts_debug_enabled("CARTS_DEBUG_INIT")) {
+    double unew_init_sum = 0.0;
+    for (int i = 0; i < nx; i++) {
+      for (int j = 0; j < ny; j++) {
+        unew_init_sum += unew[i][j];
+      }
+    }
+    CARTS_BENCH_RESULT("unew_init_sum", unew_init_sum);
   }
 
   CARTS_KERNEL_TIMER_START("sweep");
