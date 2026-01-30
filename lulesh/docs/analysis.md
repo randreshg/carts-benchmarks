@@ -1,103 +1,6 @@
 # lulesh example analysis
 
 Walk through these steps and fix any problem that you find in the way
-
----
-
-## Bug Fix: ARTS crash with indirect indices (Fixed)
-
-**Problem:** `lulesh_arts` crashed in `__arts_edt_3` with a null dependency
-pointer.
-
-**Root Cause:** dbpartitioning allowed chunked acquires when the index was
-derived from a memory load (indirect gather via `nodelist`). The dependency
-indexing then referenced depv slots that were never acquired.
-
-**Fix:** Treat indirect indices (values derived from `memref.load`/`llvm.load`)
-as non-partitionable by default. This keeps arrays like `x/y/z` coarse even
-when offset/size hints exist. Use `--partition-fallback=fine` to allow
-element-wise partitioning for non-affine accesses when you want to explore
-performance tradeoffs.
-
-**Result:** `carts benchmarks run lulesh --size small` passes (ARTS+OMP
-verification succeeds).
-
----
-
-## Bug Fix: polygeist.subindex Not Traced in CreateDbs (Fixed)
-
-**Problem:** lulesh crashed with "EDT region uses external value that is not a
-block argument or dependency" during the CreateDbs pass.
-
-**Root Cause:** `ValueUtils::getUnderlyingValueImpl()` didn't handle
-`polygeist::SubIndexOp`. When CreateDbs tried to collect allocations used
-inside EDTs, it couldn't trace through `polygeist.subindex` operations to find
-the underlying `memref.alloc`. This caused allocations accessed via subindex
-to not be converted to datablocks.
-
-**Affected Pattern:** 2D array accesses like `fx_elem[k]` which generate:
-```mlir
-%alloc = memref.alloc(%size) : memref<?xf64>
-%subindex = polygeist.subindex %alloc[%k] : memref<?xf64> -> memref<?xf64>
-```
-
-**Fix:** Added handling for `polygeist::SubIndexOp` in `getUnderlyingValueImpl()`
-in `/opt/carts/lib/arts/Utils/ValueUtils.cpp`:
-```cpp
-else if (auto subindex = dyn_cast<polygeist::SubIndexOp>(op))
-  return getUnderlyingValueImpl(subindex.getSource(), visited, depth + 1);
-```
-
-**Comparison with mixed_access:** The `mixed_access` example worked because it
-has 0 `polygeist.subindex` ops - its array accesses don't generate this pattern.
-
----
-
-## Bug: Local Alloca Inside Parallel Loop (Open)
-
-**Problem:** ARTS transformations fail with "EDT region uses external value that is not a block argument or dependency" for local stack arrays declared inside parallel loop bodies.
-
-**Error Message:**
-```
-error: 'memref.store' op EDT region uses external value '%255 = "memref.alloca"()
-... : () -> memref<3x8xf64>' that is not a block argument or dependency.
-```
-
-**Affected Pattern:**
-```c
-#pragma omp parallel for firstprivate(numElem)
-for (Index_t k = 0; k < numElem; ++k) {
-    Real_t B[3][8];      // <-- Local alloca (memref<3x8xf64>)
-    Real_t x_local[8];   // <-- Local alloca
-    Real_t y_local[8];   // <-- Local alloca
-    Real_t z_local[8];   // <-- Local alloca
-
-    CollectNodesToElemNodes(x, y, z, nodelist[k], x_local, y_local, z_local);
-    CalcElemShapeFunctionDerivatives(x_local, y_local, z_local, B, &determ[k]);
-    // ...
-}
-```
-
-**Root Cause:** When this parallel loop is converted to an EDT:
-1. The `memref.alloca` for `B[3][8]` is created outside the EDT region
-2. The EDT body tries to use this alloca
-3. CARTS validation fails because the alloca isn't passed as a block argument or dependency
-
-**Affected Locations:**
-- `lulesh.c:638` inside `IntegrateStressForElems()`
-- `lulesh.c:1431` (another `Real_t B[3][8]` inside a parallel loop)
-
-**Status:** Open - requires compiler fix in CreateDbs or EDT outlining pass.
-
-**Expected Fix:** The CARTS transformation should handle local allocas inside parallel loop bodies by either:
-1. **Cloning the alloca inside the EDT** - Each task gets its own private copy
-2. **Converting to thread-local storage** - Explicit privatization
-3. **Hoisting and passing as dependency** - Less efficient but correct
-
-**Workaround:** None currently available. The local arrays must be handled by the compiler.
-
----
-
 1. **Navigate to the lulesh example directory:**
 
    ```bash
@@ -151,8 +54,9 @@ for (Index_t k = 0; k < numElem; ++k) {
    ```
    Check that arrays tied to the parallel loop are chunked only when the
    access is direct. For indirect gathers (e.g., `x/y/z` indexed by
-   `nodelist`), `arts.partition` should be `none` (coarse) and `db_acquire`
-   offsets should be `%c0` by default. To experiment with element-wise fallback:
+   `nodelist`), the default is coarse. If an allocation has both direct and
+   indirect accesses, it may still be blocked, with indirect read-only acquires
+   marked full-range. To experiment with element-wise fallback:
    ```bash
    carts run lulesh.mlir --concurrency-opt --partition-fallback=fine \
      &> lulesh_concurrency_opt_fine.mlir
@@ -170,3 +74,99 @@ for (Index_t k = 0; k < numElem; ++k) {
    ```bash
    carts benchmarks run lulesh --size small
    ```
+   To pass partition-fallback through the benchmark runner:
+   ```bash
+   carts benchmarks run lulesh --size small \
+     --arts-exec-args "--run-args '--partition-fallback=fine'"
+   ```
+
+## Performance Investigation (Why ARTS is Much Slower)
+
+On MINI_DATASET, OpenMP is extremely fast while ARTS can be seconds slower.
+This is expected with the current partitioning and task granularity.
+
+### What the current partitioning looks like
+
+Generate the current concurrency-opt IR and inspect allocations/acquires:
+
+```bash
+cd /Users/randreshg/Documents/carts/external/carts-benchmarks/lulesh
+carts run lulesh.mlir --concurrency-opt > /Users/randreshg/Documents/carts/lulesh_concurrency_opt_current.mlir
+```
+
+Count coarse vs block allocations:
+
+```bash
+python - <<'PY'
+import re
+from collections import Counter
+path='/Users/randreshg/Documents/carts/lulesh_concurrency_opt_current.mlir'
+pat=re.compile(r'arts\\.db_alloc\\[(.*?)\\]')
+counts=Counter()
+for line in open(path):
+    if 'arts.db_alloc' not in line: continue
+    m=pat.search(line)
+    if not m: continue
+    tags=re.findall(r'<([^>]+)>', m.group(1))
+    if tags: counts[tags[-1].strip()]+=1
+print(counts)
+PY
+```
+
+List coarse allocations and map to source lines:
+
+```bash
+python - <<'PY'
+import re
+path='/Users/randreshg/Documents/carts/lulesh_concurrency_opt_current.mlir'
+pat=re.compile(r'arts\\.db_alloc\\[(.*?)\\].*?allocationId = \"([^\"]+)\"')
+coarse=set()
+for line in open(path):
+    if 'arts.db_alloc' not in line: continue
+    m=pat.search(line)
+    if not m: continue
+    tags=re.findall(r'<([^>]+)>', m.group(1))
+    if tags and tags[-1].strip()=='coarse':
+        coarse.add(m.group(2))
+print(sorted(coarse))
+PY
+```
+
+Typical coarse allocations include `xdd/ydd/zdd`, `e/ql/qq/ss`,
+and `nodeElemCornerList` (see lines ~2605–2632 and ~2729 in `lulesh.c`).
+These are heavily used in the timestep loop, so coarse mode serializes
+the tasks that touch them.
+
+### Full-range acquires on blocked allocations
+
+Many node arrays (`x/y/z`, `xd/yd/zd`, `fx/fy/fz`, `nodalMass`) are blocked,
+but they are also accessed indirectly via `nodelist`. The partitioner keeps
+the allocation blocked for direct uses, yet **indirect read-only acquires are
+full-range** (offsets `%c0`, sizes = number of blocks). You can see these
+patterns with:
+
+```bash
+rg -n "db_acquire.*partitioning\\(<block>.*offsets\\[%c0\\]" \
+  /Users/randreshg/Documents/carts/lulesh_concurrency_opt_current.mlir | head
+```
+
+Full-range acquires are correct, but they still force wide synchronization
+and block writers to the same array during those phases. This reduces
+parallelism substantially.
+
+### Why OpenMP wins on MINI_DATASET
+
+- The problem size is tiny; ARTS task creation + db_acquire/db_release overhead
+  dominates runtime.
+- Coarse allocations (and full-range acquires on blocked allocations) serialize
+  critical phases, so ARTS does not realize parallel speedups.
+- OpenMP has low overhead and the loops are short, so it finishes in milliseconds.
+
+### What would improve ARTS performance
+
+- **Split read/write layouts**: blocked for direct writes, fine-grained for
+  indirect reads (versioned copy + sync).
+- **Finer-grained partitioning for node arrays** when indirect access dominates
+  (enable `--partition-fallback=fine` and validate behavior).
+- **Reduce full-range acquires** by separating indirect readers into their own
+  datablock or by adding versioned buffers.
