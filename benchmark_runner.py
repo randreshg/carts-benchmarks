@@ -92,6 +92,31 @@ def filter_benchmark_output(output: str) -> str:
     return "\n".join(lines)
 
 
+def parse_counter_json(counter_dir: Path) -> Tuple[Optional[float], Optional[float]]:
+    """Parse cluster.json to extract initializationTime and endToEndTime in seconds.
+
+    Args:
+        counter_dir: Directory containing counter JSON files.
+
+    Returns:
+        Tuple of (init_sec, e2e_sec), either may be None if not found.
+    """
+    cluster_file = counter_dir / "cluster.json"
+    if not cluster_file.exists():
+        return None, None
+    try:
+        with open(cluster_file) as f:
+            data = json.load(f)
+        counters = data.get("counters", {})
+        init_ms = counters.get("initializationTime", {}).get("value_ms")
+        e2e_ms = counters.get("endToEndTime", {}).get("value_ms")
+        init_sec = init_ms / 1000.0 if init_ms is not None else None
+        e2e_sec = e2e_ms / 1000.0 if e2e_ms is not None else None
+        return init_sec, e2e_sec
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None, None
+
+
 # ============================================================================
 # Data Classes
 # ============================================================================
@@ -208,6 +233,9 @@ class RunResult:
     e2e_timings: Dict[str, float] = field(default_factory=dict)
     init_timings: Dict[str, float] = field(default_factory=dict)
     parallel_task_timing: Optional[ParallelTaskTiming] = None
+    # Counter-based timing from ARTS introspection JSON (cluster.json)
+    counter_init_sec: Optional[float] = None
+    counter_e2e_sec: Optional[float] = None
 
 
 @dataclass
@@ -1325,18 +1353,29 @@ class BenchmarkRunner:
                     artifacts.arts_log = arts_log_path
                     artifacts.omp_log = omp_log_path
 
-                    # Handle counter files if counter_dir was specified
-                    if counter_dir and run_dir:
+                    # Handle counter files - check explicit counter_dir or ARTS default ./counter
+                    effective_counter_dir = None
+                    if counter_dir and counter_dir.exists():
+                        effective_counter_dir = counter_dir
+                    else:
+                        default_counter_dir = bench_path / "counter"
+                        if default_counter_dir.exists():
+                            effective_counter_dir = default_counter_dir
+
+                    if effective_counter_dir and run_dir:
                         run_counters_dir = run_dir / "counters"
-                        if counter_dir.exists():
-                            run_counters_dir.mkdir(exist_ok=True)
-                            for counter_file in counter_dir.glob("*.json"):
-                                shutil.copy2(
-                                    counter_file, run_counters_dir / counter_file.name)
-                            artifacts.counters_dir = str(run_counters_dir)
-                            artifacts.counter_files = sorted(
-                                str(f) for f in run_counters_dir.glob("*.json")
-                            )
+                        run_counters_dir.mkdir(exist_ok=True)
+                        for counter_file in effective_counter_dir.glob("*.json"):
+                            shutil.copy2(
+                                counter_file, run_counters_dir / counter_file.name)
+                        artifacts.counters_dir = str(run_counters_dir)
+                        artifacts.counter_files = sorted(
+                            str(f) for f in run_counters_dir.glob("*.json")
+                        )
+                        # Parse counter JSON for timing data
+                        init_sec, e2e_sec = parse_counter_json(run_counters_dir)
+                        run_arts.counter_init_sec = init_sec
+                        run_arts.counter_e2e_sec = e2e_sec
 
                 # Store with config and run number
                 result = BenchmarkResult(
@@ -1672,9 +1711,11 @@ class BenchmarkRunner:
         """Calculate speedup preferring E2E timings when available."""
         arts_kernel = get_kernel_time(arts_result)
         omp_kernel = get_kernel_time(omp_result)
-        arts_e2e = get_e2e_time(arts_result)
+        # Prefer counter-based E2E time from ARTS introspection JSON
+        arts_e2e = arts_result.counter_e2e_sec if arts_result.counter_e2e_sec is not None else get_e2e_time(arts_result)
         omp_e2e = get_e2e_time(omp_result)
-        arts_init = get_init_time(arts_result)
+        # Prefer counter-based init time from ARTS introspection JSON
+        arts_init = arts_result.counter_init_sec if arts_result.counter_init_sec is not None else get_init_time(arts_result)
         omp_init = get_init_time(omp_result)
         arts_total = arts_result.duration_sec
         omp_total = omp_result.duration_sec
@@ -1914,6 +1955,21 @@ class BenchmarkRunner:
                 stdout="",
                 stderr="Build failed",
             )
+
+        # Parse counter JSON for timing data
+        # Check explicit counter_dir first, then fall back to ARTS default ./counter location
+        effective_counter_dir = None
+        if counter_dir and counter_dir.exists():
+            effective_counter_dir = counter_dir
+        else:
+            default_counter_dir = bench_path / "counter"
+            if default_counter_dir.exists():
+                effective_counter_dir = default_counter_dir
+        if effective_counter_dir:
+            init_sec, e2e_sec = parse_counter_json(effective_counter_dir)
+            run_arts.counter_init_sec = init_sec
+            run_arts.counter_e2e_sec = e2e_sec
+
         if partial_results is not None:
             partial_results["run_arts"] = run_arts
 
@@ -2436,7 +2492,9 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
     table.add_column("Build", justify="center")
+    table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
+    table.add_column("OMP Init", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
@@ -2451,8 +2509,27 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-        arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
+        # ARTS Init time from counter JSON
+        if r.run_arts.counter_init_sec is not None:
+            arts_init = f"{r.run_arts.counter_init_sec:.4f}s"
+        else:
+            arts_init = "[dim]-[/]"
+
+        # ARTS E2E time: prefer counter JSON, fall back to parsed stdout
+        if r.run_arts.counter_e2e_sec is not None:
+            arts_e2e = r.run_arts.counter_e2e_sec
+            arts_e2e_str = f"{arts_e2e:.4f}s"
+        else:
+            arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
+
         omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
+
+        # OMP Init time from parsed stdout
+        omp_init = r.run_omp.init_timings.get("omp")
+        if omp_init is not None:
+            omp_init_str = f"{omp_init:.4f}s"
+        else:
+            omp_init_str = "[dim]-[/]"
 
         # Track if any benchmark has multiple kernels / e2e segments
         if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
@@ -2514,7 +2591,9 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         table.add_row(
             r.name,
             build,
+            arts_init,
             run_arts,
+            omp_init_str,
             run_omp,
             correct,
             speedup,
@@ -3648,7 +3727,9 @@ def create_live_table(
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
     table.add_column("Build", justify="center")
+    table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
+    table.add_column("OMP Init", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
@@ -3666,9 +3747,26 @@ def create_live_table(
             else:
                 build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-            # Prefer E2E time for display, fall back to kernel time, then total duration.
-            arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
+            # ARTS Init time from counter JSON
+            if r.run_arts.counter_init_sec is not None:
+                arts_init = f"{r.run_arts.counter_init_sec:.4f}s"
+            else:
+                arts_init = "[dim]-[/]"
+
+            # ARTS E2E time: prefer counter JSON, fall back to parsed stdout
+            if r.run_arts.counter_e2e_sec is not None:
+                arts_e2e = r.run_arts.counter_e2e_sec
+                arts_e2e_str = f"{arts_e2e:.4f}s"
+            else:
+                arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
             omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
+
+            # OMP Init time from parsed stdout
+            omp_init = r.run_omp.init_timings.get("omp")
+            if omp_init is not None:
+                omp_init_str = f"{omp_init:.4f}s"
+            else:
+                omp_init_str = "[dim]-[/]"
 
             # Run status with e2e time
             if r.run_arts.status == Status.PASS:
@@ -3726,10 +3824,12 @@ def create_live_table(
             if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
                 has_multi_kernel = True
 
-            table.add_row(bench, build, run_arts, run_omp, correct, speedup)
+            table.add_row(bench, build, arts_init, run_arts, omp_init_str, run_omp, correct, speedup)
 
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
+            arts_init = "[dim]-[/]"  # Default for in-progress phases
+            omp_init_str = "[dim]-[/]"  # Default for in-progress phases
             if current_phase == Phase.BUILD_ARTS:
                 build = "[yellow]⏳ ARTS...[/]"
                 run_arts = "[dim]-[/]"
@@ -3779,14 +3879,17 @@ def create_live_table(
                 # ARTS run completed, show e2e time if available in partial results
                 if current_partial and "run_arts" in current_partial:
                     run_arts_result = current_partial["run_arts"]
-                    arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
-                    arts_init, arts_init_str = format_init_time(
-                        run_arts_result)
+                    # Prefer counter-based timing
+                    if run_arts_result.counter_init_sec is not None:
+                        arts_init = f"{run_arts_result.counter_init_sec:.4f}s"
+                    if run_arts_result.counter_e2e_sec is not None:
+                        arts_e2e = run_arts_result.counter_e2e_sec
+                        arts_e2e_str = f"{arts_e2e:.4f}s"
+                    else:
+                        arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
                     if run_arts_result.status == Status.PASS:
                         if arts_e2e is not None:
                             run_arts = f"{status_symbol(run_arts_result.status)} {arts_e2e_str}"
-                            if arts_init is not None:
-                                run_arts += f" (init {arts_init_str})"
                         else:
                             arts_kernel, arts_kernel_str = format_kernel_time(
                                 run_arts_result)
@@ -3810,7 +3913,9 @@ def create_live_table(
             table.add_row(
                 f"[bold]{bench}[/]",
                 build,
+                arts_init,
                 run_arts,
+                omp_init_str,
                 run_omp,
                 correct,
                 speedup,
@@ -3819,6 +3924,8 @@ def create_live_table(
             # Pending - show placeholder
             table.add_row(
                 f"[dim]{bench}[/]",
+                "[dim]-[/]",
+                "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
