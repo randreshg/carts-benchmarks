@@ -1358,7 +1358,7 @@ class BenchmarkRunner:
                     if counter_dir and counter_dir.exists():
                         effective_counter_dir = counter_dir
                     else:
-                        default_counter_dir = bench_path / "counter"
+                        default_counter_dir = bench_path / "counters"
                         if default_counter_dir.exists():
                             effective_counter_dir = default_counter_dir
 
@@ -1861,10 +1861,10 @@ class BenchmarkRunner:
         suite = name.split("/")[0] if "/" in name else ""
 
         # Determine effective config template:
-        # 1. Use explicitly provided arts_config
+        # 1. Use explicitly provided arts_config (resolve to absolute path for make CWD)
         # 2. Fall back to benchmark's own arts.cfg
         # 3. Fall back to default carts-benchmarks config
-        effective_config = arts_config
+        effective_config = arts_config.resolve() if arts_config else None
         if effective_config is None:
             candidate = bench_path / "arts.cfg"
             if candidate.exists():
@@ -1879,6 +1879,10 @@ class BenchmarkRunner:
         desired_threads = threads_override if threads_override is not None else base_threads
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
+
+        # Default counter directory if not specified - ensures counter collection always works
+        if counter_dir is None:
+            counter_dir = bench_path / "counters"
 
         # Generate config with overrides only if values actually differ from base
         need_generated = False
@@ -1962,7 +1966,7 @@ class BenchmarkRunner:
         if counter_dir and counter_dir.exists():
             effective_counter_dir = counter_dir
         else:
-            default_counter_dir = bench_path / "counter"
+            default_counter_dir = bench_path / "counters"
             if default_counter_dir.exists():
                 effective_counter_dir = default_counter_dir
         if effective_counter_dir:
