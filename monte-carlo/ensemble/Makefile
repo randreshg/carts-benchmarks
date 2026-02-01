@@ -1,5 +1,6 @@
 EXAMPLE_NAME := monte_carlo_ensemble
 SRC := monte_carlo_ensemble.c
+LDFLAGS := -lm
 
 # Size configurations for Monte Carlo Ensemble
 # Memory = NUM_SAMPLES * STATE_DIM^2 * 8 bytes
