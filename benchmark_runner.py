@@ -69,6 +69,20 @@ CHECKSUM_PATTERNS = [
 SKIP_DIRS = {"common", "include", "src", "utilities",
              ".git", ".svn", ".hg", "build", "logs"}
 
+# Perf cache events for hardware counter profiling
+PERF_CACHE_EVENTS = [
+    "cache-references",
+    "cache-misses",
+    "L1-dcache-loads",
+    "L1-dcache-load-misses",
+    "L1-icache-loads",
+    "L1-icache-load-misses",
+    "dTLB-loads",
+    "dTLB-load-misses",
+    "iTLB-loads",
+    "iTLB-load-misses",
+]
+
 
 def filter_benchmark_output(output: str) -> str:
     """Extract only CARTS benchmark output lines (init/e2e/kernel timing, parallel/task timing, checksum).
@@ -221,6 +235,29 @@ class ParallelTaskTiming:
 
 
 @dataclass
+class PerfCacheMetrics:
+    """Cache metrics from perf stat profiling."""
+    # Raw counts
+    cache_references: int = 0
+    cache_misses: int = 0
+    l1d_loads: int = 0
+    l1d_load_misses: int = 0
+    l1d_stores: int = 0
+    l1d_store_misses: int = 0
+    l1i_load_misses: int = 0
+    llc_loads: int = 0
+    llc_load_misses: int = 0
+    llc_stores: int = 0
+    llc_store_misses: int = 0
+    # Computed rates
+    cache_miss_rate: float = 0.0
+    l1d_load_miss_rate: float = 0.0
+    l1d_store_miss_rate: float = 0.0
+    llc_load_miss_rate: float = 0.0
+    llc_store_miss_rate: float = 0.0
+
+
+@dataclass
 class RunResult:
     """Result of running a benchmark."""
     status: Status
@@ -236,6 +273,9 @@ class RunResult:
     # Counter-based timing from ARTS introspection JSON (cluster.json)
     counter_init_sec: Optional[float] = None
     counter_e2e_sec: Optional[float] = None
+    # Perf cache metrics
+    perf_metrics: Optional[PerfCacheMetrics] = None
+    perf_csv_path: Optional[str] = None
 
 
 @dataclass
@@ -1424,6 +1464,10 @@ class BenchmarkRunner:
         threads: int = 1,
         args: Optional[List[str]] = None,
         log_file: Optional[Path] = None,
+        perf_enabled: bool = False,
+        perf_interval: float = 0.1,
+        perf_output_name: str = "perf_cache.csv",
+        perf_output_dir: Optional[Path] = None,
     ) -> RunResult:
         """Execute a benchmark and capture output.
 
@@ -1436,6 +1480,10 @@ class BenchmarkRunner:
             threads: Number of threads per node (for srun --cpus-per-task).
             args: Optional list of command-line arguments to pass to the executable.
             log_file: Optional path to write full output (for debug=2).
+            perf_enabled: Enable perf stat profiling for cache metrics.
+            perf_interval: Interval in seconds for perf stat sampling (default: 0.1).
+            perf_output_name: Filename for perf CSV output (default: perf_cache.csv).
+            perf_output_dir: Directory for perf CSV output (default: executable's parent).
         """
         if not executable or not os.path.exists(executable):
             return RunResult(
@@ -1467,6 +1515,48 @@ class BenchmarkRunner:
             cmd = [executable]
         if args:
             cmd.extend(args)
+
+        # Wrap with perf stat if enabled and available
+        perf_output: Optional[Path] = None
+        perf_available = False
+        if perf_enabled:
+            # Check if perf is available and has permission
+            try:
+                test_result = subprocess.run(
+                    ["perf", "stat", "-e", "cycles", "--", "/bin/true"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if test_result.returncode == 0 or "counted" in test_result.stderr.lower():
+                    perf_available = True
+                else:
+                    if self.verbose or self.debug >= 1:
+                        self.console.print(
+                            "[yellow]Warning: perf not available (permission denied or not installed). "
+                            "Running without perf profiling.[/]"
+                        )
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                if self.verbose or self.debug >= 1:
+                    self.console.print(
+                        "[yellow]Warning: perf not found. Running without perf profiling.[/]"
+                    )
+
+        if perf_enabled and perf_available:
+            output_dir = perf_output_dir if perf_output_dir else Path(executable).parent
+            perf_output = output_dir / perf_output_name
+            events = ",".join(PERF_CACHE_EVENTS)
+            interval_ms = int(perf_interval * 1000)
+            # perf stat: -e events, -I interval_ms, -x separator, -o output file
+            perf_cmd = [
+                "perf", "stat",
+                "-e", events,
+                "-I", str(interval_ms),
+                "-x", ",",
+                "-o", str(perf_output),
+                "--"
+            ]
+            cmd = perf_cmd + cmd
 
         # Debug output level 1: show commands
         if self.debug >= 1:
@@ -1530,6 +1620,13 @@ class BenchmarkRunner:
             parallel_task_timing = self.extract_parallel_task_timings(
                 result.stdout)
 
+            # Parse perf metrics if enabled
+            perf_metrics = None
+            perf_csv_path = None
+            if perf_enabled and perf_output and perf_output.exists():
+                perf_metrics = self.parse_perf_csv(perf_output)
+                perf_csv_path = str(perf_output)
+
             return RunResult(
                 status=status,
                 duration_sec=duration,
@@ -1541,6 +1638,8 @@ class BenchmarkRunner:
                 e2e_timings=e2e_timings,
                 init_timings=init_timings,
                 parallel_task_timing=parallel_task_timing,
+                perf_metrics=perf_metrics,
+                perf_csv_path=perf_csv_path,
             )
         except subprocess.TimeoutExpired:
             return RunResult(
@@ -1659,6 +1758,88 @@ class BenchmarkRunner:
             found_any = True
 
         return result if found_any else None
+
+    def parse_perf_csv(self, perf_output: Path) -> Optional[PerfCacheMetrics]:
+        """Parse perf stat CSV output and return aggregated cache metrics.
+
+        perf stat -x, -I <ms> format outputs lines like:
+            <interval>,<value>,<unit>,<event>,<variance>,...
+        For aggregate (final) stats, interval is empty or shows total.
+
+        We aggregate all interval values into totals.
+        """
+        if not perf_output.exists():
+            return None
+
+        metrics = PerfCacheMetrics()
+        event_totals: Dict[str, int] = {}
+
+        try:
+            with open(perf_output, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comment lines and empty lines
+                    if not line or line.startswith("#"):
+                        continue
+
+                    parts = line.split(",")
+                    if len(parts) < 4:
+                        continue
+
+                    # Format: interval,value,unit,event,...
+                    # or for some perf versions: value,unit,event,...
+                    try:
+                        # Try interval format first (perf stat -I)
+                        if parts[0] and parts[0].replace(".", "").isdigit():
+                            # Has interval timestamp
+                            value_str = parts[1]
+                            event_name = parts[3] if len(parts) > 3 else parts[2]
+                        else:
+                            # No interval or empty interval
+                            value_str = parts[0]
+                            event_name = parts[2] if len(parts) > 2 else ""
+
+                        # Skip if value is not a number or is <not counted>
+                        if not value_str or value_str.startswith("<"):
+                            continue
+
+                        value = int(float(value_str))
+                        event_name = event_name.strip()
+
+                        if event_name:
+                            event_totals[event_name] = event_totals.get(event_name, 0) + value
+                    except (ValueError, IndexError):
+                        continue
+
+            # Map event totals to metrics
+            metrics.cache_references = event_totals.get("cache-references", 0)
+            metrics.cache_misses = event_totals.get("cache-misses", 0)
+            metrics.l1d_loads = event_totals.get("L1-dcache-loads", 0)
+            metrics.l1d_load_misses = event_totals.get("L1-dcache-load-misses", 0)
+            metrics.l1d_stores = event_totals.get("L1-dcache-stores", 0)
+            metrics.l1d_store_misses = event_totals.get("L1-dcache-store-misses", 0)
+            metrics.l1i_load_misses = event_totals.get("L1-icache-load-misses", 0)
+            metrics.llc_loads = event_totals.get("LLC-loads", 0)
+            metrics.llc_load_misses = event_totals.get("LLC-load-misses", 0)
+            metrics.llc_stores = event_totals.get("LLC-stores", 0)
+            metrics.llc_store_misses = event_totals.get("LLC-store-misses", 0)
+
+            # Compute miss rates
+            if metrics.cache_references > 0:
+                metrics.cache_miss_rate = metrics.cache_misses / metrics.cache_references
+            if metrics.l1d_loads > 0:
+                metrics.l1d_load_miss_rate = metrics.l1d_load_misses / metrics.l1d_loads
+            if metrics.l1d_stores > 0:
+                metrics.l1d_store_miss_rate = metrics.l1d_store_misses / metrics.l1d_stores
+            if metrics.llc_loads > 0:
+                metrics.llc_load_miss_rate = metrics.llc_load_misses / metrics.llc_loads
+            if metrics.llc_stores > 0:
+                metrics.llc_store_miss_rate = metrics.llc_store_misses / metrics.llc_stores
+
+            return metrics
+
+        except Exception:
+            return None
 
     def verify_correctness(
         self,
@@ -1861,6 +2042,8 @@ class BenchmarkRunner:
         arts_exec_args: Optional[str] = None,
         phase_callback: Optional[Callable[[Phase], None]] = None,
         partial_results: Optional[Dict[str, Any]] = None,
+        perf_enabled: bool = False,
+        perf_interval: float = 0.1,
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -1964,6 +2147,10 @@ class BenchmarkRunner:
                 threads=desired_threads,
                 args=run_args,
                 log_file=arts_log,
+                perf_enabled=perf_enabled,
+                perf_interval=perf_interval,
+                perf_output_name="perf_cache_arts.csv",
+                perf_output_dir=bench_path,
             )
         else:
             run_arts = RunResult(
@@ -2008,6 +2195,10 @@ class BenchmarkRunner:
                 env=omp_env,
                 args=run_args,
                 log_file=omp_log,
+                perf_enabled=perf_enabled,
+                perf_interval=perf_interval,
+                perf_output_name="perf_cache_omp.csv",
+                perf_output_dir=bench_path,
             )
         else:
             run_omp = RunResult(
@@ -2100,6 +2291,8 @@ class BenchmarkRunner:
         omp_threads_override: Optional[int] = None,
         counter_dir: Optional[Path] = None,
         arts_exec_args: Optional[str] = None,
+        perf_enabled: bool = False,
+        perf_interval: float = 0.1,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2122,6 +2315,8 @@ class BenchmarkRunner:
                     omp_threads_override,
                     counter_dir,
                     arts_exec_args,
+                    perf_enabled=perf_enabled,
+                    perf_interval=perf_interval,
                 )
                 results_list.append(result)
             self.results = results_list
@@ -2170,6 +2365,8 @@ class BenchmarkRunner:
                     arts_exec_args,
                     phase_callback,
                     current_partial[0],
+                    perf_enabled=perf_enabled,
+                    perf_interval=perf_interval,
                 )
 
                 # Update results and refresh display
@@ -4439,6 +4636,8 @@ def export_json(
                 "e2e_timings": r.run_arts.e2e_timings,
                 "init_timings": r.run_arts.init_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_arts.parallel_task_timing),
+                "perf_metrics": asdict(r.run_arts.perf_metrics) if r.run_arts.perf_metrics else None,
+                "perf_csv_path": r.run_arts.perf_csv_path,
             },
             "run_omp": {
                 "status": r.run_omp.status.value,
@@ -4449,6 +4648,8 @@ def export_json(
                 "e2e_timings": r.run_omp.e2e_timings,
                 "init_timings": r.run_omp.init_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
+                "perf_metrics": asdict(r.run_omp.perf_metrics) if r.run_omp.perf_metrics else None,
+                "perf_csv_path": r.run_omp.perf_csv_path,
             },
             "timing": {
                 "arts_time_sec": r.timing.arts_time_sec,
@@ -4617,6 +4818,10 @@ def run(
         False, "--report", help="Generate a Markdown+SVG report artifact after running"),
     report_dir: Optional[Path] = typer.Option(
         None, "--report-dir", help="Directory for report outputs (default: alongside JSON output or CWD)"),
+    perf: bool = typer.Option(
+        False, "--perf", help="Enable perf stat profiling for cache metrics"),
+    perf_interval: float = typer.Option(
+        0.1, "--perft", help="Perf stat sampling interval in seconds (default: 0.1)"),
 ):
     """Run benchmarks with verification and timing."""
     verify = not no_verify
@@ -4783,6 +4988,8 @@ def run(
                 omp_threads_override=omp_threads,
                 counter_dir=counter_dir,
                 arts_exec_args=arts_exec_args,
+                perf_enabled=perf,
+                perf_interval=perf_interval,
             )
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")

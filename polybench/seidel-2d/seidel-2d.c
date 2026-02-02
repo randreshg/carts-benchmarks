@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "seidel-2d.h"
+
 #ifndef N
 #define N 1000
 #endif
