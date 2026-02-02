@@ -123,9 +123,9 @@ Walk through these steps and fix any problem that you find in the way
                 } {...}
             } {...}
             ...
-            %guid_8, %ptr_9 = arts.db_acquire[<inout>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1] {arts.twin_diff = true} -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
-            %guid_10, %ptr_11 = arts.db_acquire[<inout>] (%guid_3 : memref<?xi64>, %ptr_4 : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1] {arts.twin_diff = true} -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
-            %guid_12, %ptr_13 = arts.db_acquire[<inout>] (%guid_6 : memref<?xi64>, %ptr_7 : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1] {arts.twin_diff = true} -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
+            %guid_8, %ptr_9 = arts.db_acquire[<inout>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
+            %guid_10, %ptr_11 = arts.db_acquire[<inout>] (%guid_3 : memref<?xi64>, %ptr_4 : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
+            %guid_12, %ptr_13 = arts.db_acquire[<inout>] (%guid_6 : memref<?xi64>, %ptr_7 : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
             arts.edt <parallel> <internode> route(%c0_i32) (%ptr_9, %ptr_11, %ptr_13) : memref<?xmemref<memref<?x?xf32>>>, memref<?xmemref<memref<?x?xf32>>>, memref<?xmemref<memref<?x?xf32>>> {
             ^bb0(%arg0: memref<?xmemref<memref<?x?xf32>>>, %arg1: memref<?xmemref<memref<?x?xf32>>>, %arg2: memref<?xmemref<memref<?x?xf32>>>):
                 arts.for(%c0) to(%c512) step(%c1) schedule(<static>) {{
@@ -291,11 +291,11 @@ Walk through these steps and fix any problem that you find in the way
             /// if the current worker has work to do, we acquire the dbs and create a task.
             scf.if %17 {
             /// Acquire A
-            %guid_6, %ptr_7 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<memref<?xf32>>>) offsets[%11] sizes[%16] offset_hints[%11] size_hints[%16] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf32>>>)
+            %guid_6, %ptr_7 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<memref<?xf32>>>) offsets[%11] sizes[%16] offset_hints[%11] size_hints[%16]  -> (memref<?xi64>, memref<?xmemref<memref<?xf32>>>)
             /// Acquire B - we didnt propagate the chunking to this one because the Access B[k] doesnt depend on the parallel loop variable i
-            %guid_8, %ptr_9 = arts.db_acquire[<in>] (%guid_2 : memref<?xi64>, %ptr_3 : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1] offset_hints[%11] size_hints[%16] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
+            %guid_8, %ptr_9 = arts.db_acquire[<in>] (%guid_2 : memref<?xi64>, %ptr_3 : memref<?xmemref<memref<?x?xf32>>>) offsets[%c0] sizes[%c1] offset_hints[%11] size_hints[%16]  -> (memref<?xi64>, memref<?xmemref<memref<?x?xf32>>>)
             /// Acquire C
-            %guid_10, %ptr_11 = arts.db_acquire[<inout>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf32>>>) offsets[%11] sizes[%16] offset_hints[%11] size_hints[%16] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf32>>>)
+            %guid_10, %ptr_11 = arts.db_acquire[<inout>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf32>>>) offsets[%11] sizes[%16] offset_hints[%11] size_hints[%16]  -> (memref<?xi64>, memref<?xmemref<memref<?xf32>>>)
             /// Create the task
             arts.edt <task> <intranode> route(%c0_i32) (%ptr_7, %ptr_9, %ptr_11) : memref<?xmemref<memref<?xf32>>>, memref<?xmemref<memref<?x?xf32>>>, memref<?xmemref<memref<?xf32>>> attributes {arts.id = 33 : i64} {
             ^bb0(%arg1: memref<?xmemref<memref<?xf32>>>, %arg2: memref<?xmemref<memref<?x?xf32>>>, %arg3: memref<?xmemref<memref<?xf32>>>):

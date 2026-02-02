@@ -59,9 +59,9 @@ Walk through these steps and fix any problem that you find in the way
          scf.for %arg0 = %c1 to %c11 step %c1 {
          scf.for %arg1 = %c0 to %c100 step %c1 {
             /// Acquire unew[i] - we acquired the whole row unew[i] and added the index %arg1 to the indices
-            %guid_8, %ptr_9 = arts.db_acquire[<in>] (%guid_6 : memref<?xi64>, %ptr_7 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_8, %ptr_9 = arts.db_acquire[<in>] (%guid_6 : memref<?xi64>, %ptr_7 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// Acquire u[i] - we acquired the whole row u[i] and added the index %arg1 to the indices
-            %guid_10, %ptr_11 = arts.db_acquire[<out>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_10, %ptr_11 = arts.db_acquire[<out>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// EDT that computes u[i] = unew[i]
             arts.edt <task> <intranode> route(%c0_i32) (%ptr_9, %ptr_11) : memref<?xmemref<memref<?xf64>>>, memref<?xmemref<memref<?xf64>>> {
             ^bb0(%arg2: memref<?xmemref<memref<?xf64>>>, %arg3: memref<?xmemref<memref<?xf64>>>):
@@ -81,15 +81,15 @@ Walk through these steps and fix any problem that you find in the way
          scf.for %arg1 = %c0 to %c100 step %c1 {
             ...
             /// IN: Acquire f[i] - we acquired the whole row f[i] and added the index %arg1 to the indices
-            %guid_8, %ptr_9 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_8, %ptr_9 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// OUT: Acquire unew[i] - we acquired the whole row unew[i] and added the index %arg1 to the indices
-            %guid_10, %ptr_11 = arts.db_acquire[<out>] (%guid_6 : memref<?xi64>, %ptr_7 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_10, %ptr_11 = arts.db_acquire[<out>] (%guid_6 : memref<?xi64>, %ptr_7 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// IN: Acquire u[i-1] - we acquired the whole row u[i-1] and added the index %32 to the indices
-            %guid_12, %ptr_13 = arts.db_acquire[<in>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%32] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_12, %ptr_13 = arts.db_acquire[<in>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%32] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// IN: Acquire u[i] - we acquired the whole row u[i] and added the index %arg1 to the indices
-            %guid_14, %ptr_15 = arts.db_acquire[<in>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_14, %ptr_15 = arts.db_acquire[<in>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%arg1] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// IN: Acquire u[i+1] - we acquired the whole row u[i+1] and added the index %33 to the indices
-            %guid_16, %ptr_17 = arts.db_acquire[<in>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%33] offsets[%c0] sizes[%c1] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
+            %guid_16, %ptr_17 = arts.db_acquire[<in>] (%guid_4 : memref<?xi64>, %ptr_5 : memref<?xmemref<memref<?xf64>>>) indices[%33] offsets[%c0] sizes[%c1]  -> (memref<?xi64>, memref<?xmemref<memref<?xf64>>>)
             /// EDT that computes u[i][j] = 0.25 * (u[i-1][j] + u[i][j+1] + u[i][j-1] + u[i+1][j] + f[i][j] * dx * dy)
             arts.edt <task> <intranode> route(%c0_i32) (%ptr_9, %ptr_11, %ptr_13, %ptr_15, %ptr_17) : memref<?xmemref<memref<?xf64>>>, memref<?xmemref<memref<?xf64>>>, memref<?xmemref<memref<?xf64>>>, memref<?xmemref<memref<?xf64>>>, memref<?xmemref<memref<?xf64>>> {
             ^bb0(%arg2: memref<?xmemref<memref<?xf64>>>, %arg3: memref<?xmemref<memref<?xf64>>>, %arg4: memref<?xmemref<memref<?xf64>>>, %arg5: memref<?xmemref<memref<?xf64>>>, %arg6: memref<?xmemref<memref<?xf64>>>):

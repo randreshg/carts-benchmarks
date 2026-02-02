@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
@@ -18,7 +19,9 @@
 static void init(float **dofs, float **gradMatrix, float **fluxMatrix) {
   for (int e = 0; e < N_ELEMENTS; ++e) {
     for (int b = 0; b < N_BASIS; ++b) {
-      dofs[e][b] = 0.01f * (float)(((e * N_BASIS + b) * 7) % 23);
+      int64_t idx = (int64_t)e * N_BASIS + b;
+      int64_t val = (idx * 7) % 23;
+      dofs[e][b] = 0.01f * (float)val;
     }
   }
   for (int q = 0; q < N_QUAD; ++q) {

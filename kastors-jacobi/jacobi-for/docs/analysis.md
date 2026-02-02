@@ -145,7 +145,7 @@ For the stencil computation EDT, the `u` array acquires show the ESD infrastruct
     bounds_valid(%52)                   /// Boundary check: block_idx != 0
     element_offsets[%c15, %c0]          /// Within block: last row (index 15)
     element_sizes[%c1, %c256]           /// Single row, full width
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 
 /// Right halo acquire: u[block+1] - acquires first row of next block
@@ -155,15 +155,14 @@ For the stencil computation EDT, the `u` array acquires show the ESD infrastruct
     bounds_valid(%54)                   /// Boundary check: block_idx != (numBlocks - 1)
     element_offsets[%c0, %c0]           /// Within block: first row (index 0)
     element_sizes[%c1, %c256]           /// Single row, full width
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 
 /// Main block acquire with halo references
 %guid_15, %ptr_16 = arts.db_acquire[<in>] (%guid_3 : memref<?xi64>, %ptr_4 : memref<?xmemref<?x?xf64>>)
     partitioning(<stencil>),
     offsets[%43], sizes[%c1]           /// Main block offset
-    {arts.id = 124 : i64, arts.twin_diff = false,
-     left_halo_arg_idx = 3 : index,    /// EDT arg index for left halo
+    {arts.id = 124 : i64, left_halo_arg_idx = 3 : index,    /// EDT arg index for left halo
      right_halo_arg_idx = 4 : index}   /// EDT arg index for right halo
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 ```
@@ -175,13 +174,13 @@ For the stencil computation EDT, the `u` array acquires show the ESD infrastruct
 %guid_7, %ptr_8 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<?x?xf64>>)
     partitioning(<block>, offsets[%37], sizes[%c16]),
     offsets[%43], sizes[%50]
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 
 %guid_9, %ptr_10 = arts.db_acquire[<out>] (%guid_5 : memref<?xi64>, %ptr_6 : memref<?xmemref<?x?xf64>>)
     partitioning(<block>, offsets[%37], sizes[%c16]),
     offsets[%43], sizes[%50]
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 ```
 

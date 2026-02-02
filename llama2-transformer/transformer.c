@@ -1,6 +1,7 @@
 /* Transformer model implementation for carts benchmarks */
 
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include <float.h>
 #include <math.h>
 #include <omp.h>
 #include <stdio.h>
@@ -91,14 +92,15 @@ static void rmsnorm(float *o, float *x_vec, float *weight, int size) {
   ss /= size;
   ss += 1e-5f;
   ss = 1.0f / sqrtf(ss);
+#pragma omp parallel for
   for (int j = 0; j < size; j++) {
     o[j] = weight[j] * (ss * x_vec[j]);
   }
 }
 
 static void softmax(float *x_vec, int size) {
-  float max_val = x_vec[0];
-  for (int i = 1; i < size; i++) {
+  float max_val = -FLT_MAX;
+  for (int i = 0; i < size; i++) {
     if (x_vec[i] > max_val) {
       max_val = x_vec[i];
     }
@@ -108,8 +110,9 @@ static void softmax(float *x_vec, int size) {
     x_vec[i] = expf(x_vec[i] - max_val);
     sum += x_vec[i];
   }
+  float inv_sum = 1.0f / sum;
   for (int i = 0; i < size; i++) {
-    x_vec[i] /= sum;
+    x_vec[i] *= inv_sum;
   }
 }
 
@@ -117,7 +120,7 @@ static void matmul(float *xout, float *x_vec, float **w, int n, int d) {
   // W (d,n) @ x (n,) -> xout (d,)
   // by far the most amount of time is spent inside this little function
   int i;
-#pragma omp parallel for private(i)
+#pragma omp parallel for schedule(static) private(i)
   for (i = 0; i < d; i++) {
     float val = 0.0f;
     for (int j = 0; j < n; j++) {
@@ -227,6 +230,7 @@ static float *forward(
     int token, int pos) {
 
   // Copy the token embedding into x
+#pragma omp parallel for
   for (int i = 0; i < DIM; i++) {
     x[i] = token_embedding_table[token][i];
   }
@@ -243,25 +247,29 @@ static float *forward(
 
     // RoPE relative positional encoding: complex-valued rotate q and k in each
     // head
+#pragma omp parallel for
     for (int i = 0; i < DIM; i += 2) {
       int head_dim = i % HEAD_SIZE;
       float freq = 1.0f / powf(10000.0f, (float)head_dim / (float)HEAD_SIZE);
       float angle = pos * freq;
       float fcr = cosf(angle);
       float fci = sinf(angle);
-      int rotn = i < KV_DIM ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-      for (int v_idx = 0; v_idx < rotn; v_idx++) {
-        float *vec = (v_idx == 0) ? q_buf : key_cache[l][pos];
-        float v0 = vec[i];
-        float v1 = vec[i + 1];
-        vec[i] = v0 * fcr - v1 * fci;
-        vec[i + 1] = v0 * fci + v1 * fcr;
+      float v0 = q_buf[i];
+      float v1 = q_buf[i + 1];
+      q_buf[i] = v0 * fcr - v1 * fci;
+      q_buf[i + 1] = v0 * fci + v1 * fcr;
+      if (i < KV_DIM) {
+        float *kvec = key_cache[l][pos];
+        float k0 = kvec[i];
+        float k1 = kvec[i + 1];
+        kvec[i] = k0 * fcr - k1 * fci;
+        kvec[i + 1] = k0 * fci + k1 * fcr;
       }
     }
 
     // Multihead attention - iterate over all heads
     int h;
-#pragma omp parallel for private(h)
+#pragma omp parallel for schedule(static) private(h)
     for (h = 0; h < N_HEADS; h++) {
       // Get the query vector for this head
       float *head_q = q_buf + h * HEAD_SIZE;
@@ -307,6 +315,7 @@ static float *forward(
     matmul(xb2, xb, wo[l], DIM, DIM);
 
     // Residual connection back into x
+#pragma omp parallel for
     for (int i = 0; i < DIM; i++) {
       x[i] += xb2[i];
     }
@@ -320,6 +329,7 @@ static float *forward(
     matmul(hb2, xb, w3[l], DIM, HIDDEN_DIM);
 
     // SwiGLU non-linearity
+#pragma omp parallel for
     for (int i = 0; i < HIDDEN_DIM; i++) {
       float val = hb[i];
       // silu(x)=x*sigma(x), where sigma(x) is the logistic sigmoid
@@ -333,6 +343,7 @@ static float *forward(
     matmul(xb, hb, w2[l], HIDDEN_DIM, DIM);
 
     // Residual connection
+#pragma omp parallel for
     for (int i = 0; i < DIM; i++) {
       x[i] += xb[i];
     }

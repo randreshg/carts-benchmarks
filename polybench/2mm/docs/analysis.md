@@ -165,20 +165,20 @@ DbPartitioning analyzes memory access patterns and makes partitioning decisions:
 %guid_12, %ptr_13 = arts.db_acquire[<inout>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<?x?xf64>>)
     partitioning(<block>, offsets[%38], sizes[%c8]),
     offsets[%44], sizes[%51]
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 
 /// Block acquire for A (read)
 %guid_14, %ptr_15 = arts.db_acquire[<in>] (%guid_3 : memref<?xi64>, %ptr_4 : memref<?xmemref<?x?xf64>>)
     partitioning(<block>, offsets[%38], sizes[%c8]),
     offsets[%44], sizes[%51]
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 
 /// Coarse acquire for B (full matrix)
 %guid_16, %ptr_17 = arts.db_acquire[<in>] (%guid_5 : memref<?xi64>, %ptr_6 : memref<?xmemref<?x?xf64>>)
     offsets[%c0], sizes[%c1]
-    {arts.id = 124 : i64, arts.twin_diff = false}
+    {arts.id = 124 : i64}
     -> (memref<?xi64>, memref<?xmemref<?x?xf64>>)
 ```
 

@@ -132,9 +132,9 @@ Walk through these steps and fix any problem that you find in the way
                 %25 = arith.cmpi ugt, %24, %c0 : index
                 scf.if %25 {
                 /// Acquire the A array. 
-                %guid_12, %ptr_13 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<?x?xf32>>) offsets[%c0] sizes[%c1] offset_hints[%19] size_hints[%24] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<?x?xf32>>)
+                %guid_12, %ptr_13 = arts.db_acquire[<in>] (%guid : memref<?xi64>, %ptr : memref<?xmemref<?x?xf32>>) offsets[%c0] sizes[%c1] offset_hints[%19] size_hints[%24]  -> (memref<?xi64>, memref<?xmemref<?x?xf32>>)
                 /// Acquire the B array.
-                %guid_14, %ptr_15 = arts.db_acquire[<out>] (%guid_10 : memref<?xi64>, %ptr_11 : memref<?xmemref<?xf32>>) offsets[%19] sizes[%24] offset_hints[%19] size_hints[%24] {arts.twin_diff = false} -> (memref<?xi64>, memref<?xmemref<?xf32>>)
+                %guid_14, %ptr_15 = arts.db_acquire[<out>] (%guid_10 : memref<?xi64>, %ptr_11 : memref<?xmemref<?xf32>>) offsets[%19] sizes[%24] offset_hints[%19] size_hints[%24]  -> (memref<?xi64>, memref<?xmemref<?xf32>>)
                 /// Create the task.
                 arts.edt <task> <intranode> route(%c0_i32) (%ptr_13, %ptr_15) : memref<?xmemref<?x?xf32>>, memref<?xmemref<?xf32>> attributes {arts.id = 51 : i64} {
                 ^bb0(%arg3: memref<?xmemref<?x?xf32>>, %arg4: memref<?xmemref<?xf32>>):
