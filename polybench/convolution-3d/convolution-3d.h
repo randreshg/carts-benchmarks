@@ -41,9 +41,9 @@
 #  endif
 
 #  ifdef EXTRALARGE_DATASET
-#   define NI 384
-#   define NJ 384
-#   define NK 384
+#   define NI 1024
+#   define NJ 1024
+#   define NK 1024
 #  endif
 # endif /* !N */
 
