@@ -265,7 +265,7 @@ int main(int argc, char **argv) {
   printf("Softmax size: %d elements\n", softmax_size);
   printf("\n");
 
-  CARTS_E2E_TIMER_START("activations_setup");
+  CARTS_E2E_TIMER_START("activations");
 
   // Allocate memory
   float *input = (float *)malloc(size * sizeof(float));
@@ -276,19 +276,13 @@ int main(int argc, char **argv) {
   init_data(input, size);
   init_data(softmax_input, softmax_size);
 
-  CARTS_E2E_TIMER_STOP();
-
   // Print input statistics
   print_stats("Input", input, size, 10);
 
   // Test ReLU
   printf("\n--- Testing ReLU ---\n");
-  CARTS_E2E_TIMER_START("activations_relu");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("relu");
   activate_relu(output, size);
-  CARTS_KERNEL_TIMER_STOP("relu");
-  CARTS_E2E_TIMER_STOP();
   print_stats("ReLU Output", output, size, 10);
 
   // Compute checksum
@@ -296,16 +290,11 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     relu_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(relu_checksum);
 
   // Test Leaky ReLU
   printf("\n--- Testing Leaky ReLU ---\n");
-  CARTS_E2E_TIMER_START("activations_leaky_relu");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("leaky_relu");
   activate_leaky(output, size);
-  CARTS_KERNEL_TIMER_STOP("leaky_relu");
-  CARTS_E2E_TIMER_STOP();
   print_stats("Leaky ReLU Output", output, size, 10);
 
   // Compute checksum
@@ -313,16 +302,11 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     leaky_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(leaky_checksum);
 
   // Test ReLU6
   printf("\n--- Testing ReLU6 ---\n");
-  CARTS_E2E_TIMER_START("activations_relu6");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("relu6");
   activate_relu6(output, size);
-  CARTS_KERNEL_TIMER_STOP("relu6");
-  CARTS_E2E_TIMER_STOP();
   print_stats("ReLU6 Output", output, size, 10);
 
   // Compute checksum
@@ -330,16 +314,11 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     relu6_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(relu6_checksum);
 
   // Test GELU
   printf("\n--- Testing GELU ---\n");
-  CARTS_E2E_TIMER_START("activations_gelu");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("gelu");
   activate_gelu(output, size);
-  CARTS_KERNEL_TIMER_STOP("gelu");
-  CARTS_E2E_TIMER_STOP();
   print_stats("GELU Output", output, size, 10);
 
   // Compute checksum
@@ -347,16 +326,11 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     gelu_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(gelu_checksum);
 
   // Test GELU Fast
   printf("\n--- Testing GELU (Fast) ---\n");
-  CARTS_E2E_TIMER_START("activations_gelu_fast");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("gelu_fast");
   activate_gelu_fast(output, size);
-  CARTS_KERNEL_TIMER_STOP("gelu_fast");
-  CARTS_E2E_TIMER_STOP();
   print_stats("GELU Fast Output", output, size, 10);
 
   // Compute checksum
@@ -364,16 +338,11 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     gelu_fast_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(gelu_fast_checksum);
 
   // Test Sigmoid
   printf("\n--- Testing Sigmoid ---\n");
-  CARTS_E2E_TIMER_START("activations_sigmoid");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("sigmoid");
   activate_sigmoid(output, size);
-  CARTS_KERNEL_TIMER_STOP("sigmoid");
-  CARTS_E2E_TIMER_STOP();
   print_stats("Sigmoid Output", output, size, 10);
 
   // Compute checksum
@@ -381,16 +350,11 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     sigmoid_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(sigmoid_checksum);
 
   // Test Tanh
   printf("\n--- Testing Tanh ---\n");
-  CARTS_E2E_TIMER_START("activations_tanh");
   copy_array(output, input, size);
-  CARTS_KERNEL_TIMER_START("tanh");
   activate_tanh(output, size);
-  CARTS_KERNEL_TIMER_STOP("tanh");
-  CARTS_E2E_TIMER_STOP();
   print_stats("Tanh Output", output, size, 10);
 
   // Compute checksum
@@ -399,15 +363,10 @@ int main(int argc, char **argv) {
   for (int i = 0; i < size; i++) {
     tanh_checksum += fabs(output[i]);
   }
-  CARTS_BENCH_CHECKSUM(tanh_checksum);
 
   // Test Softmax
   printf("\n--- Testing Softmax ---\n");
-  CARTS_E2E_TIMER_START("activations_softmax");
-  CARTS_KERNEL_TIMER_START("softmax");
   softmax(softmax_input, softmax_size);
-  CARTS_KERNEL_TIMER_STOP("softmax");
-  CARTS_E2E_TIMER_STOP();
   print_stats("Softmax Output", softmax_input, softmax_size, 10);
 
   // Compute checksum
@@ -415,7 +374,6 @@ int main(int argc, char **argv) {
   for (int i = 0; i < softmax_size; i++) {
     softmax_checksum += fabs(softmax_input[i]);
   }
-  CARTS_BENCH_CHECKSUM(softmax_checksum);
 
   // Validate Softmax (should sum to 1)
   double softmax_sum = 0.0;
@@ -429,6 +387,8 @@ int main(int argc, char **argv) {
   } else {
     printf("  Softmax validation failed\n");
   }
+
+  CARTS_E2E_TIMER_STOP();
 
   printf("\nAll activation functions completed successfully!\n");
 

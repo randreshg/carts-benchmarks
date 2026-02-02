@@ -292,7 +292,7 @@ int main(int argc, char **argv) {
          (float)(in_height * in_width) / (out_height * out_width));
   printf("\n");
 
-  CARTS_E2E_TIMER_START("pooling_setup");
+  CARTS_E2E_TIMER_START("pooling");
 
   // Allocate memory as 3D arrays
   float ***input = (float ***)malloc(batch * sizeof(float **));
@@ -315,16 +315,10 @@ int main(int argc, char **argv) {
   // Initialize data
   init_pooling_data(input, batch, channels, in_spatial);
 
-  CARTS_E2E_TIMER_STOP();
-
   // Run max pooling
   printf("Running max pooling...\n");
-  CARTS_E2E_TIMER_START("pooling_maxpool");
-  CARTS_KERNEL_TIMER_START("maxpool");
   maxpool_forward(input, maxpool_output, batch, channels, in_height, in_width,
                   pool_size, stride, padding);
-  CARTS_KERNEL_TIMER_STOP("maxpool");
-  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   double maxpool_checksum = 0.0;
@@ -335,16 +329,11 @@ int main(int argc, char **argv) {
       }
     }
   }
-  CARTS_BENCH_CHECKSUM(maxpool_checksum);
 
   // Run average pooling
   printf("Running average pooling...\n");
-  CARTS_E2E_TIMER_START("pooling_avgpool");
-  CARTS_KERNEL_TIMER_START("avgpool");
   avgpool_forward(input, avgpool_output, batch, channels, in_height, in_width,
                   pool_size, stride, padding);
-  CARTS_KERNEL_TIMER_STOP("avgpool");
-  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   double avgpool_checksum = 0.0;
@@ -355,15 +344,10 @@ int main(int argc, char **argv) {
       }
     }
   }
-  CARTS_BENCH_CHECKSUM(avgpool_checksum);
 
   // Run global average pooling
   printf("Running global average pooling...\n");
-  CARTS_E2E_TIMER_START("pooling_global_avgpool");
-  CARTS_KERNEL_TIMER_START("global_avgpool");
   global_avgpool(input, global_output, batch, channels, in_height, in_width);
-  CARTS_KERNEL_TIMER_STOP("global_avgpool");
-  CARTS_E2E_TIMER_STOP();
 
   // Compute checksum inline
   double global_avgpool_checksum = 0.0;
@@ -372,7 +356,6 @@ int main(int argc, char **argv) {
       global_avgpool_checksum += global_output[b][c];
     }
   }
-  CARTS_BENCH_CHECKSUM(global_avgpool_checksum);
 
   // Print samples
   print_sample("Input", input, batch, channels, in_height, in_width, 20);
@@ -407,6 +390,8 @@ int main(int argc, char **argv) {
   } else {
     printf("  [FAIL] Found %d violations where max < avg\n", violations);
   }
+
+  CARTS_E2E_TIMER_STOP();
 
   printf("\nPooling operations completed successfully!\n");
 
