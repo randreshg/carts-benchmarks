@@ -152,7 +152,7 @@ int main(void) {
   printf("Verification: %s (RMS error: %.2e)\n",
          (error < 1e-6) ? "PASS" : "FAIL", error);
 
-  // Compute checksum inline (sum of parallel result)
+  // Compute checksum
   double checksum = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {

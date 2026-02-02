@@ -13,6 +13,7 @@ LDFLAGS ?= -lm
 TINY_ARGS := -s 3 -i 5
 SMALL_ARGS := -s 10 -i 10
 MEDIUM_ARGS := -s 30 -i 500
+LARGE_ARGS := -s 50 -i 1000
 
 include ../common/carts.mk
 

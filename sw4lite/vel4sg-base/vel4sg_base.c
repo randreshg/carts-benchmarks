@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
@@ -134,12 +135,12 @@ int main(void) {
 
   CARTS_E2E_TIMER_STOP();
 
-  // Compute checksum inline
+  // Compute checksum inline 
   float checksum = 0.0f;
   for (int i = 0; i < NX; ++i) {
     for (int j = 0; j < NY; ++j) {
       for (int k = 0; k < NZ; ++k) {
-        checksum += vx[i][j][k] + vy[i][j][k] + vz[i][j][k];
+        checksum += fabsf(vx[i][j][k]) + fabsf(vy[i][j][k]) + fabsf(vz[i][j][k]);
       }
     }
   }

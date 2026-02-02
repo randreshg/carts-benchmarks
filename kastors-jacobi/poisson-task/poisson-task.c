@@ -252,11 +252,11 @@ int main(void) {
 
   printf("Verification: %s (RMS: %.2e)\n", (error < 1e-6) ? "PASS" : "FAIL", error);
 
-  // Output checksum (sum of unew_seq which is the task-based result)
+  // Output checksum
   double checksum = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
-      checksum += unew_seq[i][j];
+      checksum += fabs(unew_seq[i][j]);
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);

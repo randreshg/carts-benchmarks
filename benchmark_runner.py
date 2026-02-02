@@ -1195,6 +1195,20 @@ class BenchmarkRunner:
         desired_nodes = nodes if nodes is not None else base_nodes
         desired_launcher = launcher if launcher is not None else base_launcher
 
+        # Skip benchmarks disabled for multi-node when running with nodeCount > 1
+        if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
+            skip_config = BenchmarkConfig(
+                arts_threads=threads_list[0] if threads_list else 1,
+                arts_nodes=desired_nodes,
+                omp_threads=threads_list[0] if threads_list else 1,
+                launcher=desired_launcher,
+            )
+            return [self._make_skip_result(
+                name, size,
+                "Benchmark disabled for multi-node (has .disable-multinode marker)",
+                skip_config
+            )], None, None
+
         # Create timestamped experiment directory ONCE per experiment
         # Both JSON results and artifacts will be stored together
         experiment_dir = None
@@ -2307,6 +2321,45 @@ class BenchmarkRunner:
             timestamp=datetime.now().isoformat(),
             total_duration_sec=0.0,
             size_params=self.get_size_params(bench_path, size),
+        )
+
+    def _make_skip_result(
+        self,
+        name: str,
+        size: str,
+        reason: str,
+        config: Optional[BenchmarkConfig] = None,
+    ) -> BenchmarkResult:
+        """Create a skip result for a benchmark that should not run."""
+        bench_path = self.benchmarks_dir / name
+        suite = name.split("/")[0] if "/" in name else ""
+
+        skip_build = BuildResult(status=Status.SKIP, duration_sec=0.0, output=reason)
+        skip_run = RunResult(
+            status=Status.SKIP, duration_sec=0.0, exit_code=-1, stdout="", stderr=reason
+        )
+
+        if config is None:
+            config = BenchmarkConfig(
+                arts_threads=1, arts_nodes=1, omp_threads=1, launcher="local"
+            )
+
+        return BenchmarkResult(
+            name=name,
+            suite=suite,
+            size=size,
+            config=config,
+            run_number=1,
+            build_arts=skip_build,
+            build_omp=skip_build,
+            run_arts=skip_run,
+            run_omp=skip_run,
+            timing=TimingResult(0.0, 0.0, 0.0, reason),
+            verification=VerificationResult(False, None, None, 0.0, reason),
+            artifacts=Artifacts(benchmark_dir=str(bench_path)),
+            timestamp=datetime.now().isoformat(),
+            total_duration_sec=0.0,
+            size_params=None,
         )
 
     def clean_benchmark(self, name: str) -> bool:

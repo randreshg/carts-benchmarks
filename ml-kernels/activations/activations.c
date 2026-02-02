@@ -291,10 +291,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("ReLU Output", output, size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double relu_checksum = 0.0;
   for (int i = 0; i < size; i++) {
-    relu_checksum += output[i];
+    relu_checksum += fabs(output[i]);
   }
   CARTS_BENCH_CHECKSUM(relu_checksum);
 
@@ -308,10 +308,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("Leaky ReLU Output", output, size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double leaky_checksum = 0.0;
   for (int i = 0; i < size; i++) {
-    leaky_checksum += output[i];
+    leaky_checksum += fabs(output[i]);
   }
   CARTS_BENCH_CHECKSUM(leaky_checksum);
 
@@ -325,10 +325,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("ReLU6 Output", output, size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double relu6_checksum = 0.0;
   for (int i = 0; i < size; i++) {
-    relu6_checksum += output[i];
+    relu6_checksum += fabs(output[i]);
   }
   CARTS_BENCH_CHECKSUM(relu6_checksum);
 
@@ -342,10 +342,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("GELU Output", output, size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double gelu_checksum = 0.0;
   for (int i = 0; i < size; i++) {
-    gelu_checksum += output[i];
+    gelu_checksum += fabs(output[i]);
   }
   CARTS_BENCH_CHECKSUM(gelu_checksum);
 
@@ -359,10 +359,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("GELU Fast Output", output, size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double gelu_fast_checksum = 0.0;
   for (int i = 0; i < size; i++) {
-    gelu_fast_checksum += output[i];
+    gelu_fast_checksum += fabs(output[i]);
   }
   CARTS_BENCH_CHECKSUM(gelu_fast_checksum);
 
@@ -376,10 +376,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("Sigmoid Output", output, size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double sigmoid_checksum = 0.0;
   for (int i = 0; i < size; i++) {
-    sigmoid_checksum += output[i];
+    sigmoid_checksum += fabs(output[i]);
   }
   CARTS_BENCH_CHECKSUM(sigmoid_checksum);
 
@@ -393,7 +393,7 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("Tanh Output", output, size, 10);
 
-  // Compute checksum inline using sum of absolute values for stability.
+  // Compute checksum
   // Tanh output is zero-centered, so plain sum would be ~0.
   double tanh_checksum = 0.0;
   for (int i = 0; i < size; i++) {
@@ -410,10 +410,10 @@ int main(int argc, char **argv) {
   CARTS_E2E_TIMER_STOP();
   print_stats("Softmax Output", softmax_input, softmax_size, 10);
 
-  // Compute checksum inline
+  // Compute checksum
   double softmax_checksum = 0.0;
   for (int i = 0; i < softmax_size; i++) {
-    softmax_checksum += softmax_input[i];
+    softmax_checksum += fabs(softmax_input[i]);
   }
   CARTS_BENCH_CHECKSUM(softmax_checksum);
 
