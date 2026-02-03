@@ -2044,6 +2044,8 @@ class BenchmarkRunner:
         partial_results: Optional[Dict[str, Any]] = None,
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
+        run_number: int = 1,
+        run_timestamp: str = "",
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -2080,6 +2082,11 @@ class BenchmarkRunner:
         # Default counter directory if not specified - ensures counter collection always works
         if counter_dir is None:
             counter_dir = bench_path / "counters"
+
+        # Ensure counters directory exists for perf output
+        if perf_enabled:
+            perf_output_dir = counter_dir or (bench_path / "counters")
+            perf_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate config with overrides only if values actually differ from base
         need_generated = False
@@ -2149,8 +2156,8 @@ class BenchmarkRunner:
                 log_file=arts_log,
                 perf_enabled=perf_enabled,
                 perf_interval=perf_interval,
-                perf_output_name="perf_cache_arts.csv",
-                perf_output_dir=bench_path,
+                perf_output_name=f"perf_cache_{run_timestamp}_arts_{run_number}.csv" if run_timestamp else "perf_cache_arts.csv",
+                perf_output_dir=counter_dir or (bench_path / "counters"),
             )
         else:
             run_arts = RunResult(
@@ -2197,8 +2204,8 @@ class BenchmarkRunner:
                 log_file=omp_log,
                 perf_enabled=perf_enabled,
                 perf_interval=perf_interval,
-                perf_output_name="perf_cache_omp.csv",
-                perf_output_dir=bench_path,
+                perf_output_name=f"perf_cache_{run_timestamp}_omp_{run_number}.csv" if run_timestamp else "perf_cache_omp.csv",
+                perf_output_dir=counter_dir or (bench_path / "counters"),
             )
         else:
             run_omp = RunResult(
@@ -2293,32 +2300,37 @@ class BenchmarkRunner:
         arts_exec_args: Optional[str] = None,
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
+        runs: int = 1,
+        run_timestamp: str = "",
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
-        results_dict: Dict[str, BenchmarkResult] = {}
+        results_dict: Dict[str, List[BenchmarkResult]] = {}
         results_list: List[BenchmarkResult] = []
         start_time = time.time()
 
         if self.quiet:
             # Quiet mode - no live display
             for bench in benchmarks:
-                result = self.run_single(
-                    bench,
-                    size,
-                    timeout,
-                    verify,
-                    arts_config,
-                    threads_override,
-                    nodes_override,
-                    launcher_override,
-                    omp_threads_override,
-                    counter_dir,
-                    arts_exec_args,
-                    perf_enabled=perf_enabled,
-                    perf_interval=perf_interval,
-                )
-                results_list.append(result)
+                for run_num in range(1, runs + 1):
+                    result = self.run_single(
+                        bench,
+                        size,
+                        timeout,
+                        verify,
+                        arts_config,
+                        threads_override,
+                        nodes_override,
+                        launcher_override,
+                        omp_threads_override,
+                        counter_dir,
+                        arts_exec_args,
+                        perf_enabled=perf_enabled,
+                        perf_interval=perf_interval,
+                        run_number=run_num,
+                        run_timestamp=run_timestamp,
+                    )
+                    results_list.append(result)
             self.results = results_list
             return results_list
 
@@ -2335,48 +2347,51 @@ class BenchmarkRunner:
             current_phase[0] = phase
             elapsed = time.time() - start_time
             live.update(create_live_display(
-                benchmarks, results_dict, current_bench[0], elapsed, phase, current_partial[0]))
+                benchmarks, results_dict, current_bench[0], elapsed, phase, current_partial[0], total_runs=runs))
 
         with Live(
-            create_live_display(benchmarks, results_dict, None, 0, None, None),
+            create_live_display(benchmarks, results_dict, None, 0, None, None, total_runs=runs),
             console=self.console,
             refresh_per_second=4,
         ) as live:
             for bench in benchmarks:
-                current_bench[0] = bench
-                current_partial[0] = {}
-                # Update display to show current benchmark as in-progress
-                elapsed = time.time() - start_time
-                live.update(create_live_display(
-                    benchmarks, results_dict, bench, elapsed, Phase.BUILD_ARTS, current_partial[0]))
+                for run_num in range(1, runs + 1):
+                    current_bench[0] = f"{bench} (run {run_num}/{runs})" if runs > 1 else bench
+                    current_partial[0] = {}
+                    # Update display to show current benchmark as in-progress
+                    elapsed = time.time() - start_time
+                    live.update(create_live_display(
+                        benchmarks, results_dict, bench, elapsed, Phase.BUILD_ARTS, current_partial[0], total_runs=runs))
 
-                # Run benchmark with phase callback and partial results storage
-                result = self.run_single(
-                    bench,
-                    size,
-                    timeout,
-                    verify,
-                    arts_config,
-                    threads_override,
-                    nodes_override,
-                    launcher_override,
-                    omp_threads_override,
-                    counter_dir,
-                    arts_exec_args,
-                    phase_callback,
-                    current_partial[0],
-                    perf_enabled=perf_enabled,
-                    perf_interval=perf_interval,
-                )
+                    # Run benchmark with phase callback and partial results storage
+                    result = self.run_single(
+                        bench,
+                        size,
+                        timeout,
+                        verify,
+                        arts_config,
+                        threads_override,
+                        nodes_override,
+                        launcher_override,
+                        omp_threads_override,
+                        counter_dir,
+                        arts_exec_args,
+                        phase_callback,
+                        current_partial[0],
+                        perf_enabled=perf_enabled,
+                        perf_interval=perf_interval,
+                        run_number=run_num,
+                        run_timestamp=run_timestamp,
+                    )
 
-                # Update results and refresh display
-                results_dict[bench] = result
-                results_list.append(result)
-                current_bench[0] = None
-                current_partial[0] = None
-                elapsed = time.time() - start_time
-                live.update(create_live_display(
-                    benchmarks, results_dict, None, elapsed, None, None))
+                    # Update results and refresh display
+                    results_dict.setdefault(bench, []).append(result)
+                    results_list.append(result)
+                    current_bench[0] = None
+                    current_partial[0] = None
+                    elapsed = time.time() - start_time
+                    live.update(create_live_display(
+                        benchmarks, results_dict, None, elapsed, None, None, total_runs=runs))
 
         self.results = results_list
         return results_list
@@ -3971,16 +3986,17 @@ def generate_markdown_report_from_json(
 
 def create_live_table(
     benchmarks: List[str],
-    results: Dict[str, BenchmarkResult],
+    results: Dict[str, List[BenchmarkResult]],
     in_progress: Optional[str] = None,
     current_phase: Optional[Phase] = None,
     current_partial: Optional[Dict[str, Any]] = None,
+    total_runs: int = 1,
 ) -> Table:
-    """Create a live-updating table showing benchmark progress."""
+    """Create a live-updating table showing benchmark progress with running statistics."""
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("Build", justify="center")
+    table.add_column("CARTS Build", justify="center")
     table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP Init", justify="right")
@@ -3991,66 +4007,85 @@ def create_live_table(
     has_fallback = False
     has_multi_kernel = False
     for bench in benchmarks:
-        if bench in results:
-            # Completed - show full results
-            r = results[bench]
+        if bench in results and results[bench]:
+            # Completed runs - show running statistics
+            runs_list = results[bench]
+            run_count = len(runs_list)
+            r = runs_list[-1]  # Latest result for status checks
 
-            # Build status (combined)
-            if r.build_arts.status == Status.PASS and r.build_omp.status == Status.PASS:
-                build = f"[green]\u2713[/] {r.build_arts.duration_sec + r.build_omp.duration_sec:.1f}s"
+            # CARTS Build time (only ARTS build, with statistics)
+            arts_build_times = [run.build_arts.duration_sec for run in runs_list
+                                if run.build_arts.status == Status.PASS]
+            if arts_build_times:
+                stats = compute_stats(arts_build_times)
+                stddev = stats.get('stddev', 0.0)
+                build = f"[green]\u2713[/] {stats['mean']:.1f}s ({stddev:.2f}s) [{run_count}]"
             else:
-                build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
+                build = f"[red]\u2717[/] {r.build_arts.status.value}"
 
-            # ARTS Init time from counter JSON
-            if r.run_arts.counter_init_sec is not None:
-                arts_init = f"{r.run_arts.counter_init_sec:.4f}s"
+            # ARTS Init time with statistics
+            arts_init_times = [run.run_arts.counter_init_sec for run in runs_list
+                               if run.run_arts.counter_init_sec is not None]
+            if arts_init_times:
+                stats = compute_stats(arts_init_times)
+                stddev = stats.get('stddev', 0.0)
+                arts_init = f"{stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
             else:
                 arts_init = "[dim]-[/]"
 
-            # ARTS E2E time: prefer counter JSON, fall back to parsed stdout
-            if r.run_arts.counter_e2e_sec is not None:
-                arts_e2e = r.run_arts.counter_e2e_sec
-                arts_e2e_str = f"{arts_e2e:.4f}s"
-            else:
-                arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
-            omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
-
-            # OMP Init time from parsed stdout
-            omp_init = r.run_omp.init_timings.get("omp")
-            if omp_init is not None:
-                omp_init_str = f"{omp_init:.4f}s"
-            else:
-                omp_init_str = "[dim]-[/]"
-
-            # Run status with e2e time
-            if r.run_arts.status == Status.PASS:
-                if arts_e2e is not None:
-                    run_arts = f"{status_symbol(r.run_arts.status)} {arts_e2e_str}"
+            # ARTS E2E time with statistics
+            arts_e2e_times = []
+            for run in runs_list:
+                if run.run_arts.counter_e2e_sec is not None:
+                    arts_e2e_times.append(run.run_arts.counter_e2e_sec)
+                elif run.run_arts.e2e_timings:
+                    arts_e2e_times.append(sum(run.run_arts.e2e_timings.values()))
+            if arts_e2e_times:
+                stats = compute_stats(arts_e2e_times)
+                stddev = stats.get('stddev', 0.0)
+                run_arts = f"[green]\u2713[/] {stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
+            elif r.run_arts.status == Status.PASS:
+                # Fallback to kernel times
+                arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+                if arts_kernel is not None:
+                    run_arts = f"[green]\u2713[/] {arts_kernel_str}*"
                 else:
-                    arts_kernel, arts_kernel_str = format_kernel_time(
-                        r.run_arts)
-                    if arts_kernel is not None:
-                        run_arts = f"{status_symbol(r.run_arts.status)} {arts_kernel_str}*"
-                    else:
-                        run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
-                    has_fallback = True
+                    run_arts = f"[green]\u2713[/] {r.run_arts.duration_sec:.2f}s*"
+                has_fallback = True
             else:
                 run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
 
-            if r.run_omp.status == Status.PASS:
-                if omp_e2e is not None:
-                    run_omp = f"{status_symbol(r.run_omp.status)} {omp_e2e_str}"
+            # OMP Init time with statistics
+            omp_init_times = [run.run_omp.init_timings.get("omp") for run in runs_list
+                              if run.run_omp.init_timings.get("omp") is not None]
+            if omp_init_times:
+                stats = compute_stats(omp_init_times)
+                stddev = stats.get('stddev', 0.0)
+                omp_init_str = f"{stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
+            else:
+                omp_init_str = "[dim]-[/]"
+
+            # OMP E2E time with statistics
+            omp_e2e_times = []
+            for run in runs_list:
+                if run.run_omp.e2e_timings:
+                    omp_e2e_times.append(sum(run.run_omp.e2e_timings.values()))
+            if omp_e2e_times:
+                stats = compute_stats(omp_e2e_times)
+                stddev = stats.get('stddev', 0.0)
+                run_omp = f"[green]\u2713[/] {stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
+            elif r.run_omp.status == Status.PASS:
+                # Fallback to kernel times
+                omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+                if omp_kernel is not None:
+                    run_omp = f"[green]\u2713[/] {omp_kernel_str}*"
                 else:
-                    omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
-                    if omp_kernel is not None:
-                        run_omp = f"{status_symbol(r.run_omp.status)} {omp_kernel_str}*"
-                    else:
-                        run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
-                    has_fallback = True
+                    run_omp = f"[green]\u2713[/] {r.run_omp.duration_sec:.2f}s*"
+                has_fallback = True
             else:
                 run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
 
-            # Correctness
+            # Correctness (based on latest run)
             if r.verification.correct:
                 correct = "[green]\u2713 YES[/]"
             elif r.verification.note == "Verification disabled":
@@ -4060,16 +4095,20 @@ def create_live_table(
             else:
                 correct = "[red]\u2717 NO[/]"
 
-            # Speedup (basis chosen in calculate_timing)
-            if r.timing.speedup > 0:
-                if r.timing.speedup >= 1.0:
-                    speedup = f"[green]{r.timing.speedup:.2f}x[/]"
-                elif r.timing.speedup >= 0.8:
-                    speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
+            # Speedup with statistics
+            speedups = [run.timing.speedup for run in runs_list if run.timing.speedup > 0]
+            if speedups:
+                stats = compute_stats(speedups)
+                mean_speedup = stats['mean']
+                stddev = stats.get('stddev', 0.0)
+                if mean_speedup >= 1.0:
+                    speedup = f"[green]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
+                elif mean_speedup >= 0.8:
+                    speedup = f"[yellow]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
                 else:
-                    speedup = f"[red]{r.timing.speedup:.2f}x[/]"
+                    speedup = f"[red]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
                 if r.timing.speedup_basis != "e2e":
-                    speedup += "*"
+                    speedup = speedup.replace(f"[{run_count}]", f"[{run_count}]*")
                     has_fallback = True
             else:
                 speedup = "[dim]-[/]"
@@ -4091,28 +4130,27 @@ def create_live_table(
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.BUILD_OMP:
-                # Show ARTS build time if available
+                # Show ARTS build time if available (CARTS Build = ARTS only)
                 if current_partial and "build_arts" in current_partial:
                     build_arts_result = current_partial["build_arts"]
                     if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s [yellow]⏳ OMP...[/]"
+                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
                     else:
-                        build = f"[red]✗[/] {build_arts_result.status.value} [yellow]⏳ OMP...[/]"
+                        build = f"[red]✗[/] {build_arts_result.status.value}"
                 else:
-                    build = "[yellow]⏳ OMP...[/]"
+                    build = "[yellow]⏳ building...[/]"
                 run_arts = "[dim]-[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.RUN_ARTS:
-                # Show build time if available
-                if current_partial and "build_arts" in current_partial and "build_omp" in current_partial:
+                # Show CARTS build time (ARTS only)
+                if current_partial and "build_arts" in current_partial:
                     build_arts_result = current_partial["build_arts"]
-                    build_omp_result = current_partial["build_omp"]
-                    if build_arts_result.status == Status.PASS and build_omp_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec + build_omp_result.duration_sec:.1f}s"
+                    if build_arts_result.status == Status.PASS:
+                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
                     else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}/{build_omp_result.status.value}"
+                        build = f"[red]✗[/] {build_arts_result.status.value}"
                 else:
                     build = "[green]✓[/]"
                 run_arts = "[yellow]⏳ running...[/]"
@@ -4120,14 +4158,13 @@ def create_live_table(
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.RUN_OMP:
-                # Show build time if available
-                if current_partial and "build_arts" in current_partial and "build_omp" in current_partial:
+                # Show CARTS build time (ARTS only)
+                if current_partial and "build_arts" in current_partial:
                     build_arts_result = current_partial["build_arts"]
-                    build_omp_result = current_partial["build_omp"]
-                    if build_arts_result.status == Status.PASS and build_omp_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec + build_omp_result.duration_sec:.1f}s"
+                    if build_arts_result.status == Status.PASS:
+                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
                     else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}/{build_omp_result.status.value}"
+                        build = f"[red]✗[/] {build_arts_result.status.value}"
                 else:
                     build = "[green]✓[/]"
                 # ARTS run completed, show e2e time if available in partial results
@@ -4200,15 +4237,19 @@ def create_live_table(
 
 
 def create_live_summary(
-    results: Dict[str, BenchmarkResult],
+    results: Dict[str, List[BenchmarkResult]],
     total: int,
     elapsed: float,
 ) -> Text:
     """Create a one-line summary for live display."""
-    passed = sum(1 for r in results.values() if r.run_arts.status ==
-                 Status.PASS and r.verification.correct)
-    failed = sum(1 for r in results.values() if r.run_arts.status in (Status.FAIL, Status.CRASH) or
-                 (r.run_arts.status == Status.PASS and not r.verification.correct))
+    # Count passed/failed using latest result from each benchmark
+    passed = sum(1 for runs in results.values()
+                 if runs and runs[-1].run_arts.status == Status.PASS
+                 and runs[-1].verification.correct)
+    failed = sum(1 for runs in results.values()
+                 if runs and (runs[-1].run_arts.status in (Status.FAIL, Status.CRASH)
+                              or (runs[-1].run_arts.status == Status.PASS
+                                  and not runs[-1].verification.correct)))
     pending = total - len(results)
 
     text = Text()
@@ -4221,15 +4262,16 @@ def create_live_summary(
 
 def create_live_display(
     benchmarks: List[str],
-    results: Dict[str, BenchmarkResult],
+    results: Dict[str, List[BenchmarkResult]],
     in_progress: Optional[str],
     elapsed: float,
     current_phase: Optional[Phase] = None,
     current_partial: Optional[Dict[str, Any]] = None,
+    total_runs: int = 1,
 ) -> Group:
     """Create the complete live display (table + summary)."""
     table = create_live_table(
-        benchmarks, results, in_progress, current_phase, current_partial)
+        benchmarks, results, in_progress, current_phase, current_partial, total_runs)
     summary = create_live_summary(results, len(benchmarks), elapsed)
     return Group(table, summary)
 
@@ -4458,6 +4500,8 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
     for key, runs in groups.items():
         _name, threads, nodes = key
         # Extract timings
+        arts_build_times = []
+        omp_build_times = []
         arts_init_times = []
         omp_init_times = []
         arts_e2e_times = []
@@ -4466,6 +4510,12 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
         arts_kernel_times = []
         omp_kernel_times = []
         for r in runs:
+            # Collect build times
+            if r.build_arts.status == Status.PASS:
+                arts_build_times.append(r.build_arts.duration_sec)
+            if r.build_omp.status == Status.PASS:
+                omp_build_times.append(r.build_omp.duration_sec)
+
             arts_init = get_init_time(r.run_arts)
             omp_init = get_init_time(r.run_omp)
             if arts_init is not None:
@@ -4495,6 +4545,8 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
             config_key = f"{threads}_threads_{nodes}_nodes"
 
         stats[config_key] = {
+            "arts_build_time": compute_stats(arts_build_times),
+            "omp_build_time": compute_stats(omp_build_times),
             "arts_init_time": compute_stats(arts_init_times),
             "omp_init_time": compute_stats(omp_init_times),
             "arts_e2e_time": compute_stats(arts_e2e_times),
@@ -4813,7 +4865,7 @@ def run(
     counter_dir: Optional[Path] = typer.Option(
         None, "--counter-dir", help="Directory for ARTS counter output (n0_t*.json files)"),
     runs: int = typer.Option(
-        1, "--runs", "-r", help="Number of times to run each benchmark configuration (for statistical significance)"),
+        10, "--runs", "-r", help="Number of times to run each benchmark (default: 10, for statistical significance)"),
     report: bool = typer.Option(
         False, "--report", help="Generate a Markdown+SVG report artifact after running"),
     report_dir: Optional[Path] = typer.Option(
@@ -4990,6 +5042,8 @@ def run(
                 arts_exec_args=arts_exec_args,
                 perf_enabled=perf,
                 perf_interval=perf_interval,
+                runs=runs,
+                run_timestamp=run_timestamp,
             )
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")

@@ -69,16 +69,11 @@ int main(void) {
 
   init(A, B, C);
 
-  // Kernel timing (just the compute kernel)
-  CARTS_KERNEL_TIMER_START("gemm");
+  // CARTS_KERNEL_TIMER_START("gemm");
   gemm(C, (const float **)A, (const float **)B, 1.0f, 0.0f);
-  CARTS_KERNEL_TIMER_STOP("gemm");
+  // CARTS_KERNEL_TIMER_STOP("gemm");
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  // Verification (not timed)
+  // Verification
   double checksum = 0.0;
   for (int i = 0; i < NI; i++) {
     for (int j = 0; j < NJ; j++) {
@@ -97,5 +92,8 @@ int main(void) {
   free(A);
   free(B);
   free(C);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

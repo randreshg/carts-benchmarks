@@ -255,6 +255,7 @@ static void print_stats(const char *name, float *x, int n, int print_samples) {
 
 int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("activations");
 
   int size = SIZE;
   int softmax_size = 100; // Smaller size for softmax (more interpretable)
@@ -264,8 +265,6 @@ int main(int argc, char **argv) {
   printf("Array size: %d elements\n", size);
   printf("Softmax size: %d elements\n", softmax_size);
   printf("\n");
-
-  CARTS_E2E_TIMER_START("activations");
 
   // Allocate memory
   float *input = (float *)malloc(size * sizeof(float));
@@ -388,8 +387,6 @@ int main(int argc, char **argv) {
     printf("  Softmax validation failed\n");
   }
 
-  CARTS_E2E_TIMER_STOP();
-
   printf("\nAll activation functions completed successfully!\n");
 
   double final_checksum = relu_checksum + leaky_checksum + relu6_checksum +
@@ -401,6 +398,9 @@ int main(int argc, char **argv) {
   free(input);
   free(output);
   free(softmax_input);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

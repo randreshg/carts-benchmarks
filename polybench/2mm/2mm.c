@@ -98,15 +98,13 @@ static void kernel_2mm(int ni, int nj, int nk, int nl, DATA_TYPE alpha,
 int main(int argc, char **argv) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("2mm");
 
   /* Retrieve problem size. */
   int ni = NI;
   int nj = NJ;
   int nk = NK;
   int nl = NL;
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("2mm");
 
   /* Variable declaration/allocation. */
   DATA_TYPE alpha;
@@ -136,19 +134,15 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("2mm");
+  // CARTS_KERNEL_TIMER_START("2mm");
   kernel_2mm(ni, nj, nk, nl, alpha, beta, tmp, A, B, C, D);
-  CARTS_KERNEL_TIMER_STOP("2mm");
+  // CARTS_KERNEL_TIMER_STOP("2mm");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  /* Verification (not timed) */
+  /* Verification */
   double checksum = 0.0;
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nl; j++) {
@@ -168,5 +162,7 @@ int main(int argc, char **argv) {
   free_matrix(C, nl);
   free_matrix(D, ni);
 
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

@@ -2387,6 +2387,7 @@ static inline void CalcAccelerationForNodes(
     ParseCommandLineOptions(argc, argv, myRank, &opts);
 
     CARTS_BENCHMARKS_START();
+    CARTS_E2E_TIMER_START("lulesh");
 
     if ((myRank == 0) && (opts.quiet == 0)) {
       printf("Running problem size %d^3 per domain until completion\n",
@@ -2405,8 +2406,6 @@ static inline void CalcAccelerationForNodes(
       printf("To write an output file for VisIt, use -v\n");
       printf("See help (-h) for more options\n\n");
     }
-
-    CARTS_E2E_TIMER_START("lulesh");
 
     // Grid dimensions
     Index_t edgeElems = opts.nx;
@@ -2659,7 +2658,7 @@ static inline void CalcAccelerationForNodes(
     struct timeval start, end;
     gettimeofday(&start, NULL);
 
-    CARTS_KERNEL_TIMER_START("lulesh");
+    // CARTS_KERNEL_TIMER_START("lulesh");
     while ((time_val < stoptime) && (cycle < opts.its)) {
       TimeIncrement(&deltatime, &time_val, &cycle, stoptime, dtfixed, dtcourant,
                     dthydro, deltatimemultlb, deltatimemultub, dtmax);
@@ -2682,16 +2681,14 @@ static inline void CalcAccelerationForNodes(
       if ((opts.showProg != 0) && (opts.quiet == 0)) {
         printf("cycle = %d, time = %e, dt=%e\n", cycle, time_val, deltatime);
       }
-      CARTS_KERNEL_TIMER_ACCUM("lulesh");
+      // CARTS_KERNEL_TIMER_ACCUM("lulesh");
     }
 
     gettimeofday(&end, NULL);
     double elapsed_time = (double)(end.tv_sec - start.tv_sec) +
                           ((double)(end.tv_usec - start.tv_usec)) / 1000000;
 
-    CARTS_KERNEL_TIMER_PRINT("lulesh");
-    CARTS_E2E_TIMER_STOP();
-    CARTS_BENCHMARKS_STOP();
+    // CARTS_KERNEL_TIMER_PRINT("lulesh");
 
     // Output results
     Real_t grindTime1 =
@@ -2774,6 +2771,9 @@ static inline void CalcAccelerationForNodes(
     free(nodeElemCornerList);
 
     FreeIndex2D(nodelist, numElem);
+
+    CARTS_E2E_TIMER_STOP();
+    CARTS_BENCHMARKS_STOP();
 
     return 0;
   }

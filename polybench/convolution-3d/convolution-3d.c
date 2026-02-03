@@ -10,13 +10,11 @@
 int main(int argc, char **argv) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("convolution-3d");
 
   int ni = NI;
   int nj = NJ;
   int nk = NK;
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("convolution-3d");
 
   /* Allocate 3D arrays using pointer-to-pointer-to-pointer */
   DATA_TYPE ***A = (DATA_TYPE ***)malloc(ni * sizeof(DATA_TYPE **));
@@ -41,7 +39,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  CARTS_KERNEL_TIMER_START("convolution-3d");
+  // CARTS_KERNEL_TIMER_START("convolution-3d");
 
   /* 3D Convolution kernel */
 #pragma omp parallel for schedule(static)
@@ -60,13 +58,9 @@ int main(int argc, char **argv) {
     }
   }
 
-  CARTS_KERNEL_TIMER_STOP("convolution-3d");
+  // CARTS_KERNEL_TIMER_STOP("convolution-3d");
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  /* Verification (not timed) */
+  /* Verification */
   double checksum = 0.0;
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nj; j++) {
@@ -88,6 +82,9 @@ int main(int argc, char **argv) {
   }
   free(A);
   free(B);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

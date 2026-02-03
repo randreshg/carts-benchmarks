@@ -85,14 +85,12 @@ static void kernel_fdtd_2d(int tmax, int nx, int ny, DATA_TYPE **ex,
 int main(int argc, char **argv) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("fdtd-2d");
 
   /* Retrieve problem size. */
   int tmax = TMAX;
   int nx = NX;
   int ny = NY;
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("fdtd-2d");
 
   /* Variable declaration/allocation. */
   DATA_TYPE **ex = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
@@ -113,19 +111,15 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("fdtd-2d");
+  // CARTS_KERNEL_TIMER_START("fdtd-2d");
   kernel_fdtd_2d(tmax, nx, ny, ex, ey, hz, _fict_);
-  CARTS_KERNEL_TIMER_STOP("fdtd-2d");
+  // CARTS_KERNEL_TIMER_STOP("fdtd-2d");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  /* Verification (not timed) */
+  /* Verification */
   double checksum = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
@@ -150,6 +144,9 @@ int main(int argc, char **argv) {
   free(ey);
   free(hz);
   free(_fict_);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

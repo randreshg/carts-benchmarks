@@ -365,14 +365,12 @@ static float *forward(
 int main(void) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("transformer");
 
   printf("Testing isolated Transformer neural network functions\n");
   printf("Configuration: dim=%d, hidden_dim=%d, n_layers=%d, n_heads=%d, "
          "vocab_size=%d\n",
          DIM, HIDDEN_DIM, N_LAYERS, N_HEADS, VOCAB_SIZE);
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("transformer");
 
   // Allocate model weights using pointer-to-pointer pattern
   float **token_embedding_table = alloc_2d(VOCAB_SIZE, DIM);
@@ -412,16 +410,12 @@ int main(void) {
   int test_token = 42;
   int test_pos = 0;
 
-  CARTS_KERNEL_TIMER_START("transformer");
+  // CARTS_KERNEL_TIMER_START("transformer");
   float *logits_out =
       forward(token_embedding_table, rms_att_weight, rms_ffn_weight, wq, wk, wv,
               wo, w1, w2, w3, rms_final_weight, x, xb, xb2, hb, hb2, q_buf,
               att_buf, logits, key_cache, value_cache, test_token, test_pos);
-  CARTS_KERNEL_TIMER_STOP("transformer");
-
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
+  // CARTS_KERNEL_TIMER_STOP("transformer");
 
   printf("Forward pass completed. First 10 logits: ");
   for (int i = 0; i < 10; i++) {
@@ -429,7 +423,7 @@ int main(void) {
   }
   printf("\n");
 
-  // Verification (not timed)
+  // Verification
   float checksum = 0.0f;
   for (int i = 0; i < VOCAB_SIZE; i++) {
     checksum += logits_out[i];
@@ -492,6 +486,9 @@ int main(void) {
   free(logits);
   free_3d(key_cache, N_LAYERS, SEQ_LEN);
   free_3d(value_cache, N_LAYERS, SEQ_LEN);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

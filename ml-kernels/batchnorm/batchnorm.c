@@ -240,6 +240,7 @@ static void init_data(float ***x, float *scales, float *biases, int batch, int c
 
 int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("batchnorm");
 
   int batch = BATCH_SIZE;
   int channels = CHANNELS;
@@ -256,8 +257,6 @@ int main(int argc, char **argv) {
   printf("  Spatial: %d x %d = %d\n", height, width, spatial);
   printf("  Total elements: %d\n", total_size);
   printf("\n");
-
-  CARTS_E2E_TIMER_START("batchnorm");
 
   // Allocate memory for 3D arrays
   float ***x = (float ***)malloc(batch * sizeof(float **));
@@ -281,12 +280,10 @@ int main(int argc, char **argv) {
 
   // Run batch normalization
   printf("Running batch normalization...\n");
-  CARTS_KERNEL_TIMER_START("batchnorm");
+  // CARTS_KERNEL_TIMER_START("batchnorm");
   batchnorm_forward(x, output, scales, biases, batch, channels, spatial,
                     mean, variance);
-  CARTS_KERNEL_TIMER_STOP("batchnorm");
-
-  CARTS_E2E_TIMER_STOP();
+  // CARTS_KERNEL_TIMER_STOP("batchnorm");
 
   // Validation: normalized output should have mean ≈ 0 and variance ≈ 1 (before
   // scale/bias)
@@ -345,6 +342,9 @@ int main(int argc, char **argv) {
   free(variance);
   free(ref_mean);
   free(ref_variance);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

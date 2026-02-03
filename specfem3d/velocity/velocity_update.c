@@ -13,60 +13,60 @@
 #define NZ 48
 #endif
 #ifndef DT
-#define DT 0.001f
+#define DT 0.001
 #endif
 
-static void init(float ***vx, float ***vy, float ***vz, float ***rho,
-                 float ***sxx, float ***syy, float ***szz, float ***sxy,
-                 float ***sxz, float ***syz) {
+static void init(double ***vx, double ***vy, double ***vz, double ***rho,
+                 double ***sxx, double ***syy, double ***szz, double ***sxy,
+                 double ***sxz, double ***syz) {
   int idx = 0;
   for (int i = 0; i < NX; ++i) {
     for (int j = 0; j < NY; ++j) {
       for (int k = 0; k < NZ; ++k) {
-        vx[i][j][k] = 0.0f;
-        vy[i][j][k] = 0.0f;
-        vz[i][j][k] = 0.0f;
-        rho[i][j][k] = 2300.0f + (float)(idx % 11);
-        sxx[i][j][k] = 0.02f * (float)((idx * 2) % 17);
-        syy[i][j][k] = 0.02f * (float)((idx * 3) % 19);
-        szz[i][j][k] = 0.02f * (float)((idx * 5) % 23);
-        sxy[i][j][k] = 0.01f * (float)((idx * 7) % 13);
-        sxz[i][j][k] = 0.01f * (float)((idx * 11) % 29);
-        syz[i][j][k] = 0.01f * (float)((idx * 13) % 31);
+        vx[i][j][k] = 0.0;
+        vy[i][j][k] = 0.0;
+        vz[i][j][k] = 0.0;
+        rho[i][j][k] = 2300.0 + (double)(idx % 11);
+        sxx[i][j][k] = 0.02 * (double)((idx * 2) % 17);
+        syy[i][j][k] = 0.02 * (double)((idx * 3) % 19);
+        szz[i][j][k] = 0.02 * (double)((idx * 5) % 23);
+        sxy[i][j][k] = 0.01 * (double)((idx * 7) % 13);
+        sxz[i][j][k] = 0.01 * (double)((idx * 11) % 29);
+        syz[i][j][k] = 0.01 * (double)((idx * 13) % 31);
         idx++;
       }
     }
   }
 }
 
-static inline float diff_x(const float ***arr, int i, int j, int k) {
+static inline double diff_x(const double ***arr, int i, int j, int k) {
   return arr[i + 1][j][k] - arr[i][j][k];
 }
 
-static inline float diff_y(const float ***arr, int i, int j, int k) {
+static inline double diff_y(const double ***arr, int i, int j, int k) {
   return arr[i][j + 1][k] - arr[i][j][k];
 }
 
-static inline float diff_z(const float ***arr, int i, int j, int k) {
+static inline double diff_z(const double ***arr, int i, int j, int k) {
   return arr[i][j][k + 1] - arr[i][j][k];
 }
 
-static void specfem_velocity_update(float ***vx, float ***vy, float ***vz,
-                                    const float ***rho, const float ***sxx,
-                                    const float ***syy, const float ***szz,
-                                    const float ***sxy, const float ***sxz,
-                                    const float ***syz) {
+static void specfem_velocity_update(double ***vx, double ***vy, double ***vz,
+                                    const double ***rho, const double ***sxx,
+                                    const double ***syy, const double ***szz,
+                                    const double ***sxy, const double ***sxz,
+                                    const double ***syz) {
 #pragma omp parallel for schedule(static)
   for (int k = 1; k < NZ - 1; ++k) {
     for (int j = 1; j < NY - 1; ++j) {
       for (int i = 1; i < NX - 1; ++i) {
-        const float inv_rho = 1.0f / rho[i][j][k];
+        const double inv_rho = 1.0 / rho[i][j][k];
 
-        const float dvx =
+        const double dvx =
             diff_x(sxx, i, j, k) + diff_y(sxy, i, j, k) + diff_z(sxz, i, j, k);
-        const float dvy =
+        const double dvy =
             diff_x(sxy, i, j, k) + diff_y(syy, i, j, k) + diff_z(syz, i, j, k);
-        const float dvz =
+        const double dvz =
             diff_x(sxz, i, j, k) + diff_y(syz, i, j, k) + diff_z(szz, i, j, k);
 
         vx[i][j][k] += DT * inv_rho * dvx;
@@ -83,52 +83,50 @@ int main(void) {
   CARTS_E2E_TIMER_START("specfem_velocity_update");
 
   // Allocate 3D arrays
-  float ***vx = (float ***)malloc(NX * sizeof(float **));
-  float ***vy = (float ***)malloc(NX * sizeof(float **));
-  float ***vz = (float ***)malloc(NX * sizeof(float **));
-  float ***rho = (float ***)malloc(NX * sizeof(float **));
-  float ***sxx = (float ***)malloc(NX * sizeof(float **));
-  float ***syy = (float ***)malloc(NX * sizeof(float **));
-  float ***szz = (float ***)malloc(NX * sizeof(float **));
-  float ***sxy = (float ***)malloc(NX * sizeof(float **));
-  float ***sxz = (float ***)malloc(NX * sizeof(float **));
-  float ***syz = (float ***)malloc(NX * sizeof(float **));
+  double ***vx = (double ***)malloc(NX * sizeof(double **));
+  double ***vy = (double ***)malloc(NX * sizeof(double **));
+  double ***vz = (double ***)malloc(NX * sizeof(double **));
+  double ***rho = (double ***)malloc(NX * sizeof(double **));
+  double ***sxx = (double ***)malloc(NX * sizeof(double **));
+  double ***syy = (double ***)malloc(NX * sizeof(double **));
+  double ***szz = (double ***)malloc(NX * sizeof(double **));
+  double ***sxy = (double ***)malloc(NX * sizeof(double **));
+  double ***sxz = (double ***)malloc(NX * sizeof(double **));
+  double ***syz = (double ***)malloc(NX * sizeof(double **));
 
   for (int i = 0; i < NX; ++i) {
-    vx[i] = (float **)malloc(NY * sizeof(float *));
-    vy[i] = (float **)malloc(NY * sizeof(float *));
-    vz[i] = (float **)malloc(NY * sizeof(float *));
-    rho[i] = (float **)malloc(NY * sizeof(float *));
-    sxx[i] = (float **)malloc(NY * sizeof(float *));
-    syy[i] = (float **)malloc(NY * sizeof(float *));
-    szz[i] = (float **)malloc(NY * sizeof(float *));
-    sxy[i] = (float **)malloc(NY * sizeof(float *));
-    sxz[i] = (float **)malloc(NY * sizeof(float *));
-    syz[i] = (float **)malloc(NY * sizeof(float *));
+    vx[i] = (double **)malloc(NY * sizeof(double *));
+    vy[i] = (double **)malloc(NY * sizeof(double *));
+    vz[i] = (double **)malloc(NY * sizeof(double *));
+    rho[i] = (double **)malloc(NY * sizeof(double *));
+    sxx[i] = (double **)malloc(NY * sizeof(double *));
+    syy[i] = (double **)malloc(NY * sizeof(double *));
+    szz[i] = (double **)malloc(NY * sizeof(double *));
+    sxy[i] = (double **)malloc(NY * sizeof(double *));
+    sxz[i] = (double **)malloc(NY * sizeof(double *));
+    syz[i] = (double **)malloc(NY * sizeof(double *));
     for (int j = 0; j < NY; ++j) {
-      vx[i][j] = (float *)malloc(NZ * sizeof(float));
-      vy[i][j] = (float *)malloc(NZ * sizeof(float));
-      vz[i][j] = (float *)malloc(NZ * sizeof(float));
-      rho[i][j] = (float *)malloc(NZ * sizeof(float));
-      sxx[i][j] = (float *)malloc(NZ * sizeof(float));
-      syy[i][j] = (float *)malloc(NZ * sizeof(float));
-      szz[i][j] = (float *)malloc(NZ * sizeof(float));
-      sxy[i][j] = (float *)malloc(NZ * sizeof(float));
-      sxz[i][j] = (float *)malloc(NZ * sizeof(float));
-      syz[i][j] = (float *)malloc(NZ * sizeof(float));
+      vx[i][j] = (double *)malloc(NZ * sizeof(double));
+      vy[i][j] = (double *)malloc(NZ * sizeof(double));
+      vz[i][j] = (double *)malloc(NZ * sizeof(double));
+      rho[i][j] = (double *)malloc(NZ * sizeof(double));
+      sxx[i][j] = (double *)malloc(NZ * sizeof(double));
+      syy[i][j] = (double *)malloc(NZ * sizeof(double));
+      szz[i][j] = (double *)malloc(NZ * sizeof(double));
+      sxy[i][j] = (double *)malloc(NZ * sizeof(double));
+      sxz[i][j] = (double *)malloc(NZ * sizeof(double));
+      syz[i][j] = (double *)malloc(NZ * sizeof(double));
     }
   }
 
   init(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
 
-  CARTS_KERNEL_TIMER_START("specfem_velocity_update");
+  // CARTS_KERNEL_TIMER_START("specfem_velocity_update");
   specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
+  // CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
 
-  CARTS_E2E_TIMER_STOP();
-
-  // Compute checksum inline
-  float checksum = 0.0f;
+  // Compute checksum
+  double checksum = 0.0;
   for (int i = 0; i < NX; ++i) {
     for (int j = 0; j < NY; ++j) {
       for (int k = 0; k < NZ; ++k) {
@@ -173,5 +171,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

@@ -65,6 +65,7 @@ int main(void) {
   STREAM_TYPE scalar = 3.0;
 
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("stream");
 
   /* Print benchmark info */
   printf("-------------------------------------------------------------\n");
@@ -107,9 +108,6 @@ int main(void) {
   /* Initialize arrays */
   init_arrays(a, b, c, array_size);
 
-  /* E2E timer includes all kernel iterations */
-  CARTS_E2E_TIMER_START("stream");
-
   /*
    * Main timing loop - preserves original STREAM structure:
    * Each kernel runs NTIMES with individual timing per iteration.
@@ -144,9 +142,6 @@ int main(void) {
     times_triad[k] = carts_bench_get_time() - times_triad[k];
   }
 
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
   /* Calculate and print results (original STREAM format) */
   printf("Function    Best Rate MB/s  Avg time     Min time     Max time\n");
 
@@ -180,6 +175,9 @@ int main(void) {
   free(a);
   free(b);
   free(c);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

@@ -138,13 +138,11 @@ int main(void) {
 
   init_array(u, mu, lambda, rhs);
 
-  CARTS_KERNEL_TIMER_START("sw4lite_rhs4sg_base");
+  // CARTS_KERNEL_TIMER_START("sw4lite_rhs4sg_base");
   sw4lite_rhs4sg_base(rhs, u, mu, lambda, 1.0f);
-  CARTS_KERNEL_TIMER_STOP("sw4lite_rhs4sg_base");
+  // CARTS_KERNEL_TIMER_STOP("sw4lite_rhs4sg_base");
 
-  CARTS_E2E_TIMER_STOP();
-
-  // Compute checksum inline using double for better precision with large arrays
+  // Compute checksum using double for better precision with large arrays
   double checksum = 0.0;
   for (int c = 0; c < COMP; ++c) {
     for (int i = 0; i < NX; ++i) {
@@ -183,5 +181,8 @@ int main(void) {
   }
   free(mu);
   free(lambda);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

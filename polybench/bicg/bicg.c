@@ -82,13 +82,11 @@ static void kernel_bicg(int nx, int ny, DATA_TYPE **A, DATA_TYPE *s,
 int main(int argc, char **argv) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("bicg");
 
   /* Retrieve problem size. */
   int nx = NX;
   int ny = NY;
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("bicg");
 
   /* Variable declaration/allocation. */
   DATA_TYPE **A = (DATA_TYPE **)malloc(nx * sizeof(DATA_TYPE *));
@@ -113,19 +111,15 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("bicg");
+  // CARTS_KERNEL_TIMER_START("bicg");
   kernel_bicg(nx, ny, A, s, q, p, r);
-  CARTS_KERNEL_TIMER_STOP("bicg");
+  // CARTS_KERNEL_TIMER_STOP("bicg");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  /* Verification (not timed) */
+  /* Verification */
   double checksum = 0.0;
   for (int i = 0; i < ny; i++) {
     checksum += s[i];
@@ -149,5 +143,7 @@ int main(int argc, char **argv) {
   free(p);
   free(r);
 
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

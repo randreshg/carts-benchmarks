@@ -263,6 +263,7 @@ static void print_sample(const char *name, float ***data, int batch, int channel
 
 int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("pooling");
 
   int batch = BATCH_SIZE;
   int channels = CHANNELS;
@@ -291,8 +292,6 @@ int main(int argc, char **argv) {
   printf("  Reduction factor: %.2fx\n",
          (float)(in_height * in_width) / (out_height * out_width));
   printf("\n");
-
-  CARTS_E2E_TIMER_START("pooling");
 
   // Allocate memory as 3D arrays
   float ***input = (float ***)malloc(batch * sizeof(float **));
@@ -391,8 +390,6 @@ int main(int argc, char **argv) {
     printf("  [FAIL] Found %d violations where max < avg\n", violations);
   }
 
-  CARTS_E2E_TIMER_STOP();
-
   printf("\nPooling operations completed successfully!\n");
 
   double final_checksum = maxpool_checksum + avgpool_checksum + global_avgpool_checksum;
@@ -414,6 +411,9 @@ int main(int argc, char **argv) {
   free(maxpool_output);
   free(avgpool_output);
   free(global_output);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

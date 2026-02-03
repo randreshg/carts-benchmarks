@@ -40,6 +40,7 @@ static inline uint64_t rmat_target(uint64_t src, uint64_t num_vertices, uint64_t
 
 int main(int argc, char *argv[]) {
     CARTS_BENCHMARKS_START();
+    CARTS_E2E_TIMER_START("graph_gen");
 
     uint64_t num_vertices = (uint64_t)1 << SCALE;
     uint64_t edges_per_vertex = EDGE_FACTOR;
@@ -49,8 +50,6 @@ int main(int argc, char *argv[]) {
     printf("Total memory required: ~%.2f GB\n",
            (double)(num_vertices * edges_per_vertex * sizeof(uint64_t)) / (1024.0 * 1024.0 * 1024.0));
 
-    CARTS_E2E_TIMER_START("graph_gen");
-
     /* Allocate outer arrays (vertex pointers and counts) */
     uint64_t **adj_list = (uint64_t **)malloc(num_vertices * sizeof(uint64_t *));
     uint64_t *adj_count = (uint64_t *)malloc(num_vertices * sizeof(uint64_t));
@@ -58,7 +57,7 @@ int main(int argc, char *argv[]) {
     /* Total edges generated (for checksum) */
     uint64_t total_edges = 0;
 
-    CARTS_KERNEL_TIMER_START("parallel_gen");
+    // CARTS_KERNEL_TIMER_START("parallel_gen");
 
     /* Generate edges - allocate adjacency list INSIDE loop */
     #pragma omp parallel for schedule(dynamic)
@@ -73,9 +72,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    CARTS_KERNEL_TIMER_STOP("parallel_gen");
-
-    CARTS_E2E_TIMER_STOP();
+    // CARTS_KERNEL_TIMER_STOP("parallel_gen");
 
     for (uint64_t v = 0; v < num_vertices; v++) {
         total_edges += adj_count[v];
@@ -93,6 +90,9 @@ int main(int argc, char *argv[]) {
     }
     free(adj_list);
     free(adj_count);
+
+    CARTS_E2E_TIMER_STOP();
+    CARTS_BENCHMARKS_STOP();
 
     return 0;
 }

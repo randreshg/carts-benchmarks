@@ -151,6 +151,7 @@ static void rhs(int nx, int ny, double **f) {
 
 int main(void) {
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("poisson-task");
 
   int nx = SIZE;
   int ny = SIZE;
@@ -165,8 +166,6 @@ int main(void) {
   printf("[ckpt] params: nx=%d ny=%d dx=%.12e dy=%.12e BLOCK_SIZE=%d NITER=%d\n",
          nx, ny, dx, dy, BLOCK_SIZE, NITER);
 #endif
-
-  CARTS_E2E_TIMER_START("poisson-task");
 
   // Allocate arrays
   double **f = (double **)malloc(nx * sizeof(double *));
@@ -210,11 +209,10 @@ int main(void) {
 #endif
 
   printf("Running task-based sweep...\n");
-  CARTS_KERNEL_TIMER_START("sweep");
+  // CARTS_KERNEL_TIMER_START("sweep");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew);
-  CARTS_KERNEL_TIMER_STOP("sweep");
+  // CARTS_KERNEL_TIMER_STOP("sweep");
 
-  CARTS_E2E_TIMER_STOP();
 #ifdef POISSON_DEBUG
   checkpoint("task_unew", nx, ny, unew);
 #endif
@@ -272,6 +270,9 @@ int main(void) {
   free(u);
   free(unew);
   free(unew_seq);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return (error < 1e-6) ? 0 : 1;
 }

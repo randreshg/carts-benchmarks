@@ -67,13 +67,11 @@ static void kernel_conv2d(int ni, int nj, DATA_TYPE **A, DATA_TYPE **B) {
 int main(int argc, char **argv) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("convolution-2d");
 
   /* Retrieve problem size. */
   int ni = NI;
   int nj = NJ;
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("convolution-2d");
 
   /* Variable declaration/allocation. */
   DATA_TYPE **A = (DATA_TYPE **)malloc(ni * sizeof(DATA_TYPE *));
@@ -91,19 +89,15 @@ int main(int argc, char **argv) {
   polybench_start_instruments;
 
   /* Run kernel. */
-  CARTS_KERNEL_TIMER_START("convolution-2d");
+  // CARTS_KERNEL_TIMER_START("convolution-2d");
   kernel_conv2d(ni, nj, A, B);
-  CARTS_KERNEL_TIMER_STOP("convolution-2d");
+  // CARTS_KERNEL_TIMER_STOP("convolution-2d");
 
   /* Stop and print timer. */
   polybench_stop_instruments;
   polybench_print_instruments;
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  /* Verification (not timed) */
+  /* Verification */
   double checksum = 0.0;
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nj; j++) {
@@ -123,6 +117,9 @@ int main(int argc, char **argv) {
   }
   free(A);
   free(B);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

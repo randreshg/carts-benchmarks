@@ -129,13 +129,11 @@ int main(void) {
 
   init(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
 
-  CARTS_KERNEL_TIMER_START("sw4lite_vel4sg_update");
+  // CARTS_KERNEL_TIMER_START("sw4lite_vel4sg_update");
   sw4lite_vel4sg_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  CARTS_KERNEL_TIMER_STOP("sw4lite_vel4sg_update");
+  // CARTS_KERNEL_TIMER_STOP("sw4lite_vel4sg_update");
 
-  CARTS_E2E_TIMER_STOP();
-
-  // Compute checksum inline 
+  // Compute checksum
   float checksum = 0.0f;
   for (int i = 0; i < NX; ++i) {
     for (int j = 0; j < NY; ++j) {
@@ -181,5 +179,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

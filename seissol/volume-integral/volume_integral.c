@@ -84,13 +84,11 @@ int main(void) {
 
   init(dofs, gradMatrix, fluxMatrix);
 
-  CARTS_KERNEL_TIMER_START("seissol_volume_integral");
+  // CARTS_KERNEL_TIMER_START("seissol_volume_integral");
   seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
-  CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
+  // CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
 
-  CARTS_E2E_TIMER_STOP();
-
-  // Compute checksum inline
+  // Compute checksum
   float checksum = 0.0f;
   for (int e = 0; e < N_ELEMENTS; ++e) {
     for (int b = 0; b < N_BASIS; ++b) {
@@ -112,5 +110,8 @@ int main(void) {
   }
   free(gradMatrix);
   free(fluxMatrix);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

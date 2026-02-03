@@ -133,13 +133,11 @@ int main(void) {
 
   init(vx, vy, vz, rho, mu, lambda, sxx, syy, szz, sxy, sxz, syz);
 
-  CARTS_KERNEL_TIMER_START("specfem3d_update_stress");
+  // CARTS_KERNEL_TIMER_START("specfem3d_update_stress");
   specfem3d_update_stress(sxx, syy, szz, sxy, sxz, syz, vx, vy, vz, mu, lambda);
-  CARTS_KERNEL_TIMER_STOP("specfem3d_update_stress");
+  // CARTS_KERNEL_TIMER_STOP("specfem3d_update_stress");
 
-  CARTS_E2E_TIMER_STOP();
-
-  // Compute checksum inline
+  // Compute checksum
   float checksum = 0.0f;
   for (int i = 0; i < NX; ++i) {
     for (int j = 0; j < NY; ++j) {
@@ -192,5 +190,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
   return 0;
 }

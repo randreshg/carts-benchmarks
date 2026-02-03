@@ -42,6 +42,7 @@ static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
 int main(void) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("jacobi-for");
 
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
@@ -53,9 +54,6 @@ int main(void) {
   int block_size = 10;
   double dx = 1.0 / (nx - 1);
   double dy = 1.0 / (ny - 1);
-
-  // E2E timing: includes DB creation (malloc/init) + kernel
-  CARTS_E2E_TIMER_START("jacobi-for");
 
   // Allocate 2D arrays
   double **f = (double **)malloc(nx * sizeof(double *));
@@ -77,15 +75,11 @@ int main(void) {
     }
   }
 
-  CARTS_KERNEL_TIMER_START("jacobi-for");
+  // CARTS_KERNEL_TIMER_START("jacobi-for");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  CARTS_KERNEL_TIMER_STOP("jacobi-for");
+  // CARTS_KERNEL_TIMER_STOP("jacobi-for");
 
-  // E2E stops after kernel, before verification/memfree
-  CARTS_E2E_TIMER_STOP();
-  CARTS_BENCHMARKS_STOP();
-
-  // Verification (not timed)
+  // Verification
   double checksum = 0.0;
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
@@ -103,6 +97,9 @@ int main(void) {
   free(f);
   free(u);
   free(unew);
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }
