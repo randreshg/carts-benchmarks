@@ -522,6 +522,52 @@ def get_weak_scaling_cflags(
     return " ".join(cflags_parts)
 
 
+def append_perf_to_main_csv(
+    temp_perf_file: Path,
+    main_perf_file: Path,
+    run_number: int,
+) -> None:
+    """Append perf stat data from temp file to main CSV with run column.
+
+    For the first run (or if main file doesn't exist), creates the main file
+    with a header. For subsequent runs, appends data rows with run number.
+
+    Args:
+        temp_perf_file: Temporary perf output file from current run.
+        main_perf_file: Main CSV file to append to.
+        run_number: Run number to add as first column.
+    """
+    if not temp_perf_file.exists():
+        return
+
+    is_first_run = not main_perf_file.exists() or main_perf_file.stat().st_size == 0
+
+    with open(temp_perf_file, "r") as temp_f:
+        lines = temp_f.readlines()
+
+    # Filter out comment lines (# ...) and blank lines
+    data_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            data_lines.append(stripped)
+
+    if not data_lines:
+        return
+
+    mode = "w" if is_first_run else "a"
+    with open(main_perf_file, mode) as main_f:
+        if is_first_run:
+            # Write header for the run column
+            main_f.write("# Columns: run,timestamp,value,unit,event,...\n")
+
+        for line in data_lines:
+            main_f.write(f"{run_number},{line}\n")
+
+    # Remove temp file after successful append
+    temp_perf_file.unlink(missing_ok=True)
+
+
 def generate_arts_config(
     base_path: Path,
     threads: int,
@@ -599,6 +645,9 @@ def generate_arts_config(
 
     # Add counter settings if requested
     if counter_dir:
+        # Remove any existing counterFolder/counterStartPoint lines to avoid duplicates
+        content = re.sub(r'^counterFolder\s*=.*\n?', '', content, flags=re.MULTILINE)
+        content = re.sub(r'^counterStartPoint\s*=.*\n?', '', content, flags=re.MULTILINE)
         content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
 
     # Determine node count for filename
@@ -670,40 +719,6 @@ def get_arts_cfg_nodes(path: Optional[Path]) -> List[str]:
     cfg = parse_arts_cfg(path)
     nodes_str = cfg.get("nodes", "localhost")
     return [n.strip() for n in nodes_str.split(",") if n.strip()]
-
-
-# Counter level mapping
-COUNTER_LEVELS = {
-    0: "off",       # No counters (counter.profile-none.cfg)
-    1: "artsid",    # ArtsID metrics (counter.profile-artsid-only.cfg)
-    2: "deep",      # Deep captures (counter.profile-deep.cfg)
-}
-
-
-def check_arts_counter_support() -> int:
-    """Check what counter level ARTS was built with.
-
-    Returns:
-        0 = counters disabled (counter.profile-none.cfg)
-        1 = artsid metrics (counter.profile-artsid-only.cfg)
-        2 = deep captures (counter.profile-deep.cfg)
-    """
-    preamble = Path(get_carts_dir()) / \
-        ".install/arts/include/arts/introspection/Preamble.h"
-    if not preamble.exists():
-        return 0
-
-    content = preamble.read_text()
-
-    # Check for deep captures (level 2)
-    if "ENABLE_artsIdEdtCaptures 1" in content:
-        return 2
-
-    # Check for artsid metrics (level 1)
-    if "ENABLE_artsIdEdtMetrics 1" in content:
-        return 1
-
-    return 0
 
 
 # ============================================================================
@@ -2046,6 +2061,7 @@ class BenchmarkRunner:
         perf_interval: float = 0.1,
         run_number: int = 1,
         run_timestamp: str = "",
+        perf_dir: Optional[Path] = None,
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -2079,14 +2095,21 @@ class BenchmarkRunner:
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
 
-        # Default counter directory if not specified - ensures counter collection always works
-        if counter_dir is None:
-            counter_dir = bench_path / "counters"
+        # Create per-run counter subdirectory to preserve counter data across runs
+        # Format: {counter_dir}/{timestamp}/{benchmark_name}_{run}/
+        safe_bench_name = name.replace("/", "_")
+        if counter_dir is not None:
+            run_counter_dir = counter_dir / run_timestamp / f"{safe_bench_name}_{run_number}"
+            run_counter_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            # Fallback to benchmark's local counters directory (original behavior)
+            run_counter_dir = bench_path / "counters"
+            run_counter_dir.mkdir(parents=True, exist_ok=True)
 
-        # Ensure counters directory exists for perf output
+        # Ensure perf output directory exists
         if perf_enabled:
-            perf_output_dir = counter_dir or (bench_path / "counters")
-            perf_output_dir.mkdir(parents=True, exist_ok=True)
+            effective_perf_dir = perf_dir or Path("./perfs")
+            effective_perf_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate config with overrides only if values actually differ from base
         need_generated = False
@@ -2096,13 +2119,13 @@ class BenchmarkRunner:
             need_generated = True
         if launcher_override is not None and launcher_override != base_launcher:
             need_generated = True
-        if counter_dir is not None:
+        if run_counter_dir is not None:
             need_generated = True
 
         effective_arts_cfg: Path
         if need_generated:
             effective_arts_cfg = generate_arts_config(
-                effective_config, desired_threads, counter_dir, desired_launcher, nodes_override
+                effective_config, desired_threads, run_counter_dir, desired_launcher, nodes_override
             )
         else:
             effective_arts_cfg = effective_config
@@ -2138,6 +2161,19 @@ class BenchmarkRunner:
         if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
             common_env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
 
+        # Setup perf output paths (temp file per run, main file for appending)
+        # Format: {perf_dir}/{timestamp}/{benchmark_name}_{arts|omp}.csv
+        effective_perf_dir = perf_dir or Path("./perfs")
+        if run_timestamp:
+            perf_timestamp_dir = effective_perf_dir / run_timestamp
+            perf_timestamp_dir.mkdir(parents=True, exist_ok=True)
+            arts_perf_main = perf_timestamp_dir / f"{safe_bench_name}_arts.csv"
+            arts_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_arts_{run_number}.csv"
+            omp_perf_main = perf_timestamp_dir / f"{safe_bench_name}_omp.csv"
+            omp_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_omp_{run_number}.csv"
+        else:
+            arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
+
         # Run ARTS version - pass artsConfig env var so runtime uses the effective config.
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
@@ -2156,9 +2192,12 @@ class BenchmarkRunner:
                 log_file=arts_log,
                 perf_enabled=perf_enabled,
                 perf_interval=perf_interval,
-                perf_output_name=f"perf_cache_{run_timestamp}_arts_{run_number}.csv" if run_timestamp else "perf_cache_arts.csv",
-                perf_output_dir=counter_dir or (bench_path / "counters"),
+                perf_output_name=arts_perf_temp.name if arts_perf_temp else "perf_cache_arts.csv",
+                perf_output_dir=perf_timestamp_dir if run_timestamp else effective_perf_dir,
             )
+            # Append temp perf data to main CSV
+            if perf_enabled and arts_perf_temp and arts_perf_main:
+                append_perf_to_main_csv(arts_perf_temp, arts_perf_main, run_number)
         else:
             run_arts = RunResult(
                 status=Status.SKIP,
@@ -2168,17 +2207,9 @@ class BenchmarkRunner:
                 stderr="Build failed",
             )
 
-        # Parse counter JSON for timing data
-        # Check explicit counter_dir first, then fall back to ARTS default ./counter location
-        effective_counter_dir = None
-        if counter_dir and counter_dir.exists():
-            effective_counter_dir = counter_dir
-        else:
-            default_counter_dir = bench_path / "counters"
-            if default_counter_dir.exists():
-                effective_counter_dir = default_counter_dir
-        if effective_counter_dir:
-            init_sec, e2e_sec = parse_counter_json(effective_counter_dir)
+        # Parse counter JSON for timing data from run-specific counter directory
+        if run_counter_dir and run_counter_dir.exists():
+            init_sec, e2e_sec = parse_counter_json(run_counter_dir)
             run_arts.counter_init_sec = init_sec
             run_arts.counter_e2e_sec = e2e_sec
 
@@ -2204,9 +2235,12 @@ class BenchmarkRunner:
                 log_file=omp_log,
                 perf_enabled=perf_enabled,
                 perf_interval=perf_interval,
-                perf_output_name=f"perf_cache_{run_timestamp}_omp_{run_number}.csv" if run_timestamp else "perf_cache_omp.csv",
-                perf_output_dir=counter_dir or (bench_path / "counters"),
+                perf_output_name=omp_perf_temp.name if omp_perf_temp else "perf_cache_omp.csv",
+                perf_output_dir=perf_timestamp_dir if run_timestamp else effective_perf_dir,
             )
+            # Append temp perf data to main CSV
+            if perf_enabled and omp_perf_temp and omp_perf_main:
+                append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
         else:
             run_omp = RunResult(
                 status=Status.SKIP,
@@ -2302,6 +2336,7 @@ class BenchmarkRunner:
         perf_interval: float = 0.1,
         runs: int = 1,
         run_timestamp: str = "",
+        perf_dir: Optional[Path] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2329,6 +2364,7 @@ class BenchmarkRunner:
                         perf_interval=perf_interval,
                         run_number=run_num,
                         run_timestamp=run_timestamp,
+                        perf_dir=perf_dir,
                     )
                     results_list.append(result)
             self.results = results_list
@@ -2382,6 +2418,7 @@ class BenchmarkRunner:
                         perf_interval=perf_interval,
                         run_number=run_num,
                         run_timestamp=run_timestamp,
+                        perf_dir=perf_dir,
                     )
 
                     # Update results and refresh display
@@ -4860,20 +4897,24 @@ def run(
         None, "--arts-exec-args", help="Extra carts execute args (e.g., '--partition-fallback=fine')"),
     debug_level: int = typer.Option(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=full output"),
-    counters: int = typer.Option(
-        0, "--counters", help="Counter level: 0=off, 1=artsid metrics, 2=deep captures. Requires ARTS built with matching --counters level."),
-    counter_dir: Optional[Path] = typer.Option(
-        None, "--counter-dir", help="Directory for ARTS counter output (n0_t*.json files)"),
+    counter_config: Optional[Path] = typer.Option(
+        None, "--counter-config", help="Custom counter.cfg file. Triggers ARTS rebuild with this configuration."),
+    counter_dir: Path = typer.Option(
+        "./counters", "--counter-dir", help="Directory for ARTS counter output (cluster.json)"),
     runs: int = typer.Option(
-        10, "--runs", "-r", help="Number of times to run each benchmark (default: 10, for statistical significance)"),
+        10, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     report: bool = typer.Option(
         False, "--report", help="Generate a Markdown+SVG report artifact after running"),
     report_dir: Optional[Path] = typer.Option(
-        None, "--report-dir", help="Directory for report outputs (default: alongside JSON output or CWD)"),
+        None, "--report-dir", help="Directory for report outputs (default: alongside JSON output)"),
     perf: bool = typer.Option(
         False, "--perf", help="Enable perf stat profiling for cache metrics"),
     perf_interval: float = typer.Option(
-        0.1, "--perft", help="Perf stat sampling interval in seconds (default: 0.1)"),
+        0.1, "--perft", help="Perf stat sampling interval in seconds"),
+    perf_dir: Path = typer.Option(
+        "./perfs", "--perf-dir", help="Directory for perf stat CSV output"),
+    results_dir: Path = typer.Option(
+        "./results", "--results-dir", help="Directory for results JSON output"),
 ):
     """Run benchmarks with verification and timing."""
     verify = not no_verify
@@ -4898,19 +4939,36 @@ def run(
         console.print("[yellow]No benchmarks found.[/]")
         raise typer.Exit(1)
 
-    # Setup counter collection
-    if counters > 0:
-        # Check if ARTS was built with counter support
-        arts_level = check_arts_counter_support()
-        if arts_level < counters:
-            console.print(
-                f"[yellow]Warning: ARTS built with counters={arts_level}, requested counters={counters}[/]")
-            console.print(
-                f"[dim]Rebuild ARTS: carts build --arts --counters={counters}[/]")
-        if not counter_dir:
-            counter_dir = Path(f"./counters/{size}")
-    if counter_dir:
-        counter_dir.mkdir(parents=True, exist_ok=True)
+    # Handle custom counter configuration (triggers ARTS rebuild)
+    if counter_config:
+        if not counter_config.exists():
+            console.print(f"[red]Error: Counter config not found: {counter_config}[/]")
+            raise typer.Exit(1)
+
+        console.print(f"[yellow]Rebuilding ARTS with counter config: {counter_config}[/]")
+        import subprocess
+        result = subprocess.run(
+            ["carts", "build", "--arts", f"--counter-config={counter_config}"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[red]ARTS rebuild failed:[/]\n{result.stderr}")
+            raise typer.Exit(1)
+        console.print("[green]ARTS rebuild complete[/]")
+
+    # Setup directories - resolve to absolute paths since subprocesses run with different cwd
+    counter_dir = Path(counter_dir)
+    counter_dir.mkdir(parents=True, exist_ok=True)
+    counter_dir = counter_dir.resolve()
+
+    perf_dir = Path(perf_dir)
+    perf_dir.mkdir(parents=True, exist_ok=True)
+    perf_dir = perf_dir.resolve()
+
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = results_dir.resolve()
 
     # Print header
     if not quiet:
@@ -4934,9 +4992,10 @@ def run(
             config_items.append(f"arts-exec-args={arts_exec_args}")
         if debug_level > 0:
             config_items.append(f"debug={debug_level}")
-        if counters > 0:
-            config_items.append(
-                f"counters={counters} ({COUNTER_LEVELS.get(counters, 'unknown')})")
+        if counter_config:
+            config_items.append(f"counter-config={counter_config.name}")
+        if perf:
+            config_items.append(f"perf-dir={perf_dir or './perfs'}")
         console.print(f"Config: {', '.join(config_items)}")
 
         # Show effective ARTS configuration
@@ -5044,6 +5103,7 @@ def run(
                 perf_interval=perf_interval,
                 runs=runs,
                 run_timestamp=run_timestamp,
+                perf_dir=perf_dir,
             )
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
@@ -5058,11 +5118,11 @@ def run(
         console.print(create_summary_panel(results, total_duration))
 
     # Always export a JSON artifact (for paper-quality reporting + reproducibility).
-    # If --output is not provided, write `benchmark_results_<timestamp>.json` to CWD.
+    # If --output is not provided, write `<timestamp>.json` to results_dir (default: ./results).
     json_output_path = (
         (actual_json_path if actual_json_path else output)
         if output
-        else (get_benchmarks_dir() / "results" / f"benchmark_results_{run_timestamp}.json")
+        else (results_dir / f"{run_timestamp}.json")
     )
 
     artifacts_dir_name = "." if experiment_dir else None
