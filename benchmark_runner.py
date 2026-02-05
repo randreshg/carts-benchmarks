@@ -5879,6 +5879,12 @@ def slurm_run(
         False, "--verbose", "-v", help="Verbose output"),
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional compiler flags"),
+    port_start: Optional[int] = typer.Option(
+        None, "--port-start",
+        help="Starting port number (each job gets port_start + job_index)"),
+    gdb: bool = typer.Option(
+        False, "--gdb",
+        help="Wrap executable with gdb for backtrace on crash"),
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -6084,6 +6090,7 @@ def slurm_run(
     slurm_job_result_script = Path(__file__).parent / "slurm_job_result.py"
 
     job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
+    next_port = port_start
 
     for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
         # Create job directory: jobs/{benchmark}/nodes_{N}/ (experiment-specific)
@@ -6094,6 +6101,14 @@ def slurm_run(
         for run_num in range(1, runs + 1):
             # Create job config
             # Executables come from build/, output goes to jobs/
+            # When --port-start is set, each job gets a non-overlapping port range
+            # Each node uses 1 port (ports=1 fixed for benchmarks)
+            if next_port is not None:
+                port_end = next_port + node_count - 1
+                port = f"[{next_port}-{port_end}]"
+                next_port = port_end + 1
+            else:
+                port = None
             config = slurm_batch.SlurmJobConfig(
                 benchmark_name=bench,
                 run_number=run_num,
@@ -6107,6 +6122,8 @@ def slurm_run(
                 output_dir=job_node_dir,            # To jobs/ (experiment-specific)
                 size=size,
                 threads=threads,
+                port=port,
+                gdb=gdb,
             )
 
             # Generate sbatch script in job directory

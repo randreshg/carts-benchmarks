@@ -51,6 +51,8 @@ class SlurmJobConfig:
     output_dir: Path
     size: str
     threads: int  # For OpenMP comparison (single-node only)
+    port: Optional[str] = None  # Per-job port override (e.g., "10001" or "[10001-10002]")
+    gdb: bool = False  # Wrap executable with gdb for backtrace on crash
 
 
 @dataclass
@@ -111,7 +113,7 @@ mkdir -p "$COUNTER_DIR"
 
 # Generate per-run arts.cfg with correct counterFolder
 # (base arts.cfg has placeholder, we override counterFolder for this run)
-sed "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
+sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" {port_sed} "{arts_config_path}" > "{runtime_arts_cfg}"
 export artsConfig="{runtime_arts_cfg}"
 export CARTS_BENCHMARKS_REPORT_INIT=1
 
@@ -129,7 +131,7 @@ echo "=========================================="
 echo ""
 echo "[ARTS] Running benchmark..."
 ARTS_START=$(date +%s.%N)
-srun --exclusive {executable_arts}
+{srun_command}
 ARTS_EXIT=$?
 ARTS_END=$(date +%s.%N)
 ARTS_DURATION=$(echo "$ARTS_END - $ARTS_START" | bc)
@@ -239,6 +241,18 @@ def generate_sbatch_script(
     safe_name = config.benchmark_name.replace("/", "_").replace(" ", "_")
     job_name = f"{safe_name}_n{config.node_count}_r{config.run_number}"[:64]
 
+    # Per-job port override (for environments where jobs share the same host)
+    port_sed = f'-e "s|^port=.*|port={config.port}|"' if config.port else ''
+
+    # GDB wrapper: attach gdb for backtrace on crash
+    if config.gdb:
+        srun_command = (
+            f'srun --exclusive bash -c '
+            f"'gdb --batch -ex run -ex \"thread apply all bt\" -ex quit --args {executable_arts_abs}'"
+        )
+    else:
+        srun_command = f'srun --exclusive {executable_arts_abs}'
+
     script_content = SBATCH_TEMPLATE.format(
         job_name=job_name,
         node_count=config.node_count,
@@ -254,10 +268,12 @@ def generate_sbatch_script(
         counter_dir=counter_dir,
         result_json=result_json,
         executable_arts=executable_arts_abs,
+        srun_command=srun_command,
         omp_section=omp_section,
         slurm_job_result_script=slurm_job_result_abs,
         size=config.size,
         threads=config.threads,
+        port_sed=port_sed,
     )
 
     # Create output directory
