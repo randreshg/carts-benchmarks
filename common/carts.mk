@@ -57,7 +57,8 @@ all: | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 
 # Track OpenMP build flags to avoid stale binaries when size/CFLAGS change
-$(OMP_CFLAGS_STAMP): | $(BUILD_DIR)
+# FORCE ensures this rule always runs to compare current flags with cached flags
+$(OMP_CFLAGS_STAMP): FORCE | $(BUILD_DIR)
 	@echo "$(OMP_FLAGS) $(LDFLAGS)" > $@.tmp
 	@{ \
 	  if [ ! -f "$@" ] || ! cmp -s "$@.tmp" "$@"; then \
@@ -66,6 +67,10 @@ $(OMP_CFLAGS_STAMP): | $(BUILD_DIR)
 	    rm -f "$@.tmp"; \
 	  fi; \
 	}
+
+# FORCE target ensures rules always execute (standard Make pattern)
+FORCE:
+.PHONY: FORCE
 
 # Build OpenMP reference executable
 $(OMP_BINARY): $(SRC) $(OMP_CFLAGS_STAMP) | $(BUILD_DIR) $(LOG_DIR)

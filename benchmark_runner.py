@@ -47,6 +47,9 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
+# SLURM batch support
+import slurm_batch
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -711,6 +714,51 @@ def get_arts_cfg_str(path: Optional[Path], key: str) -> Optional[str]:
     return v if v else None
 
 
+def parse_node_spec(spec: str) -> List[int]:
+    """Parse node count specification.
+
+    Supports:
+        "4"         -> [4]
+        "1-15"      -> [1, 2, 3, ..., 15]
+        "1,2,4,8"   -> [1, 2, 4, 8]
+        "1-4,8,16"  -> [1, 2, 3, 4, 8, 16]
+
+    Args:
+        spec: Node count specification string
+
+    Returns:
+        Sorted list of unique node counts
+
+    Raises:
+        ValueError: If specification is invalid
+    """
+    result = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            # Range: "1-15"
+            try:
+                start, end = part.split("-", 1)
+                start_val = int(start.strip())
+                end_val = int(end.strip())
+                if start_val < 1 or end_val < start_val:
+                    raise ValueError(f"Invalid range: {part}")
+                result.update(range(start_val, end_val + 1))
+            except ValueError as e:
+                raise ValueError(f"Invalid range '{part}': {e}")
+        else:
+            # Single value: "4"
+            try:
+                val = int(part)
+                if val < 1:
+                    raise ValueError(f"Node count must be >= 1: {val}")
+                result.add(val)
+            except ValueError:
+                raise ValueError(f"Invalid node count: {part}")
+
+    return sorted(result)
+
+
 def get_arts_cfg_nodes(path: Optional[Path]) -> List[str]:
     """Parse nodes= field from arts.cfg into list of hostnames.
 
@@ -1046,6 +1094,35 @@ class BenchmarkRunner:
                 return match.group(1).strip()
         return None
 
+    def get_executable_paths(self, bench_path: Path) -> Tuple[Path, Path]:
+        """Get the ARTS and OpenMP executable paths for a benchmark.
+
+        Based on carts.mk:
+            ARTS_BINARY := $(EXAMPLE_NAME)_arts       # in benchmark root
+            OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp  # in build/
+
+        Args:
+            bench_path: Path to the benchmark directory
+
+        Returns:
+            Tuple of (arts_exe_path, omp_exe_path)
+        """
+        makefile = bench_path / "Makefile"
+        example_name = None
+
+        if makefile.exists():
+            content = makefile.read_text()
+            example_name = self._extract_make_var(content, "EXAMPLE_NAME")
+
+        # Fallback to directory name if EXAMPLE_NAME not found
+        if not example_name:
+            example_name = bench_path.name
+
+        arts_exe = bench_path / f"{example_name}_arts"
+        omp_exe = bench_path / "build" / f"{example_name}_omp"
+
+        return arts_exe, omp_exe
+
     def build_benchmark(
         self,
         name: str,
@@ -1086,21 +1163,23 @@ class BenchmarkRunner:
 
         # Build command using make
         # Use granular targets ({size}-arts, {size}-openmp) defined in common/carts.mk
+        # CRITICAL: Provide explicit path to carts executable (not in PATH during non-interactive shells)
+        carts_exe = self.carts_dir / "tools" / "carts"
         if variant == "openmp":
             # Build only OpenMP variant using granular target
             if size in size_targets:
-                cmd = ["make", f"{size}-openmp"]
+                cmd = ["make", f"{size}-openmp", f"CARTS={carts_exe}"]
             else:
-                cmd = ["make", "openmp"]
+                cmd = ["make", "openmp", f"CARTS={carts_exe}"]
             if cflags:
                 cmd.append(f"CFLAGS={cflags}")
         else:
             # Build ARTS variant (full pipeline)
             if size in size_targets:
                 # Use granular size-arts target for ARTS-only builds
-                cmd = ["make", f"{size}-arts"]
+                cmd = ["make", f"{size}-arts", f"CARTS={carts_exe}"]
             else:
-                cmd = ["make", "all"]
+                cmd = ["make", "all", f"CARTS={carts_exe}"]
             if cflags:
                 cmd.append(f"CFLAGS={cflags}")
 
@@ -5753,6 +5832,333 @@ def analyze(
             "\n[yellow]No parallel/task timing data found in results.[/]")
         console.print(
             "Make sure benchmarks use CARTS_PARALLEL_TIMER_* and CARTS_TASK_TIMER_* macros.")
+
+
+# ============================================================================
+# SLURM Batch Command
+# ============================================================================
+
+
+@app.command(name="slurm-run")
+def slurm_run(
+    benchmarks: Optional[List[str]] = typer.Argument(
+        None, help="Specific benchmarks to run (default: all)"),
+    nodes: str = typer.Option(
+        ..., "--nodes", "-n",
+        help="Node counts: single (4), range (1-15), or list (1,2,4,8,16)"),
+    size: str = typer.Option(
+        DEFAULT_SIZE, "--size", "-s",
+        help="Dataset size: small, medium, large, extralarge"),
+    runs: int = typer.Option(
+        10, "--runs", "-r", help="Number of runs per benchmark"),
+    partition: Optional[str] = typer.Option(
+        None, "--partition", "-p",
+        help="SLURM partition (uses cluster default if not specified)"),
+    time_limit: str = typer.Option(
+        "01:00:00", "--time", "-t", help="Time limit per job (HH:MM:SS)"),
+    account: Optional[str] = typer.Option(
+        None, "--account", "-A", help="SLURM account (if required)"),
+    arts_config: Optional[Path] = typer.Option(
+        None, "--arts-config",
+        help="Base arts.cfg file (for threads and other settings)"),
+    threads: Optional[int] = typer.Option(
+        None, "--threads",
+        help="Thread count for OpenMP comparison (default: from arts.cfg or 8)"),
+    output_dir: Path = typer.Option(
+        Path("./results"), "--output", "-o",
+        help="Output directory for results"),
+    suite: Optional[str] = typer.Option(
+        None, "--suite", help="Filter by suite"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Generate scripts but don't submit to SLURM"),
+    no_build: bool = typer.Option(
+        False, "--no-build",
+        help="Skip build phase (assumes executables already exist)"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Verbose output"),
+    cflags: Optional[str] = typer.Option(
+        None, "--cflags", help="Additional compiler flags"),
+):
+    """Submit benchmarks as SLURM batch jobs.
+
+    This command:
+    1. Builds all benchmarks locally (reusable across jobs)
+    2. Generates sbatch scripts for each (benchmark x node_count x run)
+    3. Submits all jobs to SLURM queue
+    4. Monitors job progress
+    5. Collects and aggregates results
+
+    Example:
+        carts benchmarks slurm-run --nodes=1-15 --runs 10
+        carts benchmarks slurm-run polybench/gemm --nodes=4 -t 00:30:00
+        carts benchmarks slurm-run --nodes=1,2,4,8,16 --partition compute
+
+    Key Features:
+    - Submit all jobs at once (no sequential waiting)
+    - Exclusive node allocation for resource isolation
+    - Each job has isolated counter directory (no data collision)
+    - Sweep across multiple node counts with --nodes=1-15
+    """
+    # Initialize
+    runner = BenchmarkRunner(console, verbose, False, False, False, 0)
+
+    # Parse node counts from --nodes parameter
+    try:
+        node_counts = parse_node_spec(nodes)
+    except ValueError as e:
+        console.print(f"[red]Error parsing --nodes: {e}[/]")
+        raise typer.Exit(1)
+
+    # Determine base arts config (for threads and other settings)
+    # CRITICAL: Resolve to absolute path for SLURM jobs running from different directories
+    base_config = (arts_config.resolve() if arts_config else DEFAULT_ARTS_CONFIG.resolve())
+    if not base_config.exists():
+        console.print(f"[red]Error: arts.cfg not found: {base_config}[/]")
+        raise typer.Exit(1)
+
+    # Get threads from config or default
+    if threads is None:
+        threads = get_arts_cfg_int(base_config, "threads") or 8
+
+    # Format node counts for display
+    if len(node_counts) == 1:
+        nodes_display = str(node_counts[0])
+    elif len(node_counts) <= 5:
+        nodes_display = ", ".join(str(n) for n in node_counts)
+    else:
+        nodes_display = f"{node_counts[0]}-{node_counts[-1]} ({len(node_counts)} values)"
+
+    console.print(Panel.fit(
+        f"[bold]SLURM Batch Submission[/]\n"
+        f"Config: {base_config}\n"
+        f"Nodes: {nodes_display}, Threads: {threads}\n"
+        f"Runs per benchmark: {runs}\n"
+        f"Size: {size}",
+        title="CARTS Benchmarks"
+    ))
+
+    # Discover benchmarks
+    if benchmarks:
+        bench_list = benchmarks
+    else:
+        bench_list = runner.discover_benchmarks(suite)
+
+    if not bench_list:
+        console.print("[yellow]No benchmarks to run.[/]")
+        raise typer.Exit(0)
+
+    # Check which benchmarks support multinode
+    multinode_disabled = set()
+    for bench in bench_list:
+        bench_path = runner.benchmarks_dir / bench
+        if (bench_path / ".disable-multinode").exists():
+            multinode_disabled.add(bench)
+
+    # Calculate total jobs: sum over node counts
+    # (benchmarks with multinode disabled only run with node_count=1)
+    total_jobs = 0
+    for nc in node_counts:
+        if nc == 1:
+            total_jobs += len(bench_list) * runs
+        else:
+            valid_benchmarks = len(bench_list) - len(multinode_disabled)
+            total_jobs += valid_benchmarks * runs
+
+    console.print(f"\n[bold]Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs[/]")
+    if multinode_disabled and max(node_counts) > 1:
+        console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
+
+    # Create experiment directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_dir = output_dir / f"slurm_{timestamp}"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    jobs_dir = experiment_dir / "jobs"
+    build_dir = experiment_dir / "build"
+
+    console.print(f"Experiment directory: {experiment_dir}")
+
+    # Phase 1: Build all benchmarks locally
+    # Build once per benchmark (executables work for any node count)
+    build_omp_variant = 1 in node_counts  # Only build OpenMP if testing single-node
+
+    if not no_build:
+        console.print("\n[bold]Phase 1: Building benchmarks...[/]")
+
+        build_results: Dict[str, Tuple[BuildResult, Optional[BuildResult], Path, Optional[Path]]] = {}
+
+        for bench in bench_list:
+            console.print(f"  Building {bench}...", end=" ")
+
+            # Build ARTS variant
+            build_arts = runner.build_benchmark(
+                bench, size, variant="arts",
+                arts_config=base_config,
+                cflags=cflags or "",
+            )
+
+            # Build OpenMP variant (only if single-node is in node_counts)
+            build_omp = None
+            if build_omp_variant:
+                build_omp = runner.build_benchmark(
+                    bench, size, variant="openmp",
+                    cflags=cflags or "",
+                )
+
+            if build_arts.status == Status.PASS:
+                console.print("[green]OK[/]")
+
+                # Find executables using correct naming from carts.mk:
+                # ARTS: {bench_dir}/{EXAMPLE_NAME}_arts
+                # OpenMP: {bench_dir}/build/{EXAMPLE_NAME}_omp
+                bench_path = runner.benchmarks_dir / bench
+                arts_exe, omp_exe = runner.get_executable_paths(bench_path)
+
+                build_results[bench] = (
+                    build_arts,
+                    build_omp,
+                    arts_exe,
+                    omp_exe if build_omp and omp_exe.exists() else None
+                )
+            else:
+                console.print(f"[red]FAILED[/]")
+                if verbose:
+                    console.print(f"    {build_arts.output[:200]}...")
+    else:
+        # Assume executables exist (or will exist on cluster)
+        console.print("\n[yellow]Skipping build phase (--no-build)[/]")
+        console.print("[dim]Note: Executables must exist on SLURM nodes for jobs to succeed[/]")
+        build_results = {}
+        for bench in bench_list:
+            bench_path = runner.benchmarks_dir / bench
+            # Get executable paths using correct naming from carts.mk
+            arts_exe, omp_exe = runner.get_executable_paths(bench_path)
+
+            # Always add to build_results (executables may exist on cluster nodes)
+            build_results[bench] = (
+                BuildResult(Status.PASS, 0, "skipped"),
+                BuildResult(Status.PASS, 0, "skipped") if build_omp_variant else None,
+                arts_exe,
+                omp_exe if build_omp_variant else None
+            )
+
+            if verbose and not arts_exe.exists():
+                console.print(f"  [yellow]Warning: {arts_exe} not found locally[/]")
+
+    # Phase 2: Generate sbatch scripts
+    console.print("\n[bold]Phase 2: Generating job scripts...[/]")
+
+    slurm_job_result_script = Path(__file__).parent / "slurm_job_result.py"
+
+    job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
+
+    for bench in build_results:
+        _, _, arts_exe, omp_exe = build_results[bench]
+        safe_name = bench.replace("/", "_")
+
+        for node_count in node_counts:
+            # Skip multinode-disabled benchmarks for node_count > 1
+            if node_count > 1 and bench in multinode_disabled:
+                continue
+
+            # Only use OpenMP executable for single-node runs
+            effective_omp_exe = omp_exe if node_count == 1 else None
+
+            for run_num in range(1, runs + 1):
+                # Create job directory: jobs/{benchmark}/nodes_{N}/run_{R}/
+                job_dir = jobs_dir / safe_name / f"nodes_{node_count}" / f"run_{run_num}"
+                job_dir.mkdir(parents=True, exist_ok=True)
+
+                # Generate job-specific arts.cfg with unique counterFolder
+                job_config_path = slurm_batch.generate_arts_config_for_job(
+                    base_config, job_dir, node_count, threads
+                )
+
+                # Create job config
+                config = slurm_batch.SlurmJobConfig(
+                    benchmark_name=bench,
+                    run_number=run_num,
+                    node_count=node_count,
+                    time_limit=time_limit,
+                    partition=partition,
+                    account=account,
+                    executable_arts=arts_exe,
+                    executable_omp=effective_omp_exe,
+                    arts_config_path=job_config_path,
+                    output_dir=job_dir,
+                    size=size,
+                    threads=threads,
+                )
+
+                # Generate sbatch script
+                script_path = job_dir / "job.sbatch"
+                slurm_batch.generate_sbatch_script(
+                    config, script_path, slurm_job_result_script
+                )
+
+                job_configs.append((config, script_path))
+
+    console.print(f"  Generated {len(job_configs)} job scripts")
+
+    # Phase 3: Submit jobs
+    console.print("\n[bold]Phase 3: Submitting jobs...[/]")
+
+    job_statuses = slurm_batch.submit_all_jobs(job_configs, console, dry_run)
+
+    # Write job manifest
+    metadata = {
+        "timestamp": timestamp,
+        "size": size,
+        "node_counts": node_counts,
+        "threads": threads,
+        "runs_per_benchmark": runs,
+        "total_jobs": len(job_configs),
+        "partition": partition,
+        "time_limit": time_limit,
+        "arts_config": str(base_config),
+        "dry_run": dry_run,
+    }
+
+    manifest_path = slurm_batch.write_job_manifest(
+        experiment_dir, job_statuses, metadata
+    )
+    console.print(f"  Job manifest: {manifest_path}")
+
+    if dry_run:
+        console.print("\n[yellow]Dry run complete. Scripts generated but not submitted.[/]")
+        console.print(f"To submit manually, run sbatch on scripts in: {jobs_dir}")
+        raise typer.Exit(0)
+
+    # Phase 4: Monitor jobs
+    console.print("\n[bold]Phase 4: Monitoring jobs...[/]")
+
+    job_statuses = slurm_batch.wait_for_jobs_completion(
+        job_statuses, console, poll_interval=10
+    )
+
+    # Phase 5: Collect results
+    console.print("\n[bold]Phase 5: Collecting results...[/]")
+
+    results = slurm_batch.collect_results(job_statuses, experiment_dir)
+
+    results_path = slurm_batch.write_aggregated_results(
+        experiment_dir, results, metadata
+    )
+
+    # Summary
+    successful = sum(1 for r in results if r.get("status") == "PASS")
+    failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
+
+    console.print("\n" + "=" * 60)
+    console.print(Panel.fit(
+        f"[bold]Experiment Complete[/]\n\n"
+        f"Total jobs: {len(results)}\n"
+        f"Successful: [green]{successful}[/]\n"
+        f"Failed: [red]{failed}[/]\n\n"
+        f"Results: {results_path}\n"
+        f"Manifest: {manifest_path}",
+        title="Summary"
+    ))
 
 
 if __name__ == "__main__":
