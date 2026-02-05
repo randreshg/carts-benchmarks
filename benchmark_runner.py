@@ -2334,7 +2334,7 @@ class BenchmarkRunner:
             suite=suite,
             size=size,
             config=config,
-            run_number=1,
+            run_number=run_number,
             build_arts=build_arts,
             build_omp=build_omp,
             run_arts=run_arts,
