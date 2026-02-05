@@ -2095,6 +2095,20 @@ class BenchmarkRunner:
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
 
+        # Skip benchmarks disabled for multi-node when running with nodeCount > 1
+        if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
+            skip_config = BenchmarkConfig(
+                arts_threads=desired_threads,
+                arts_nodes=desired_nodes,
+                omp_threads=omp_threads_override if omp_threads_override else desired_threads,
+                launcher=desired_launcher,
+            )
+            return self._make_skip_result(
+                name, size,
+                "Benchmark disabled for multi-node (has .disable-multinode marker)",
+                skip_config
+            )
+
         # Create per-run counter subdirectory to preserve counter data across runs
         # Format: {counter_dir}/{timestamp}/{benchmark_name}_{run}/
         safe_bench_name = name.replace("/", "_")
@@ -2142,10 +2156,18 @@ class BenchmarkRunner:
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
-        # Build OpenMP version
+        # Build OpenMP version - skip for multi-node since OMP is single-node only
         if phase_callback:
             phase_callback(Phase.BUILD_OMP)
-        build_omp = self.build_benchmark(name, size, "openmp", None)
+        if desired_nodes == 1:
+            build_omp = self.build_benchmark(name, size, "openmp", None)
+        else:
+            build_omp = BuildResult(
+                status=Status.SKIP,
+                duration_sec=0.0,
+                output="Skipped: OpenMP does not support multi-node execution",
+                executable=None,
+            )
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
@@ -2242,12 +2264,18 @@ class BenchmarkRunner:
             if perf_enabled and omp_perf_temp and omp_perf_main:
                 append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
         else:
+            # Determine skip reason - multi-node or build failure
+            skip_reason = (
+                "Skipped: OpenMP does not support multi-node execution"
+                if desired_nodes > 1
+                else "Build failed"
+            )
             run_omp = RunResult(
                 status=Status.SKIP,
                 duration_sec=0.0,
                 exit_code=-1,
                 stdout="",
-                stderr="Build failed",
+                stderr=skip_reason,
             )
 
         # Print trace output if enabled
@@ -2400,26 +2428,30 @@ class BenchmarkRunner:
                         benchmarks, results_dict, bench, elapsed, Phase.BUILD_ARTS, current_partial[0], total_runs=runs))
 
                     # Run benchmark with phase callback and partial results storage
-                    result = self.run_single(
-                        bench,
-                        size,
-                        timeout,
-                        verify,
-                        arts_config,
-                        threads_override,
-                        nodes_override,
-                        launcher_override,
-                        omp_threads_override,
-                        counter_dir,
-                        arts_exec_args,
-                        phase_callback,
-                        current_partial[0],
-                        perf_enabled=perf_enabled,
-                        perf_interval=perf_interval,
-                        run_number=run_num,
-                        run_timestamp=run_timestamp,
-                        perf_dir=perf_dir,
-                    )
+                    try:
+                        result = self.run_single(
+                            bench,
+                            size,
+                            timeout,
+                            verify,
+                            arts_config,
+                            threads_override,
+                            nodes_override,
+                            launcher_override,
+                            omp_threads_override,
+                            counter_dir,
+                            arts_exec_args,
+                            phase_callback,
+                            current_partial[0],
+                            perf_enabled=perf_enabled,
+                            perf_interval=perf_interval,
+                            run_number=run_num,
+                            run_timestamp=run_timestamp,
+                            perf_dir=perf_dir,
+                        )
+                    except Exception as e:
+                        # Log error and continue to next benchmark
+                        result = self._make_error_result(bench, size, str(e))
 
                     # Update results and refresh display
                     results_dict.setdefault(bench, []).append(result)
@@ -4306,11 +4338,22 @@ def create_live_display(
     current_partial: Optional[Dict[str, Any]] = None,
     total_runs: int = 1,
 ) -> Group:
-    """Create the complete live display (table + summary)."""
+    """Create the complete live display (status panel + table + summary)."""
+    components = []
+
+    # Add running status panel if benchmark in progress
+    if in_progress:
+        phase_text = current_phase.value.replace("_", " ").title() if current_phase else "Starting"
+        status_text = f"[bold cyan]\u25b6 Running:[/] [white]{in_progress}[/] [dim]({phase_text})[/]"
+        status_panel = Panel(status_text, box=box.ROUNDED, style="blue", padding=(0, 1))
+        components.append(status_panel)
+
     table = create_live_table(
         benchmarks, results, in_progress, current_phase, current_partial, total_runs)
     summary = create_live_summary(results, len(benchmarks), elapsed)
-    return Group(table, summary)
+
+    components.extend([table, summary])
+    return Group(*components)
 
 
 # ============================================================================
@@ -5034,13 +5077,14 @@ def run(
                                      f"arts-nodes={arts_nodes}",
                                      f"arts-launcher={arts_launcher}"]
 
-                # Only show node list if it's not just localhost
-                if arts_nodes_list != ["localhost"]:
+                # Always show node list (shows configured nodes including ports)
+                # Escape brackets to prevent Rich from interpreting as markup
+                if arts_nodes_list:
                     node_display = ','.join(arts_nodes_list[:3])
                     if len(arts_nodes_list) > 3:
                         node_display += "..."
                     arts_config_items.append(
-                        f"arts-node-list=[{node_display}]")
+                        f"arts-node-list=\\[{node_display}]")
 
                 console.print(
                     f"ARTS Config ({config_source}): {', '.join(arts_config_items)}")
