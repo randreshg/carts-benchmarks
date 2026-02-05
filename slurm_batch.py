@@ -105,12 +105,15 @@ SBATCH_TEMPLATE = """#!/bin/bash
 
 set -e
 
-# CRITICAL: Each job has its own arts.cfg with unique counterFolder
-export artsConfig="{arts_config_path}"
-export CARTS_BENCHMARKS_REPORT_INIT=1
+# Create per-run counter directory
+COUNTER_DIR="{counter_dir}"
+mkdir -p "$COUNTER_DIR"
 
-# Create counter directory (ARTS doesn't create it automatically)
-mkdir -p "{counter_dir}"
+# Generate per-run arts.cfg with correct counterFolder
+# (base arts.cfg has placeholder, we override counterFolder for this run)
+sed "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
+export artsConfig="{runtime_arts_cfg}"
+export CARTS_BENCHMARKS_REPORT_INIT=1
 
 echo "=========================================="
 echo "CARTS Benchmark: {benchmark_name}"
@@ -118,6 +121,7 @@ echo "Run: {run_number}"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
 echo "Node Count: $SLURM_NNODES"
+echo "Counter Dir: $COUNTER_DIR"
 echo "Start: $(date -Iseconds)"
 echo "=========================================="
 
@@ -151,10 +155,10 @@ python3 "{slurm_job_result_script}" \\
     --arts-duration $ARTS_DURATION \\
     --omp-exit $OMP_EXIT \\
     --omp-duration $OMP_DURATION \\
-    --counter-dir "{counter_dir}" \\
+    --counter-dir "$COUNTER_DIR" \\
     --slurm-job-id "$SLURM_JOB_ID" \\
     --slurm-nodelist "$SLURM_JOB_NODELIST" \\
-    --output "{output_dir}/result.json"
+    --output "{result_json}"
 
 exit $ARTS_EXIT
 """
@@ -185,6 +189,18 @@ def generate_sbatch_script(
 ) -> None:
     """Generate an sbatch script for a single benchmark run.
 
+    Directory structure:
+        build/{benchmark}/nodes_{N}/              <- shared, reusable
+        ├── arts.cfg                              <- compile-time config
+        ├── {name}_arts, {name}_omp               <- executables
+
+        results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/  <- experiment-specific
+        ├── job_1.sbatch, job_2.sbatch, ...
+        ├── arts_1.cfg, arts_2.cfg, ...           <- runtime config (counterFolder differs)
+        ├── counters_1/, counters_2/, ...
+        ├── result_1.json, result_2.json, ...
+        └── slurm-*.out/err
+
     Args:
         config: Job configuration
         script_path: Path to write the sbatch script
@@ -196,7 +212,12 @@ def generate_sbatch_script(
 
     # CRITICAL: Use absolute paths - jobs may run from different working directories
     output_dir_abs = config.output_dir.resolve()
-    counter_dir = output_dir_abs / "counters"
+
+    # Per-run paths: counters_{run}, result_{run}.json, arts_{run}.cfg
+    counter_dir = output_dir_abs / f"counters_{config.run_number}"
+    result_json = output_dir_abs / f"result_{config.run_number}.json"
+    runtime_arts_cfg = output_dir_abs / f"arts_{config.run_number}.cfg"
+
     arts_config_abs = config.arts_config_path.resolve() if config.arts_config_path else None
     executable_arts_abs = config.executable_arts.resolve() if config.executable_arts else None
     executable_omp_abs = config.executable_omp.resolve() if config.executable_omp else None
@@ -204,8 +225,6 @@ def generate_sbatch_script(
 
     # Build OpenMP section (only for single-node)
     if config.node_count == 1 and executable_omp_abs:
-        # Generate OpenMP section even if executable doesn't exist locally
-        # (it might exist on the cluster nodes)
         omp_section = OMP_SECTION_TEMPLATE.format(
             node_count=config.node_count,
             executable_omp=executable_omp_abs,
@@ -231,7 +250,9 @@ def generate_sbatch_script(
         run_number=config.run_number,
         timestamp=datetime.now().isoformat(),
         arts_config_path=arts_config_abs,
+        runtime_arts_cfg=runtime_arts_cfg,
         counter_dir=counter_dir,
+        result_json=result_json,
         executable_arts=executable_arts_abs,
         omp_section=omp_section,
         slurm_job_result_script=slurm_job_result_abs,
@@ -247,38 +268,43 @@ def generate_sbatch_script(
     script_path.chmod(0o755)
 
 
-def generate_arts_config_for_job(
+def generate_arts_config_for_node(
     base_config: Path,
-    output_dir: Path,
+    build_node_dir: Path,
     node_count: int,
     threads: int,
 ) -> Path:
-    """Generate a job-specific arts.cfg with unique counterFolder.
+    """Generate a node-specific arts.cfg for compilation (goes in build/ directory).
+
+    This config is used at compile time to embed nodeCount into the executable.
+    counterFolder is set to a placeholder - the sbatch script will override it per-run
+    when creating the runtime arts.cfg in the jobs/ directory.
 
     Args:
         base_config: Base arts.cfg to use as template
-        output_dir: Job output directory (counterFolder will be output_dir/counters)
+        build_node_dir: Build directory (build/{benchmark}/nodes_{N}/)
         node_count: Number of nodes
         threads: Thread count
 
     Returns:
-        Path to the generated config file
+        Path to the generated config file (build/{benchmark}/nodes_{N}/arts.cfg)
     """
     content = base_config.read_text()
 
     # CRITICAL: Use absolute paths - jobs run from different working directories
-    counter_dir = (output_dir / "counters").resolve()
+    # counterFolder placeholder - sbatch script sets actual path per run
+    counter_dir_placeholder = (build_node_dir / "counters").resolve()
 
-    # Update or add counterFolder
+    # Update or add counterFolder (placeholder, will be overridden per-run)
     if re.search(r'^counterFolder\s*=', content, re.MULTILINE):
         content = re.sub(
             r'^counterFolder\s*=.*$',
-            f'counterFolder={counter_dir}',
+            f'counterFolder={counter_dir_placeholder}',
             content,
             flags=re.MULTILINE
         )
     else:
-        content = content.replace('[ARTS]', f'[ARTS]\ncounterFolder={counter_dir}')
+        content = content.replace('[ARTS]', f'[ARTS]\ncounterFolder={counter_dir_placeholder}')
 
     # Update or add counterStartPoint
     if re.search(r'^counterStartPoint\s*=', content, re.MULTILINE):
@@ -290,6 +316,17 @@ def generate_arts_config_for_job(
         )
     else:
         content = content.replace('[ARTS]', '[ARTS]\ncounterStartPoint=1')
+
+    # Update nodeCount
+    if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
+        content = re.sub(
+            r'^nodeCount\s*=.*$',
+            f'nodeCount={node_count}',
+            content,
+            flags=re.MULTILINE
+        )
+    else:
+        content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
 
     # Ensure launcher is slurm
     if re.search(r'^launcher\s*=', content, re.MULTILINE):
@@ -320,9 +357,9 @@ def generate_arts_config_for_job(
             flags=re.MULTILINE
         )
 
-    # Write to job-specific config (use absolute path)
-    config_path = (output_dir / "arts.cfg").resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Write to build directory (use absolute path)
+    config_path = (build_node_dir / "arts.cfg").resolve()
+    build_node_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(content)
 
     return config_path
@@ -646,9 +683,15 @@ def collect_results(
 ) -> List[Dict[str, Any]]:
     """Collect results from completed SLURM jobs.
 
+    Directory structure (experiment-specific):
+        results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/
+        ├── result_1.json, result_2.json, ...
+        ├── counters_1/, counters_2/, ...
+        └── slurm-*.out/err
+
     Args:
         job_statuses: Final job statuses
-        experiment_dir: Experiment directory containing job outputs
+        experiment_dir: Experiment directory (results/slurm_{timestamp}/)
 
     Returns:
         List of result dictionaries (one per successful job)
@@ -661,11 +704,11 @@ def collect_results(
         if status.state == "DRY_RUN":
             continue
 
-        # Find result.json for this job
-        # Path: jobs/{benchmark}/nodes_{node_count}/run_{run_number}/result.json
+        # Find result_{run_number}.json for this job
+        # Path: jobs/{benchmark}/nodes_{node_count}/result_{run_number}.json
         safe_name = status.benchmark_name.replace("/", "_")
-        run_dir = jobs_dir / safe_name / f"nodes_{status.node_count}" / f"run_{status.run_number}"
-        result_file = run_dir / "result.json"
+        node_dir = jobs_dir / safe_name / f"nodes_{status.node_count}"
+        result_file = node_dir / f"result_{status.run_number}.json"
 
         if result_file.exists():
             try:
@@ -694,7 +737,7 @@ def collect_results(
                 "slurm_job_id": job_id,
                 "slurm_state": status.state,
                 "slurm_exit_code": status.exit_code,
-                "error": "No result.json found",
+                "error": f"No result_{status.run_number}.json found in {node_dir}",
             })
 
     return results

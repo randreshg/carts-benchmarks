@@ -5969,134 +5969,153 @@ def slurm_run(
     if multinode_disabled and max(node_counts) > 1:
         console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
 
-    # Create experiment directory
+    # Create directories:
+    # - build/: shared across experiments (reusable executables)
+    # - results/slurm_{timestamp}/: experiment-specific (jobs, counters, results)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_dir = output_dir / f"slurm_{timestamp}"
+    build_dir = output_dir / "build"  # Shared, reusable
+    experiment_dir = output_dir / f"slurm_{timestamp}"  # Experiment-specific
     experiment_dir.mkdir(parents=True, exist_ok=True)
     jobs_dir = experiment_dir / "jobs"
-    build_dir = experiment_dir / "build"
 
+    console.print(f"Build directory: {build_dir} (shared)")
     console.print(f"Experiment directory: {experiment_dir}")
 
-    # Phase 1: Build all benchmarks locally
-    # Build once per benchmark (executables work for any node count)
-    build_omp_variant = 1 in node_counts  # Only build OpenMP if testing single-node
+    # Phase 1: Build per (benchmark, node_count) into shared build/ directory
+    # CRITICAL: ARTS executable embeds nodeCount at compile time via arts.cfg
+    # So we must build separately for each node_count
+    # Executables are REUSABLE across experiments (same binary for same benchmark+node_count)
+    import shutil
 
-    if not no_build:
-        console.print("\n[bold]Phase 1: Building benchmarks...[/]")
+    console.print("\n[bold]Phase 1: Building benchmarks per node count...[/]")
 
-        build_results: Dict[str, Tuple[BuildResult, Optional[BuildResult], Path, Optional[Path]]] = {}
+    # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
+    # Note: build_arts_cfg is the compile-time config in build/ directory
+    build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
 
-        for bench in bench_list:
-            console.print(f"  Building {bench}...", end=" ")
-
-            # Build ARTS variant
-            build_arts = runner.build_benchmark(
-                bench, size, variant="arts",
-                arts_config=base_config,
-                cflags=cflags or "",
-            )
-
-            # Build OpenMP variant (only if single-node is in node_counts)
-            build_omp = None
-            if build_omp_variant:
-                build_omp = runner.build_benchmark(
-                    bench, size, variant="openmp",
-                    cflags=cflags or "",
-                )
-
-            if build_arts.status == Status.PASS:
-                console.print("[green]OK[/]")
-
-                # Find executables using correct naming from carts.mk:
-                # ARTS: {bench_dir}/{EXAMPLE_NAME}_arts
-                # OpenMP: {bench_dir}/build/{EXAMPLE_NAME}_omp
-                bench_path = runner.benchmarks_dir / bench
-                arts_exe, omp_exe = runner.get_executable_paths(bench_path)
-
-                build_results[bench] = (
-                    build_arts,
-                    build_omp,
-                    arts_exe,
-                    omp_exe if build_omp and omp_exe.exists() else None
-                )
-            else:
-                console.print(f"[red]FAILED[/]")
-                if verbose:
-                    console.print(f"    {build_arts.output[:200]}...")
-    else:
-        # Assume executables exist (or will exist on cluster)
-        console.print("\n[yellow]Skipping build phase (--no-build)[/]")
-        console.print("[dim]Note: Executables must exist on SLURM nodes for jobs to succeed[/]")
-        build_results = {}
-        for bench in bench_list:
-            bench_path = runner.benchmarks_dir / bench
-            # Get executable paths using correct naming from carts.mk
-            arts_exe, omp_exe = runner.get_executable_paths(bench_path)
-
-            # Always add to build_results (executables may exist on cluster nodes)
-            build_results[bench] = (
-                BuildResult(Status.PASS, 0, "skipped"),
-                BuildResult(Status.PASS, 0, "skipped") if build_omp_variant else None,
-                arts_exe,
-                omp_exe if build_omp_variant else None
-            )
-
-            if verbose and not arts_exe.exists():
-                console.print(f"  [yellow]Warning: {arts_exe} not found locally[/]")
-
-    # Phase 2: Generate sbatch scripts
-    console.print("\n[bold]Phase 2: Generating job scripts...[/]")
-
-    slurm_job_result_script = Path(__file__).parent / "slurm_job_result.py"
-
-    job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
-
-    for bench in build_results:
-        _, _, arts_exe, omp_exe = build_results[bench]
+    for bench in bench_list:
         safe_name = bench.replace("/", "_")
+        bench_path = runner.benchmarks_dir / bench
+        src_arts, src_omp = runner.get_executable_paths(bench_path)
 
         for node_count in node_counts:
             # Skip multinode-disabled benchmarks for node_count > 1
             if node_count > 1 and bench in multinode_disabled:
                 continue
 
-            # Only use OpenMP executable for single-node runs
-            effective_omp_exe = omp_exe if node_count == 1 else None
+            # Build directory: build/{benchmark}/nodes_{N}/ (shared, reusable)
+            build_node_dir = build_dir / safe_name / f"nodes_{node_count}"
+            build_node_dir.mkdir(parents=True, exist_ok=True)
 
-            for run_num in range(1, runs + 1):
-                # Create job directory: jobs/{benchmark}/nodes_{N}/run_{R}/
-                job_dir = jobs_dir / safe_name / f"nodes_{node_count}" / f"run_{run_num}"
-                job_dir.mkdir(parents=True, exist_ok=True)
+            # Executable paths in build directory
+            dst_arts = build_node_dir / src_arts.name
+            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
+            build_arts_cfg = build_node_dir / "arts.cfg"
 
-                # Generate job-specific arts.cfg with unique counterFolder
-                job_config_path = slurm_batch.generate_arts_config_for_job(
-                    base_config, job_dir, node_count, threads
+            # Skip if ARTS executable already exists (reuse from previous experiment)
+            if dst_arts.exists() and build_arts_cfg.exists():
+                console.print(f"  {bench} (nodes={node_count})... [cyan]SKIP (exists)[/]")
+                if node_count == 1 and dst_omp and not dst_omp.exists():
+                    # Need to build OMP only
+                    build_omp = runner.build_benchmark(
+                        bench, size, variant="openmp",
+                        cflags=cflags or "",
+                    )
+                    if build_omp.status == Status.PASS and src_omp.exists():
+                        shutil.copy2(src_omp, dst_omp)
+                build_results[(bench, node_count)] = (dst_arts, dst_omp if dst_omp and dst_omp.exists() else None, build_arts_cfg)
+                continue
+
+            if no_build:
+                console.print(f"  {bench} (nodes={node_count})... [red]MISSING (--no-build)[/]")
+                continue
+
+            console.print(f"  Building {bench} (nodes={node_count})...", end=" ")
+
+            # Generate arts.cfg for compilation (counterFolder is placeholder)
+            build_arts_cfg = slurm_batch.generate_arts_config_for_node(
+                base_config, build_node_dir, node_count, threads
+            )
+
+            # Build ARTS with this node-specific arts.cfg
+            build_arts = runner.build_benchmark(
+                bench, size, variant="arts",
+                arts_config=build_arts_cfg,
+                cflags=cflags or "",
+            )
+
+            if build_arts.status != Status.PASS:
+                console.print(f"[red]FAILED[/]")
+                if verbose:
+                    console.print(f"    {build_arts.output[:200]}...")
+                continue
+
+            # Copy ARTS executable to build directory
+            shutil.copy2(src_arts, dst_arts)
+
+            # Build and copy OMP (only for node_count=1)
+            dst_omp = None
+            if node_count == 1:
+                build_omp = runner.build_benchmark(
+                    bench, size, variant="openmp",
+                    cflags=cflags or "",
                 )
+                if build_omp.status == Status.PASS and src_omp.exists():
+                    dst_omp = build_node_dir / src_omp.name
+                    shutil.copy2(src_omp, dst_omp)
 
-                # Create job config
-                config = slurm_batch.SlurmJobConfig(
-                    benchmark_name=bench,
-                    run_number=run_num,
-                    node_count=node_count,
-                    time_limit=time_limit,
-                    partition=partition,
-                    account=account,
-                    executable_arts=arts_exe,
-                    executable_omp=effective_omp_exe,
-                    arts_config_path=job_config_path,
-                    output_dir=job_dir,
-                    size=size,
-                    threads=threads,
-                )
+            console.print("[green]OK[/]")
+            build_results[(bench, node_count)] = (dst_arts, dst_omp, build_arts_cfg)
 
-                # Generate sbatch script
-                script_path = job_dir / "job.sbatch"
-                slurm_batch.generate_sbatch_script(
-                    config, script_path, slurm_job_result_script
-                )
+    # Phase 2: Generate sbatch scripts
+    # Directory structure:
+    #   build/{benchmark}/nodes_{N}/           <- shared, reusable
+    #   ├── arts.cfg                           <- compile-time config
+    #   ├── {name}_arts, {name}_omp            <- executables
+    #
+    #   results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/  <- experiment-specific
+    #   ├── job_1.sbatch, job_2.sbatch, ...
+    #   ├── arts_1.cfg, arts_2.cfg, ...        <- runtime config (different counterFolder)
+    #   ├── counters_1/, counters_2/, ...
+    #   ├── result_1.json, result_2.json, ...
+    #   └── slurm-*.out/err
+    console.print("\n[bold]Phase 2: Generating job scripts...[/]")
 
-                job_configs.append((config, script_path))
+    slurm_job_result_script = Path(__file__).parent / "slurm_job_result.py"
+
+    job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
+
+    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
+        # Create job directory: jobs/{benchmark}/nodes_{N}/ (experiment-specific)
+        safe_name = bench.replace("/", "_")
+        job_node_dir = jobs_dir / safe_name / f"nodes_{node_count}"
+        job_node_dir.mkdir(parents=True, exist_ok=True)
+
+        for run_num in range(1, runs + 1):
+            # Create job config
+            # Executables come from build/, output goes to jobs/
+            config = slurm_batch.SlurmJobConfig(
+                benchmark_name=bench,
+                run_number=run_num,
+                node_count=node_count,
+                time_limit=time_limit,
+                partition=partition,
+                account=account,
+                executable_arts=arts_exe,           # From build/ (shared)
+                executable_omp=omp_exe,             # From build/ (shared)
+                arts_config_path=build_arts_cfg,    # From build/ (template for runtime cfg)
+                output_dir=job_node_dir,            # To jobs/ (experiment-specific)
+                size=size,
+                threads=threads,
+            )
+
+            # Generate sbatch script in job directory
+            script_path = job_node_dir / f"job_{run_num}.sbatch"
+            slurm_batch.generate_sbatch_script(
+                config, script_path, slurm_job_result_script
+            )
+
+            job_configs.append((config, script_path))
 
     console.print(f"  Generated {len(job_configs)} job scripts")
 
