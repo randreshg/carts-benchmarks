@@ -41,19 +41,19 @@
 #  endif
 
 #  ifdef LARGE_DATASET
-#   define NI 2000
-#   define NJ 2000
-#   define NK 2000
-#   define NL 2000
-#   define NM 2000
+#define NI 2048
+#define NJ 2048
+#define NK 2048
+#define NL 2048
+#define NM 2048
 #  endif
 
 #  ifdef EXTRALARGE_DATASET
-#   define NI 4000
-#   define NJ 4000
-#   define NK 4000
-#   define NL 4000
-#   define NM 4000
+#define NI 3096
+#define NJ 3096
+#define NK 3096
+#define NL 3096
+#define NM 3096
 #  endif
 # endif /* !N */
 
