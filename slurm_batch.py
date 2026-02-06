@@ -357,12 +357,12 @@ def generate_arts_config_for_node(
 
     Args:
         base_config: Base arts.cfg to use as template
-        build_node_dir: Build directory (build/{benchmark}/nodes_{N}/)
+        build_node_dir: Build directory (build/{benchmark}/nodes_{N}/{T}T/)
         node_count: Number of nodes
         threads: Thread count
 
     Returns:
-        Path to the generated config file (build/{benchmark}/nodes_{N}/arts.cfg)
+        Path to the generated config file (build/{benchmark}/nodes_{N}/{T}T/arts.cfg)
     """
     content = base_config.read_text()
 

@@ -25,7 +25,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import threading
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -6023,50 +6024,51 @@ def slurm_run(
     # Executables are REUSABLE across experiments (same binary for same benchmark+node_count)
     import shutil
 
-    console.print("\n[bold]Phase 1: Building benchmarks per node count...[/]")
+    num_workers = min(os.cpu_count() or 1, len(bench_list))
+    console.print(f"\n[bold]Phase 1: Building benchmarks per node count ({num_workers} workers)...[/]")
 
     # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
     # Note: build_arts_cfg is the compile-time config in build/ directory
     build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
+    print_lock = threading.Lock()
 
-    for bench in bench_list:
+    def _build_one_bench(bench: str) -> List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]]:
+        """Build all node_count variants for one benchmark (sequential within)."""
         safe_name = bench.replace("/", "_")
         bench_path = runner.benchmarks_dir / bench
         src_arts, src_omp = runner.get_executable_paths(bench_path)
+        results = []
 
         for node_count in node_counts:
-            # Skip multinode-disabled benchmarks for node_count > 1
             if node_count > 1 and bench in multinode_disabled:
                 continue
 
-            # Build directory: build/{benchmark}/nodes_{N}/ (shared, reusable)
-            build_node_dir = build_dir / safe_name / f"nodes_{node_count}"
+            # Build directory: build/{benchmark}/nodes_{N}/{T}T/ (shared, reusable)
+            build_node_dir = build_dir / safe_name / f"nodes_{node_count}" / f"{threads}T"
             build_node_dir.mkdir(parents=True, exist_ok=True)
 
-            # Executable paths in build directory
             dst_arts = build_node_dir / src_arts.name
             dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
             build_arts_cfg = build_node_dir / "arts.cfg"
 
             # Skip if ARTS executable already exists (reuse from previous experiment)
             if dst_arts.exists() and build_arts_cfg.exists():
-                console.print(f"  {bench} (nodes={node_count})... [cyan]SKIP (exists)[/]")
+                with print_lock:
+                    console.print(f"  {bench} (nodes={node_count}, threads={threads})... [cyan]SKIP (exists)[/]")
                 if node_count == 1 and dst_omp and not dst_omp.exists():
-                    # Need to build OMP only
                     build_omp = runner.build_benchmark(
                         bench, size, variant="openmp",
                         cflags=cflags or "",
                     )
                     if build_omp.status == Status.PASS and src_omp.exists():
                         shutil.copy2(src_omp, dst_omp)
-                build_results[(bench, node_count)] = (dst_arts, dst_omp if dst_omp and dst_omp.exists() else None, build_arts_cfg)
+                results.append(((bench, node_count), (dst_arts, dst_omp if dst_omp and dst_omp.exists() else None, build_arts_cfg)))
                 continue
 
             if no_build:
-                console.print(f"  {bench} (nodes={node_count})... [red]MISSING (--no-build)[/]")
+                with print_lock:
+                    console.print(f"  {bench} (nodes={node_count}, threads={threads})... [red]MISSING (--no-build)[/]")
                 continue
-
-            console.print(f"  Building {bench} (nodes={node_count})...", end=" ")
 
             # Generate arts.cfg for compilation (counterFolder is placeholder)
             build_arts_cfg = slurm_batch.generate_arts_config_for_node(
@@ -6081,13 +6083,16 @@ def slurm_run(
             )
 
             if build_arts.status != Status.PASS:
-                console.print(f"[red]FAILED[/]")
-                if verbose:
-                    console.print(f"    {build_arts.output[:200]}...")
+                with print_lock:
+                    console.print(f"  {bench} (nodes={node_count}, threads={threads})... [red]FAILED[/]")
+                    if verbose:
+                        console.print(f"    {build_arts.output[:200]}...")
                 continue
 
-            # Copy ARTS executable to build directory
+            # Copy ARTS executable and LLVM IR to build directory
             shutil.copy2(src_arts, dst_arts)
+            for ll_file in bench_path.glob("*-arts.ll"):
+                shutil.copy2(ll_file, build_node_dir / ll_file.name)
 
             # Build and copy OMP (only for node_count=1)
             dst_omp = None
@@ -6100,14 +6105,24 @@ def slurm_run(
                     dst_omp = build_node_dir / src_omp.name
                     shutil.copy2(src_omp, dst_omp)
 
-            console.print("[green]OK[/]")
-            build_results[(bench, node_count)] = (dst_arts, dst_omp, build_arts_cfg)
+            with print_lock:
+                console.print(f"  {bench} (nodes={node_count}, threads={threads})... [green]OK[/]")
+            results.append(((bench, node_count), (dst_arts, dst_omp, build_arts_cfg)))
+
+        return results
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(_build_one_bench, bench): bench for bench in bench_list}
+        for future in as_completed(futures):
+            for key, value in future.result():
+                build_results[key] = value
 
     # Phase 2: Generate sbatch scripts
     # Directory structure:
-    #   build/{benchmark}/nodes_{N}/           <- shared, reusable
+    #   build/{benchmark}/nodes_{N}/{T}T/       <- shared, reusable
     #   ├── arts.cfg                           <- compile-time config
     #   ├── {name}_arts, {name}_omp            <- executables
+    #   ├── {name}-arts.ll                     <- LLVM IR (for debugging)
     #
     #   results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/  <- experiment-specific
     #   ├── job_1.sbatch, job_2.sbatch, ...
