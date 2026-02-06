@@ -1,5 +1,6 @@
 EXAMPLE_NAME := layernorm
 SRC := layernorm.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # Total elements = BATCH * HIDDEN

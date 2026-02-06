@@ -1,7 +1,7 @@
 EXAMPLE_NAME := poisson-for
 SRC := poisson-for.c
 CFLAGS += -I../include
-LDFLAGS := -lm
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 256x256, MEDIUM: 1024x1024, LARGE: 2048x2048, EXTRALARGE: 4096x4096

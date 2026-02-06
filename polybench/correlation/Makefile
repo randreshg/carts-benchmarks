@@ -1,5 +1,6 @@
 EXAMPLE_NAME := correlation
 SRC := correlation.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 128x128, MEDIUM: 1024x1024, LARGE: 2000x2000, EXTRALARGE: 4000x4000

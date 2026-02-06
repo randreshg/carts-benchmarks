@@ -1,6 +1,6 @@
 EXAMPLE_NAME := monte_carlo_ensemble
 SRC := monte_carlo_ensemble.c
-LDFLAGS := -lm
+LDFLAGS := -lm -ldl
 
 # Size configurations for Monte Carlo Ensemble
 # Memory = NUM_SAMPLES * STATE_DIM^2 * 8 bytes
@@ -12,8 +12,5 @@ SMALL_CFLAGS ?= -DNUM_SAMPLES=1000 -DSTATE_DIM=1024
 MEDIUM_CFLAGS ?= -DNUM_SAMPLES=5000 -DSTATE_DIM=1024
 LARGE_CFLAGS ?= -DNUM_SAMPLES=10000 -DSTATE_DIM=1024
 EXTRALARGE_CFLAGS ?= -DNUM_SAMPLES=25000 -DSTATE_DIM=1024
-
-# Link math library for sin/cos/exp functions
-LDFLAGS := -lm
 
 include ../carts.mk

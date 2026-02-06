@@ -1,5 +1,6 @@
 EXAMPLE_NAME := jacobi2d
 SRC := jacobi2d.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: N=256, MEDIUM: N=1024, LARGE: N=2048, EXTRALARGE: N=4096

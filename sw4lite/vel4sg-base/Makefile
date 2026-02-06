@@ -1,5 +1,6 @@
 EXAMPLE_NAME := vel4sg_base
 SRC := vel4sg_base.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 20x20x20 (~8K), MEDIUM: 40x40x40 (~64K), LARGE: 60x60x60 (~216K), EXTRALARGE: 100x100x100 (~1M)

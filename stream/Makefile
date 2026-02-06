@@ -1,5 +1,6 @@
 EXAMPLE_NAME := stream
 SRC := stream.c
+LDFLAGS := -lm -ldl
 
 # Size configurations (array elements)
 # Memory per array = elements * 8 bytes (double)

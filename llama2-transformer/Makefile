@@ -4,7 +4,7 @@
 
 EXAMPLE_NAME := transformer
 SRC := transformer.c
-LDFLAGS := -lm
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # small: dim=64, hidden=256, medium: dim=128, hidden=512

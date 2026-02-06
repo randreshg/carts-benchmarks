@@ -1,6 +1,7 @@
 EXAMPLE_NAME := bicg
 SRC := bicg.c
 EXTRA_CFLAGS := -DM_PI=3.14159265358979323846
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 128x128, MEDIUM: 1024x1024, LARGE: 2000x2000, EXTRALARGE: 4000x4000

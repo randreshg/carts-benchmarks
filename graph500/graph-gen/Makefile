@@ -1,5 +1,6 @@
 EXAMPLE_NAME := graph_gen
 SRC := graph_gen.c
+LDFLAGS := -lm -ldl
 
 # Size configurations for Graph500-inspired generation
 # SMALL: 2^20 vertices (~17M edges, ~130 MB)

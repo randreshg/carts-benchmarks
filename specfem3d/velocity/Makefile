@@ -1,5 +1,6 @@
 EXAMPLE_NAME := velocity_update
 SRC := velocity_update.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 20x20x20 (~8K), MEDIUM: 64x64x64 (~262K), LARGE: 128x128x128 (~2M), EXTRALARGE: 256x256x256 (~16M)

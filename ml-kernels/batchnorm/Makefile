@@ -1,5 +1,6 @@
 EXAMPLE_NAME := batchnorm
 SRC := batchnorm.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # Total elements = BATCH_SIZE * CHANNELS * HEIGHT * WIDTH

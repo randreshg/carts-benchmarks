@@ -1,6 +1,6 @@
 EXAMPLE_NAME := activations
 SRC := activations.c
-LDFLAGS := -lm
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 256K elements, MEDIUM: 1M elements, LARGE: 4M elements, EXTRALARGE: 16M elements

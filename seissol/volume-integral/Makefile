@@ -1,5 +1,6 @@
 EXAMPLE_NAME := volume_integral
 SRC := volume_integral.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 10000 elements, MEDIUM: 100000, LARGE: 500000, EXTRALARGE: 2000000

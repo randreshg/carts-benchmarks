@@ -1,5 +1,6 @@
 EXAMPLE_NAME := convolution-3d
 SRC := convolution-3d.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # SMALL: 128x128x128, MEDIUM: 192x192x192, LARGE: 256x256x256, EXTRALARGE: 384x384x384

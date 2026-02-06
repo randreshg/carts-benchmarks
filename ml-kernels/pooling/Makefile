@@ -1,5 +1,6 @@
 EXAMPLE_NAME := pooling
 SRC := pooling.c
+LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # Input elements = BATCH_SIZE * CHANNELS * HEIGHT * WIDTH
