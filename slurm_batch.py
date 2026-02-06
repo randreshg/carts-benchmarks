@@ -32,6 +32,26 @@ from rich.text import Text
 
 
 # ============================================================================
+# Constants
+# ============================================================================
+
+# Perf cache events for hardware counter profiling
+# (duplicated from benchmark_runner.py to avoid circular import)
+PERF_CACHE_EVENTS = [
+    "cache-references",
+    "cache-misses",
+    "L1-dcache-loads",
+    "L1-dcache-load-misses",
+    "L1-icache-loads",
+    "L1-icache-load-misses",
+    "dTLB-loads",
+    "dTLB-load-misses",
+    "iTLB-loads",
+    "iTLB-load-misses",
+]
+
+
+# ============================================================================
 # Data Classes
 # ============================================================================
 
@@ -53,6 +73,8 @@ class SlurmJobConfig:
     threads: int  # For OpenMP comparison (single-node only)
     port: Optional[str] = None  # Per-job port override (e.g., "10001" or "[10001-10002]")
     gdb: bool = False  # Wrap executable with gdb for backtrace on crash
+    perf: bool = False  # Enable perf stat profiling for cache metrics
+    perf_interval: float = 0.1  # Perf sampling interval in seconds
 
 
 @dataclass
@@ -110,6 +132,8 @@ set -e
 # Create per-run counter directory
 COUNTER_DIR="{counter_dir}"
 mkdir -p "$COUNTER_DIR"
+
+{perf_dir_section}
 
 # Generate per-run arts.cfg with correct counterFolder
 # (base arts.cfg has placeholder, we override counterFolder for this run)
@@ -172,7 +196,7 @@ if [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
     export OMP_NUM_THREADS={threads}
     export OMP_WAIT_POLICY=ACTIVE
     OMP_START=$(date +%s.%N)
-    {executable_omp}
+    {omp_run_command}
     OMP_EXIT=$?
     OMP_END=$(date +%s.%N)
     OMP_DURATION=$(echo "$OMP_END - $OMP_START" | bc)
@@ -219,18 +243,41 @@ def generate_sbatch_script(
     counter_dir = output_dir_abs / f"counters_{config.run_number}"
     result_json = output_dir_abs / f"result_{config.run_number}.json"
     runtime_arts_cfg = output_dir_abs / f"arts_{config.run_number}.cfg"
+    perf_dir = output_dir_abs / f"perf_{config.run_number}" if config.perf else None
 
     arts_config_abs = config.arts_config_path.resolve() if config.arts_config_path else None
     executable_arts_abs = config.executable_arts.resolve() if config.executable_arts else None
     executable_omp_abs = config.executable_omp.resolve() if config.executable_omp else None
     slurm_job_result_abs = slurm_job_result_script.resolve()
 
+    # Perf directory section for sbatch template
+    if config.perf and perf_dir:
+        perf_dir_section = (
+            f'# Create per-run perf directory\n'
+            f'PERF_DIR="{perf_dir}"\n'
+            f'mkdir -p "$PERF_DIR"'
+        )
+    else:
+        perf_dir_section = '# Perf profiling disabled'
+
     # Build OpenMP section (only for single-node)
     if config.node_count == 1 and executable_omp_abs:
+        if config.perf and perf_dir:
+            events = ",".join(PERF_CACHE_EVENTS)
+            interval_ms = int(config.perf_interval * 1000)
+            omp_run_command = (
+                f"perf stat -e {events} -I {interval_ms} -x , "
+                f"-o {perf_dir}/omp.csv "
+                f"-- {executable_omp_abs}"
+            )
+        else:
+            omp_run_command = str(executable_omp_abs)
+
         omp_section = OMP_SECTION_TEMPLATE.format(
             node_count=config.node_count,
             executable_omp=executable_omp_abs,
             threads=config.threads,
+            omp_run_command=omp_run_command,
         )
     elif config.node_count > 1:
         omp_section = '# OpenMP skipped (multi-node run - not a fair comparison)'
@@ -244,11 +291,22 @@ def generate_sbatch_script(
     # Per-job port override (for environments where jobs share the same host)
     port_sed = f'-e "s|^port=.*|port={config.port}|"' if config.port else ''
 
-    # GDB wrapper: attach gdb for backtrace on crash
+    # Build srun command: gdb, perf, or plain (mutually exclusive)
     if config.gdb:
         srun_command = (
             f'srun --exclusive bash -c '
             f"'gdb --batch -ex run -ex \"thread apply all bt\" -ex quit --args {executable_arts_abs}'"
+        )
+    elif config.perf and perf_dir:
+        events = ",".join(PERF_CACHE_EVENTS)
+        interval_ms = int(config.perf_interval * 1000)
+        # Single quotes: perf_dir is baked as absolute path at generation time,
+        # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
+        srun_command = (
+            f"srun --exclusive bash -c "
+            f"'perf stat -e {events} -I {interval_ms} -x , "
+            f"-o {perf_dir}/arts_node_${{SLURM_PROCID}}.csv "
+            f"-- {executable_arts_abs}'"
         )
     else:
         srun_command = f'srun --exclusive {executable_arts_abs}'
@@ -266,6 +324,7 @@ def generate_sbatch_script(
         arts_config_path=arts_config_abs,
         runtime_arts_cfg=runtime_arts_cfg,
         counter_dir=counter_dir,
+        perf_dir_section=perf_dir_section,
         result_json=result_json,
         executable_arts=executable_arts_abs,
         srun_command=srun_command,

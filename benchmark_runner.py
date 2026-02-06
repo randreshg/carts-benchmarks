@@ -5885,6 +5885,15 @@ def slurm_run(
     gdb: bool = typer.Option(
         False, "--gdb",
         help="Wrap executable with gdb for backtrace on crash"),
+    counter_config: Optional[Path] = typer.Option(
+        None, "--counter-config",
+        help="Custom counter.cfg file. Triggers ARTS rebuild with this configuration."),
+    perf: bool = typer.Option(
+        False, "--perf",
+        help="Enable perf stat profiling for cache metrics"),
+    perf_interval: float = typer.Option(
+        0.1, "--perft",
+        help="Perf stat sampling interval in seconds"),
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -5935,14 +5944,18 @@ def slurm_run(
     else:
         nodes_display = f"{node_counts[0]}-{node_counts[-1]} ({len(node_counts)} values)"
 
-    console.print(Panel.fit(
-        f"[bold]SLURM Batch Submission[/]\n"
-        f"Config: {base_config}\n"
-        f"Nodes: {nodes_display}, Threads: {threads}\n"
-        f"Runs per benchmark: {runs}\n"
+    panel_lines = [
+        f"[bold]SLURM Batch Submission[/]",
+        f"Config: {base_config}",
+        f"Nodes: {nodes_display}, Threads: {threads}",
+        f"Runs per benchmark: {runs}",
         f"Size: {size}",
-        title="CARTS Benchmarks"
-    ))
+    ]
+    if counter_config:
+        panel_lines.append(f"Counter Config: {counter_config}")
+    if perf:
+        panel_lines.append(f"Perf: enabled (interval={perf_interval}s)")
+    console.print(Panel.fit("\n".join(panel_lines), title="CARTS Benchmarks"))
 
     # Discover benchmarks
     if benchmarks:
@@ -5986,6 +5999,23 @@ def slurm_run(
 
     console.print(f"Build directory: {build_dir} (shared)")
     console.print(f"Experiment directory: {experiment_dir}")
+
+    # Handle custom counter configuration (triggers ARTS rebuild)
+    if counter_config:
+        if not counter_config.exists():
+            console.print(f"[red]Error: Counter config not found: {counter_config}[/]")
+            raise typer.Exit(1)
+
+        console.print(f"[yellow]Rebuilding ARTS with counter config: {counter_config}[/]")
+        result = subprocess.run(
+            ["carts", "build", "--arts", f"--counter-config={counter_config}"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[red]ARTS rebuild failed:[/]\n{result.stderr}")
+            raise typer.Exit(1)
+        console.print("[green]ARTS rebuild complete[/]")
 
     # Phase 1: Build per (benchmark, node_count) into shared build/ directory
     # CRITICAL: ARTS executable embeds nodeCount at compile time via arts.cfg
@@ -6124,6 +6154,8 @@ def slurm_run(
                 threads=threads,
                 port=port,
                 gdb=gdb,
+                perf=perf,
+                perf_interval=perf_interval,
             )
 
             # Generate sbatch script in job directory
@@ -6153,6 +6185,9 @@ def slurm_run(
         "time_limit": time_limit,
         "arts_config": str(base_config),
         "dry_run": dry_run,
+        "counter_config": str(counter_config) if counter_config else None,
+        "perf": perf,
+        "perf_interval": perf_interval if perf else None,
     }
 
     manifest_path = slurm_batch.write_job_manifest(
