@@ -62,7 +62,7 @@ static void kernel_correlation(int m, int n, DATA_TYPE **data, DATA_TYPE **corr,
   }
 
   /* Step 4: compute the correlation matrix. */
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(static)
   for (int i = 0; i < m; i++) {
     corr[i][i] = 1.0;
     for (int j = i + 1; j < m; j++) {
