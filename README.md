@@ -59,7 +59,7 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--runs` | `-r` | Number of runs per configuration (default: 1) |
 | `--omp-threads` | | OpenMP thread count (default: same as ARTS threads) |
 | `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
-| `--node-count` | `-n` | Override ARTS `nodeCount` (default: from benchmark `arts.cfg`) |
+| `--nodes` | `-n` | Override ARTS `nodeCount` (default: from benchmark `arts.cfg`) |
 | `--output` | `-o` | Write results JSON to a custom path |
 | `--trace` | | Show benchmark output (kernel timing and checksum) |
 | `--verbose` | `-v` | Verbose output |
@@ -67,7 +67,8 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--no-verify` | | Disable correctness verification |
 | `--no-clean` | | Skip cleaning before build (faster, may use stale artifacts) |
 | `--debug` | `-d` | Debug level: `0`=off, `1`=commands, `2`=full output to logs |
-| `--counters` | | Counter level: `0`=off, `1`=artsid metrics, `2`=deep captures |
+| `--arts-exec-args` | | Extra `carts execute` args (use this to forward `--run-args`) |
+| `--counter-config` | | Custom `counter.cfg` path (triggers ARTS rebuild with this config) |
 | `--counter-dir` | | Directory for ARTS counter output |
 | `--cflags` | | Additional CFLAGS: `-DNI=500 -DNJ=500` |
 | `--weak-scaling` | | Enable weak scaling (auto-scale problem size) |
@@ -140,10 +141,26 @@ carts benchmarks run polybench/gemm --size small --threads 2 --debug=1
 carts benchmarks run polybench/gemm --size small --threads 2 --debug=2
 # Check logs at: polybench/gemm/logs/arts.log and polybench/gemm/logs/omp.log
 
-# Enable ARTS counters (requires ARTS built with --counters=1)
+# Enable ARTS counters with a custom counter config
 carts benchmarks run polybench/gemm --size medium --threads 4 \
-    --counters=1 --counter-dir results/counters/gemm_4t \
+    --counter-config /opt/carts/docker/counter.cfg \
+    --counter-dir results/counters/gemm_4t \
     -o results/gemm_4t.json
+```
+
+### Forwarding `carts run` Flags Through Benchmarks
+
+Use `--arts-exec-args` to pass flags into `carts execute`. If the target flag is
+owned by `carts run`, wrap it in `--run-args=...`.
+
+```bash
+# Forward partition fallback to carts run
+carts benchmarks run polybench/gemm --size medium --threads 4 \
+    --arts-exec-args "--run-args=--partition-fallback=fine"
+
+# Forward loop-opt iteration count to carts run
+carts benchmarks run polybench/gemm --size medium --threads 4 \
+    --arts-exec-args "--run-args=--loop-opt-iterations=3"
 ```
 
 ### Custom Problem Sizes
@@ -279,10 +296,10 @@ The runner displays the effective ARTS configuration before execution:
 
 ```bash
 # Override launcher and node count
-carts benchmarks run polybench/gemm --launcher slurm --node-count 4
+carts benchmarks run polybench/gemm --launcher slurm --nodes 4
 
 # Override thread count and launcher
-carts benchmarks run polybench/gemm --threads 32 --launcher ssh --node-count 2
+carts benchmarks run polybench/gemm --threads 32 --launcher ssh --nodes 2
 
 # Override OpenMP thread count separately
 carts benchmarks run polybench/gemm --threads 16 --omp-threads 8
@@ -304,7 +321,7 @@ carts benchmarks run polybench/gemm --arts-config multi.cfg
 | Parameter | CLI Option | Description |
 |-----------|------------|-------------|
 | `launcher` | `--launcher` | Job launcher (ssh, slurm, lsf) |
-| `nodeCount` | `--node-count`, `-n` | Number of compute nodes |
+| `nodeCount` | `--nodes`, `-n` | Number of compute nodes |
 | `threads` | `--threads` | ARTS worker threads per node |
 | `omp-threads` | `--omp-threads` | OpenMP threads (separate from ARTS threads) |
 
@@ -434,7 +451,8 @@ Results JSON:      results/gemm_scaling_20251214_182205/gemm_scaling.json
 
 ## Counter Files
 
-When using `--counters=1` with ARTS built with counter support, additional JSON files are generated:
+When using `--counter-config <path>` (and ARTS built with counter support),
+additional JSON files are generated:
 
 ```
 results/counters/gemm_4t/

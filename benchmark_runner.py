@@ -1911,13 +1911,42 @@ class BenchmarkRunner:
         tolerance: float = DEFAULT_TOLERANCE,
     ) -> VerificationResult:
         """Compare ARTS output against OpenMP reference."""
-        if arts_result.status != Status.PASS or omp_result.status != Status.PASS:
+        if arts_result.status != Status.PASS:
             return VerificationResult(
                 correct=False,
                 arts_checksum=arts_result.checksum,
                 omp_checksum=omp_result.checksum,
                 tolerance_used=tolerance,
-                note="Cannot verify: one or both runs failed",
+                note="Cannot verify: ARTS run failed",
+            )
+
+        # OpenMP is intentionally skipped for multi-node runs. In that case,
+        # accept ARTS-only completion as a valid pass and record the reason.
+        if omp_result.status == Status.SKIP:
+            skip_text = f"{omp_result.stderr}\n{omp_result.stdout}".lower()
+            if "multi-node" in skip_text:
+                return VerificationResult(
+                    correct=True,
+                    arts_checksum=arts_result.checksum,
+                    omp_checksum=omp_result.checksum,
+                    tolerance_used=tolerance,
+                    note="OpenMP skipped for multi-node run; ARTS-only validation",
+                )
+            return VerificationResult(
+                correct=False,
+                arts_checksum=arts_result.checksum,
+                omp_checksum=omp_result.checksum,
+                tolerance_used=tolerance,
+                note="Cannot verify: OpenMP run skipped",
+            )
+
+        if omp_result.status != Status.PASS:
+            return VerificationResult(
+                correct=False,
+                arts_checksum=arts_result.checksum,
+                omp_checksum=omp_result.checksum,
+                tolerance_used=tolerance,
+                note="Cannot verify: OpenMP run failed",
             )
 
         if arts_result.checksum is None or omp_result.checksum is None:
