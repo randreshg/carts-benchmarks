@@ -33,12 +33,12 @@
 
 #  ifdef LARGE_DATASET
 #   define TSTEPS 20
-#   define N 2000
+#   define N 2050
 #  endif
 
 #  ifdef EXTRALARGE_DATASET
 #   define TSTEPS 500
-#define N 10000
+#   define N 3842
 #  endif
 # endif /* !N */
 

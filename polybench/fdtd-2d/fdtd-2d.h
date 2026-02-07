@@ -36,14 +36,14 @@
 
 #  ifdef LARGE_DATASET
 #   define TMAX 50
-#   define NX 2000
-#   define NY 2000
+#   define NX 2048
+#   define NY 2048
 #  endif
 
 #  ifdef EXTRALARGE_DATASET
 #   define TMAX 100
-#   define NX 4000
-#   define NY 4000
+#   define NX 3840
+#   define NY 3840
 #  endif
 # endif /* !N */
 

@@ -40,8 +40,8 @@
 #endif
 
 #ifdef EXTRALARGE_DATASET
-#define M 3096
-#define N 3096
+#define M 3840
+#define N 3840
 #endif
 
 #endif /* !M && !N */

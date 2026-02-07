@@ -49,11 +49,11 @@
 #  endif
 
 #  ifdef EXTRALARGE_DATASET
-#define NI 3096
-#define NJ 3096
-#define NK 3096
-#define NL 3096
-#define NM 3096
+#define NI 3840
+#define NJ 3840
+#define NK 3840
+#define NL 3840
+#define NM 3840
 #  endif
 # endif /* !N */
 

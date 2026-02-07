@@ -37,8 +37,8 @@
 #  endif
 
 #  ifdef EXTRALARGE_DATASET
-#   define NI 65536
-#   define NJ 65536
+#   define NI 7680
+#   define NJ 7680
 #  endif
 # endif /* !N */
 
