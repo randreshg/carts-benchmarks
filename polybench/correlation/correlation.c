@@ -30,6 +30,7 @@ static void init_array(int m, int n, DATA_TYPE **data) {
 static void kernel_correlation(int m, int n, DATA_TYPE **data, DATA_TYPE **corr,
                                DATA_TYPE *mean, DATA_TYPE *stddev) {
   /* Step 1: compute mean of each row. */
+#pragma omp parallel for schedule(static)
   for (int i = 0; i < m; i++) {
     mean[i] = 0.0;
     for (int j = 0; j < n; j++) {
@@ -39,6 +40,7 @@ static void kernel_correlation(int m, int n, DATA_TYPE **data, DATA_TYPE **corr,
   }
 
   /* Step 2: compute std deviation of each row. */
+#pragma omp parallel for schedule(static)
   for (int i = 0; i < m; i++) {
     stddev[i] = 0.0;
     for (int j = 0; j < n; j++) {
@@ -52,6 +54,7 @@ static void kernel_correlation(int m, int n, DATA_TYPE **data, DATA_TYPE **corr,
   }
 
   /* Step 3: center and scale the data. */
+#pragma omp parallel for schedule(static)
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < n; j++) {
       data[i][j] = (data[i][j] - mean[i]) / (sqrt(FLOAT_N) * stddev[i]);
@@ -59,6 +62,7 @@ static void kernel_correlation(int m, int n, DATA_TYPE **data, DATA_TYPE **corr,
   }
 
   /* Step 4: compute the correlation matrix. */
+#pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < m; i++) {
     corr[i][i] = 1.0;
     for (int j = i + 1; j < m; j++) {

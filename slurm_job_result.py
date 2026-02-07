@@ -44,9 +44,9 @@ CHECKSUM_PATTERNS = [
     r"^([0-9.eE+-]+)\s*$",
 ]
 
-KERNEL_TIME_PATTERN = r"kernel\.(\w+)[:\s]*=?\s*([0-9.eE+-]+)"
-E2E_TIME_PATTERN = r"e2e\.(\w+)[:\s]*=?\s*([0-9.eE+-]+)"
-INIT_TIME_PATTERN = r"init\.(\w+)[:\s]*=?\s*([0-9.eE+-]+)"
+KERNEL_TIME_PATTERN = r"^\s*kernel\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
+E2E_TIME_PATTERN = r"^\s*e2e\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
+INIT_TIME_PATTERN = r"^\s*init\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
 
 
 # ============================================================================
@@ -80,7 +80,7 @@ def parse_kernel_timings(output: str) -> Dict[str, float]:
         Dict mapping kernel name -> time in seconds
     """
     timings = {}
-    for match in re.finditer(KERNEL_TIME_PATTERN, output):
+    for match in re.finditer(KERNEL_TIME_PATTERN, output, re.MULTILINE):
         name, value = match.groups()
         try:
             timings[name] = float(value)
@@ -99,7 +99,7 @@ def parse_e2e_timings(output: str) -> Dict[str, float]:
         Dict mapping name -> time in seconds
     """
     timings = {}
-    for match in re.finditer(E2E_TIME_PATTERN, output):
+    for match in re.finditer(E2E_TIME_PATTERN, output, re.MULTILINE):
         name, value = match.groups()
         try:
             timings[name] = float(value)
@@ -118,7 +118,7 @@ def parse_init_timings(output: str) -> Dict[str, float]:
         Dict mapping name -> time in seconds
     """
     timings = {}
-    for match in re.finditer(INIT_TIME_PATTERN, output):
+    for match in re.finditer(INIT_TIME_PATTERN, output, re.MULTILINE):
         name, value = match.groups()
         try:
             timings[name] = float(value)

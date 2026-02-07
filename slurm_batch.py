@@ -131,7 +131,7 @@ mkdir -p "$COUNTER_DIR"
 
 # Generate per-run arts.cfg with correct counterFolder
 # (base arts.cfg has placeholder, we override counterFolder for this run)
-sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" {port_sed} "{arts_config_path}" > "{runtime_arts_cfg}"
+sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
 export artsConfig="{runtime_arts_cfg}"
 export CARTS_BENCHMARKS_REPORT_INIT=1
 
@@ -282,9 +282,6 @@ def generate_sbatch_script(
     safe_name = config.benchmark_name.replace("/", "_").replace(" ", "_")
     job_name = f"{safe_name}_n{config.node_count}_r{config.run_number}"[:64]
 
-    # Per-job port override (for environments where jobs share the same host)
-    port_sed = f'-e "s|^port=.*|port={config.port}|"' if config.port else ''
-
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     if config.gdb:
         srun_command = (
@@ -326,7 +323,6 @@ def generate_sbatch_script(
         slurm_job_result_script=slurm_job_result_abs,
         size=config.size,
         threads=config.threads,
-        port_sed=port_sed,
     )
 
     # Create output directory
