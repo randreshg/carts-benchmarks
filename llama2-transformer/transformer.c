@@ -184,9 +184,9 @@ static void initialize_test_data(float **token_embedding_table,
       }
     }
 
-    // wk, wv [N_LAYERS][DIM][KV_DIM]
-    for (int i = 0; i < DIM; i++) {
-      for (int j = 0; j < KV_DIM; j++) {
+    // wk, wv [N_LAYERS][KV_DIM][DIM]
+    for (int i = 0; i < KV_DIM; i++) {
+      for (int j = 0; j < DIM; j++) {
         wk[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
         wv[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
       }
@@ -377,8 +377,8 @@ int main(void) {
   float **rms_att_weight = alloc_2d(N_LAYERS, DIM);
   float **rms_ffn_weight = alloc_2d(N_LAYERS, DIM);
   float ***wq = alloc_3d(N_LAYERS, DIM, DIM);
-  float ***wk = alloc_3d(N_LAYERS, DIM, KV_DIM);
-  float ***wv = alloc_3d(N_LAYERS, DIM, KV_DIM);
+  float ***wk = alloc_3d(N_LAYERS, KV_DIM, DIM);
+  float ***wv = alloc_3d(N_LAYERS, KV_DIM, DIM);
   float ***wo = alloc_3d(N_LAYERS, DIM, DIM);
   // FFN weights: w1, w3 are [HIDDEN_DIM x DIM], w2 is [DIM x HIDDEN_DIM]
   // matmul(out, in, W, n, d) computes out[d] = W[d][n] @ in[n]
@@ -467,8 +467,8 @@ int main(void) {
   free_2d(rms_att_weight, N_LAYERS);
   free_2d(rms_ffn_weight, N_LAYERS);
   free_3d(wq, N_LAYERS, DIM);
-  free_3d(wk, N_LAYERS, DIM);
-  free_3d(wv, N_LAYERS, DIM);
+  free_3d(wk, N_LAYERS, KV_DIM);
+  free_3d(wv, N_LAYERS, KV_DIM);
   free_3d(wo, N_LAYERS, DIM);
   free_3d(w1, N_LAYERS, HIDDEN_DIM);
   free_3d(w2, N_LAYERS, DIM);
