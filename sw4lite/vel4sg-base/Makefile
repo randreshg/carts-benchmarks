@@ -3,11 +3,11 @@ SRC := vel4sg_base.c
 LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
-# SMALL: 20x20x20 (~8K), MEDIUM: 40x40x40 (~64K), LARGE: 60x60x60 (~216K), EXTRALARGE: 100x100x100 (~1M)
-# Note: Larger sizes cause FP precision differences between ARTS/OMP compilers
+# Parallel for: k from 2 to NZ-2, so NZ-4 iterations
+# LARGE (64-core): NZ=516 -> 512 k-iter (8x64). EXTRALARGE (1920-worker): NZ=1924 -> 1920 k-iter. 5.01x LARGE
 SMALL_CFLAGS ?= -DNX=20 -DNY=20 -DNZ=20
 MEDIUM_CFLAGS ?= -DNX=40 -DNY=40 -DNZ=40
-LARGE_CFLAGS ?= -DNX=60 -DNY=60 -DNZ=60
-EXTRALARGE_CFLAGS ?= -DNX=512 -DNY=512 -DNZ=512
+LARGE_CFLAGS ?= -DNX=516 -DNY=516 -DNZ=516
+EXTRALARGE_CFLAGS ?= -DNX=596 -DNY=596 -DNZ=1924
 
 include ../carts.mk
