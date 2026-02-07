@@ -79,12 +79,6 @@ PERF_CACHE_EVENTS = [
     "cache-misses",
     "L1-dcache-loads",
     "L1-dcache-load-misses",
-    "L1-icache-loads",
-    "L1-icache-load-misses",
-    "dTLB-loads",
-    "dTLB-load-misses",
-    "iTLB-loads",
-    "iTLB-load-misses",
 ]
 
 
@@ -241,24 +235,12 @@ class ParallelTaskTiming:
 @dataclass
 class PerfCacheMetrics:
     """Cache metrics from perf stat profiling."""
-    # Raw counts
     cache_references: int = 0
     cache_misses: int = 0
     l1d_loads: int = 0
     l1d_load_misses: int = 0
-    l1d_stores: int = 0
-    l1d_store_misses: int = 0
-    l1i_load_misses: int = 0
-    llc_loads: int = 0
-    llc_load_misses: int = 0
-    llc_stores: int = 0
-    llc_store_misses: int = 0
-    # Computed rates
     cache_miss_rate: float = 0.0
     l1d_load_miss_rate: float = 0.0
-    l1d_store_miss_rate: float = 0.0
-    llc_load_miss_rate: float = 0.0
-    llc_store_miss_rate: float = 0.0
 
 
 @dataclass
@@ -1911,25 +1893,11 @@ class BenchmarkRunner:
             metrics.cache_misses = event_totals.get("cache-misses", 0)
             metrics.l1d_loads = event_totals.get("L1-dcache-loads", 0)
             metrics.l1d_load_misses = event_totals.get("L1-dcache-load-misses", 0)
-            metrics.l1d_stores = event_totals.get("L1-dcache-stores", 0)
-            metrics.l1d_store_misses = event_totals.get("L1-dcache-store-misses", 0)
-            metrics.l1i_load_misses = event_totals.get("L1-icache-load-misses", 0)
-            metrics.llc_loads = event_totals.get("LLC-loads", 0)
-            metrics.llc_load_misses = event_totals.get("LLC-load-misses", 0)
-            metrics.llc_stores = event_totals.get("LLC-stores", 0)
-            metrics.llc_store_misses = event_totals.get("LLC-store-misses", 0)
 
-            # Compute miss rates
             if metrics.cache_references > 0:
                 metrics.cache_miss_rate = metrics.cache_misses / metrics.cache_references
             if metrics.l1d_loads > 0:
                 metrics.l1d_load_miss_rate = metrics.l1d_load_misses / metrics.l1d_loads
-            if metrics.l1d_stores > 0:
-                metrics.l1d_store_miss_rate = metrics.l1d_store_misses / metrics.l1d_stores
-            if metrics.llc_loads > 0:
-                metrics.llc_load_miss_rate = metrics.llc_load_misses / metrics.llc_loads
-            if metrics.llc_stores > 0:
-                metrics.llc_store_miss_rate = metrics.llc_store_misses / metrics.llc_stores
 
             return metrics
 

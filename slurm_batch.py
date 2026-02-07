@@ -42,12 +42,6 @@ PERF_CACHE_EVENTS = [
     "cache-misses",
     "L1-dcache-loads",
     "L1-dcache-load-misses",
-    "L1-icache-loads",
-    "L1-icache-load-misses",
-    "dTLB-loads",
-    "dTLB-load-misses",
-    "iTLB-loads",
-    "iTLB-load-misses",
 ]
 
 
