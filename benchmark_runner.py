@@ -5006,6 +5006,9 @@ def run(
         "./perfs", "--perf-dir", help="Directory for perf stat CSV output"),
     results_dir: Path = typer.Option(
         "./results", "--results-dir", help="Directory for results JSON output"),
+    exclude: Optional[List[str]] = typer.Option(
+        None, "--exclude", "-e",
+        help="Benchmarks to exclude (substring match, repeatable)"),
 ):
     """Run benchmarks with verification and timing."""
     verify = not no_verify
@@ -5025,6 +5028,15 @@ def run(
         bench_list = list(benchmarks)
     else:
         bench_list = runner.discover_benchmarks(suite)
+
+    # Apply --exclude filter
+    if exclude:
+        before = len(bench_list)
+        bench_list = [b for b in bench_list
+                      if not any(ex in b for ex in exclude)]
+        excluded = before - len(bench_list)
+        if excluded:
+            console.print(f"[dim]  ({excluded} benchmarks excluded via --exclude)[/]")
 
     if not bench_list:
         console.print("[yellow]No benchmarks found.[/]")
@@ -5860,6 +5872,9 @@ def slurm_run(
     perf_interval: float = typer.Option(
         0.1, "--perft",
         help="Perf stat sampling interval in seconds"),
+    exclude: Optional[List[str]] = typer.Option(
+        None, "--exclude", "-e",
+        help="Benchmarks to exclude (substring match, repeatable)"),
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -5929,6 +5944,14 @@ def slurm_run(
     else:
         bench_list = runner.discover_benchmarks(suite)
 
+    # Apply --exclude filter
+    excluded_count = 0
+    if exclude:
+        before = len(bench_list)
+        bench_list = [b for b in bench_list
+                      if not any(ex in b for ex in exclude)]
+        excluded_count = before - len(bench_list)
+
     if not bench_list:
         console.print("[yellow]No benchmarks to run.[/]")
         raise typer.Exit(0)
@@ -5951,6 +5974,8 @@ def slurm_run(
             total_jobs += valid_benchmarks * runs
 
     console.print(f"\n[bold]Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs[/]")
+    if excluded_count:
+        console.print(f"[dim]  ({excluded_count} benchmarks excluded via --exclude)[/]")
     if multinode_disabled and max(node_counts) > 1:
         console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
 
