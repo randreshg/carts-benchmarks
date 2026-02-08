@@ -148,7 +148,7 @@ int main(void) {
     for (int i = 0; i < NX; ++i) {
       for (int j = 0; j < NY; ++j) {
         for (int k = 0; k < NZ; ++k) {
-          checksum += (double)rhs[c][i][j][k];
+          checksum += fabs((double)rhs[c][i][j][k]);
         }
       }
     }
