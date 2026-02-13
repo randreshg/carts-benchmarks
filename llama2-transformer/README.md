@@ -121,7 +121,7 @@ TransformerModel *model = (TransformerModel *)malloc(sizeof(TransformerModel));
 TransformerState *state = (TransformerState *)malloc(sizeof(TransformerState));
 ```
 
-See `docs/analysis.md` for detailed debugging steps.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps.
 
 ## Key Features
 

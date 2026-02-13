@@ -47,7 +47,7 @@ sw4lite_vel4sg_base checksum=0.000000
 - `vel4sg_base.c` - Main source file with OpenMP-parallelized velocity update kernel
 - `arts.cfg` - ARTS runtime configuration
 - `Makefile` - Build configuration
-- `docs/analysis.md` - Debugging guide and CARTS limitations documentation
+- [CARTS pipeline guide](/opt/carts/docs/agents.md) - Debugging and pipeline reference
 
 ## Key Implementation Pattern
 
@@ -117,7 +117,7 @@ if (!vx || !vy || ...) { return 1; }
 // Modified: removed (assumes allocations succeed in benchmark context)
 ```
 
-See `docs/analysis.md` for detailed debugging steps.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps.
 
 ## See Also
 

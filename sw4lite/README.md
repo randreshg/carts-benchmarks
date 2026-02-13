@@ -119,7 +119,7 @@ Both kernels required the same modifications for CARTS:
 2. **No collapse clause** - Removed `collapse(2)` from OpenMP pragma
 3. **No early returns** - Removed allocation failure checks
 
-See individual `docs/analysis.md` files for detailed debugging steps.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps.
 
 ## References
 

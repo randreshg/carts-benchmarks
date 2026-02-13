@@ -73,6 +73,46 @@ CHECKSUM_PATTERNS = [
 SKIP_DIRS = {"common", "include", "src", "utilities",
              ".git", ".svn", ".hg", "build", "logs"}
 
+# Benchmark clean patterns
+BENCHMARK_CLEAN_DIR_NAMES = [
+    "build",
+    "logs",
+    "counters",
+    "counter",
+    "results",
+    "perfs",
+    "introspection",
+]
+
+BENCHMARK_CLEAN_DIR_GLOBS = [
+    "counters.prev.*",
+]
+
+BENCHMARK_CLEAN_FILE_GLOBS = [
+    "*.mlir",
+    "*.ll",
+    "*.o",
+    "*.bc",
+    "*.s",
+    "*.tmp",
+    "*.log",
+    "*.out",
+    "*.err",
+    "*-metadata.json",
+    ".carts-metadata.json",
+    ".artsPrintLock",
+    "core",
+    "core.*",
+    "vgcore.*",
+]
+
+BENCHMARK_SHARED_CLEAN_DIR_NAMES = [
+    "results",
+    "counters",
+    "perfs",
+    ".generated_configs",
+]
+
 # Perf cache events for hardware counter profiling
 PERF_CACHE_EVENTS = [
     "cache-references",
@@ -127,6 +167,92 @@ def parse_counter_json(counter_dir: Path) -> Tuple[Optional[float], Optional[flo
         return init_sec, e2e_sec
     except (json.JSONDecodeError, KeyError, TypeError):
         return None, None
+
+
+def _counter_value(counters: Dict[str, Any], key: str) -> float:
+    """Extract a numeric counter value from ARTS counter JSON payloads."""
+    entry = counters.get(key)
+    if isinstance(entry, (int, float)):
+        return float(entry)
+    if not isinstance(entry, dict):
+        return 0.0
+    for value_key in ("value", "value_ms", "value_bytes"):
+        value = entry.get(value_key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return 0.0
+
+
+def evaluate_distribution_from_counters(
+    counter_files: List[str], expected_nodes: int
+) -> Tuple[bool, str]:
+    """Determine whether multi-node execution showed distributed activity."""
+    node_metrics: Dict[int, Dict[str, float]] = {}
+    node_re = re.compile(r"^n(\d+)\.json$")
+
+    for path_str in counter_files:
+        path = Path(path_str)
+        match = node_re.match(path.name)
+        if not match:
+            continue
+        try:
+            with open(path, "r") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        counters = payload.get("counters", {})
+        if not isinstance(counters, dict):
+            counters = {}
+
+        node_id = int(match.group(1))
+        node_metrics[node_id] = {
+            "remote_sent": _counter_value(counters, "remoteBytesSent"),
+            "remote_recv": _counter_value(counters, "remoteBytesReceived"),
+            "edts_created": _counter_value(counters, "numEdtsCreated"),
+            "edts_finished": _counter_value(counters, "numEdtsFinished"),
+            "counter_count": float(len(counters)),
+        }
+
+    observed_nodes = len(node_metrics)
+    if observed_nodes < 2:
+        return (
+            False,
+            f"only {observed_nodes} per-node counter file(s) found "
+            f"(expected at least 2 for --nodes={expected_nodes})",
+        )
+
+    remote_bytes = sum(
+        metrics["remote_sent"] + metrics["remote_recv"]
+        for metrics in node_metrics.values()
+    )
+    non_root_activity = any(
+        node_id != 0
+        and (
+            metrics["remote_sent"] > 0.0
+            or metrics["remote_recv"] > 0.0
+            or metrics["edts_created"] > 0.0
+            or metrics["edts_finished"] > 0.0
+            or metrics["counter_count"] > 0.0
+        )
+        for node_id, metrics in node_metrics.items()
+    )
+
+    if remote_bytes > 0.0:
+        return (
+            True,
+            f"remoteBytes total={remote_bytes:.0f} across {observed_nodes} node files",
+        )
+    if non_root_activity:
+        return (
+            True,
+            f"non-root node activity detected across {observed_nodes} node files",
+        )
+
+    return (
+        False,
+        f"no remote traffic or non-root activity in {observed_nodes} node files",
+    )
 
 
 # ============================================================================
@@ -1249,6 +1375,99 @@ class BenchmarkRunner:
 
         return None
 
+    def _get_ssh_hosts(self, arts_cfg: Optional[Path]) -> List[str]:
+        """Return SSH host list from config, truncated to nodeCount when present."""
+        if not arts_cfg:
+            return []
+        hosts = get_arts_cfg_nodes(arts_cfg)
+        node_count = get_arts_cfg_int(arts_cfg, "nodeCount")
+        if node_count is not None and node_count > 0:
+            hosts = hosts[:node_count]
+        return hosts
+
+    def _run_remote_shell(self, host: str, command: str) -> None:
+        """Best-effort SSH command execution used for runner hygiene."""
+        try:
+            subprocess.run(
+                [
+                    "ssh",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "ConnectTimeout=5",
+                    host,
+                    command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            # Remote cleanup/setup is best effort by design.
+            pass
+
+    def _ensure_counter_dir_on_hosts(self, counter_dir: Optional[Path], hosts: List[str]) -> None:
+        """Ensure remote nodes can write counter outputs to configured directory."""
+        if counter_dir is None:
+            return
+        remote_cmd = f"mkdir -p {shlex.quote(str(counter_dir))}"
+        for host in hosts:
+            self._run_remote_shell(host, remote_cmd)
+
+    def _cleanup_port(self, port: int = 34739) -> None:
+        """Kill any process holding the ARTS port."""
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True, timeout=5, check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    def _cleanup_stale_arts_processes(self, executable: Optional[str], hosts: List[str]) -> None:
+        """Kill stale benchmark executable ranks locally/remotely (exact name only)."""
+        if not executable:
+            return
+        exe_name = Path(executable).name
+        if not exe_name:
+            return
+
+        try:
+            subprocess.run(
+                ["pkill", "-x", exe_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+
+        remote_cmd = f"pkill -x {shlex.quote(exe_name)} 2>/dev/null || true"
+        for host in hosts:
+            self._run_remote_shell(host, remote_cmd)
+
+    def _cleanup_all_arts_processes(self, hosts: List[str]) -> None:
+        """Best-effort cleanup of lingering ARTS benchmark ranks.
+
+        Used before SSH multi-node runs to make ports/process slots predictable.
+        """
+        try:
+            subprocess.run(
+                ["pkill", "-f", "_arts"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+
+        remote_cmd = "pkill -f '_arts' 2>/dev/null || true"
+        for host in hosts:
+            self._run_remote_shell(host, remote_cmd)
+
     def run_with_thread_sweep(
         self,
         name: str,
@@ -1265,6 +1484,7 @@ class BenchmarkRunner:
         base_size: Optional[int] = None,
         runs: int = 1,
         output_path: Optional[Path] = None,
+        results_dir: Optional[Path] = None,
         arts_exec_args: Optional[str] = None,
     ) -> Tuple[List[BenchmarkResult], Optional[Path], Optional[Path]]:
         """Run benchmark with multiple thread configurations.
@@ -1280,9 +1500,11 @@ class BenchmarkRunner:
             base_size: Base problem size for weak scaling.
             runs: Number of times to run each configuration.
             output_path: If specified, create experiment directory for reproducibility.
+            results_dir: Directory for results output (default: ./results). Used to
+                        create an experiment directory when output_path is not specified.
 
         Returns:
-            Tuple of (results, experiment_dir, json_path). Both paths are None if
+            Tuple of (results, experiment_dir, json_path). json_path is None if
             output_path was not specified.
         """
         results = []
@@ -1326,12 +1548,18 @@ class BenchmarkRunner:
                 skip_config
             )], None, None
 
-        # Create timestamped experiment directory ONCE per experiment
-        # Both JSON results and artifacts will be stored together
+        # Create timestamped experiment directory ONCE per experiment.
+        # When --output is specified, artifacts are stored alongside JSON.
+        # Otherwise, create a minimal experiment dir for log persistence.
         experiment_dir = None
         json_path = None
         if output_path:
             experiment_dir, json_path = create_experiment_dir(output_path)
+        else:
+            effective_results_dir = results_dir or Path("./results")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            experiment_dir = effective_results_dir / timestamp
+            experiment_dir.mkdir(parents=True, exist_ok=True)
 
         for threads in threads_list:
             # Generate arts.cfg with thread count, launcher, and node count
@@ -1387,32 +1615,39 @@ class BenchmarkRunner:
 
             # Run multiple times per configuration
             for run_num in range(1, runs + 1):
-                # Create run directory if output specified
+                # Always create run directory and log paths for persistence
                 run_dir = None
                 arts_log_path: Optional[str] = None
                 omp_log_path: Optional[str] = None
 
                 if runs_dir:
                     run_dir = create_run_directory(runs_dir, run_num)
-                    # Logs go to run directory
                     arts_log = run_dir / "arts.log"
                     omp_log = run_dir / "omp.log"
                     arts_log_path = str(arts_log)
                     omp_log_path = str(omp_log)
-                elif self.debug >= 2:
-                    # Fallback to benchmark logs directory for debug mode without output
+                else:
+                    # Fallback to benchmark logs directory
                     logs_dir = bench_path / "logs"
                     run_suffix = f"_r{run_num}" if runs > 1 else ""
                     arts_log = logs_dir / f"arts_{threads}t{run_suffix}.log"
                     omp_log = logs_dir / f"omp_{threads}t{run_suffix}.log"
-                else:
-                    arts_log = None
-                    omp_log = None
+
+                # Pre-run cleanup: kill any process holding the ARTS port
+                arts_port = get_arts_cfg_int(arts_cfg, "port") or 34739
+                self._cleanup_port(arts_port)
 
                 # Run ARTS version - MUST pass artsConfig env var so runtime uses same config as compile
                 # ARTS reads config from: 1) artsConfig env var, 2) ./arts.cfg in CWD
                 # Without this, runtime may use wrong config (thread count mismatch)
                 if build_arts.status == Status.PASS and build_arts.executable:
+                    ssh_hosts: List[str] = []
+                    if desired_launcher == "ssh":
+                        ssh_hosts = self._get_ssh_hosts(arts_cfg)
+                        self._cleanup_all_arts_processes(ssh_hosts)
+                        self._cleanup_stale_arts_processes(build_arts.executable, ssh_hosts)
+                        self._ensure_counter_dir_on_hosts(counter_dir, ssh_hosts)
+
                     arts_env = dict(env)
                     arts_env["artsConfig"] = str(arts_cfg)
                     run_arts = self.run_benchmark(
@@ -1425,6 +1660,14 @@ class BenchmarkRunner:
                         args=run_args,
                         log_file=arts_log,
                     )
+                    if desired_launcher == "ssh" and run_arts.status in (
+                        Status.TIMEOUT,
+                        Status.CRASH,
+                    ):
+                        # Only cleanup after failed SSH runs; pre-emptive pkill
+                        # can destabilize subsequent benchmark launches.
+                        self._cleanup_all_arts_processes(ssh_hosts)
+                        self._cleanup_stale_arts_processes(build_arts.executable, ssh_hosts)
                 else:
                     run_arts = RunResult(
                         status=Status.SKIP,
@@ -1484,14 +1727,10 @@ class BenchmarkRunner:
                     artifacts.arts_log = arts_log_path
                     artifacts.omp_log = omp_log_path
 
-                    # Handle counter files - check explicit counter_dir or ARTS default ./counter
+                    # Handle counter files only when an explicit counter dir is configured.
                     effective_counter_dir = None
                     if counter_dir and counter_dir.exists():
                         effective_counter_dir = counter_dir
-                    else:
-                        default_counter_dir = bench_path / "counters"
-                        if default_counter_dir.exists():
-                            effective_counter_dir = default_counter_dir
 
                     if effective_counter_dir and run_dir:
                         run_counters_dir = run_dir / "counters"
@@ -1655,32 +1894,33 @@ class BenchmarkRunner:
             )
             duration = time.time() - start
 
-            # Debug output level 2: write to log file (ARTS output can be huge)
-            if self.debug >= 2:
-                if log_file:
-                    log_file.parent.mkdir(parents=True, exist_ok=True)
-                    with open(log_file, "w") as f:
-                        f.write(f"# Command: {' '.join(cmd)}\n")
-                        f.write(f"# Duration: {duration:.3f}s\n")
-                        f.write(f"# Exit code: {result.returncode}\n\n")
-                        if result.stdout:
-                            f.write("=== STDOUT ===\n")
-                            f.write(result.stdout)
-                            f.write("\n")
-                        if result.stderr:
-                            f.write("=== STDERR ===\n")
-                            f.write(result.stderr)
-                            f.write("\n")
+            # Always write to log file when path is provided
+            if log_file:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "w") as f:
+                    f.write(f"# Command: {' '.join(cmd)}\n")
+                    f.write(f"# Duration: {duration:.3f}s\n")
+                    f.write(f"# Exit code: {result.returncode}\n\n")
+                    if result.stdout:
+                        f.write("=== STDOUT ===\n")
+                        f.write(result.stdout)
+                        f.write("\n")
+                    if result.stderr:
+                        f.write("=== STDERR ===\n")
+                        f.write(result.stderr)
+                        f.write("\n")
+                if self.debug >= 2:
                     self.console.print(f"[dim]  Log: {log_file}[/]")
-                else:
-                    # No log file specified, print summary only
-                    lines = (result.stdout + result.stderr).strip().split('\n')
-                    if len(lines) > 10:
-                        self.console.print(
-                            f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
-                    elif lines and lines[0]:
-                        for line in lines[:10]:
-                            self.console.print(f"[dim]  {line}[/]")
+
+            # Debug output level 2: print summary when no log file
+            if self.debug >= 2 and not log_file:
+                lines = (result.stdout + result.stderr).strip().split('\n')
+                if len(lines) > 10:
+                    self.console.print(
+                        f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
+                elif lines and lines[0]:
+                    for line in lines[:10]:
+                        self.console.print(f"[dim]  {line}[/]")
 
             # Determine status based on exit code
             if result.returncode == 0:
@@ -1718,13 +1958,38 @@ class BenchmarkRunner:
                 perf_metrics=perf_metrics,
                 perf_csv_path=perf_csv_path,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            partial_stdout = e.stdout
+            partial_stderr = e.stderr
+            if isinstance(partial_stdout, bytes):
+                partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+            if isinstance(partial_stderr, bytes):
+                partial_stderr = partial_stderr.decode("utf-8", errors="replace")
+
+            if self.debug >= 2 and log_file:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "w") as f:
+                    f.write(f"# Command: {' '.join(cmd)}\n")
+                    f.write(f"# Duration: {float(timeout):.3f}s (timeout)\n")
+                    f.write("# Exit code: 124\n\n")
+                    if partial_stdout:
+                        f.write("=== STDOUT (partial) ===\n")
+                        f.write(partial_stdout)
+                        f.write("\n")
+                    if partial_stderr:
+                        f.write("=== STDERR (partial) ===\n")
+                        f.write(partial_stderr)
+                        f.write("\n")
+
+            stderr = f"Execution timed out after {timeout} seconds"
+            if partial_stderr:
+                stderr = f"{partial_stderr.rstrip()}\n{stderr}"
             return RunResult(
                 status=Status.TIMEOUT,
                 duration_sec=float(timeout),
                 exit_code=124,
-                stdout="",
-                stderr=f"Execution timed out after {timeout} seconds",
+                stdout=partial_stdout or "",
+                stderr=stderr,
             )
         except Exception as e:
             return RunResult(
@@ -2157,15 +2422,12 @@ class BenchmarkRunner:
                 skip_config
             )
 
-        # Create per-run counter subdirectory to preserve counter data across runs
+        # Create per-run counter subdirectory only when counters are explicitly enabled.
         # Format: {counter_dir}/{timestamp}/{benchmark_name}_{run}/
         safe_bench_name = name.replace("/", "_")
+        run_counter_dir: Optional[Path] = None
         if counter_dir is not None:
             run_counter_dir = counter_dir / run_timestamp / f"{safe_bench_name}_{run_number}"
-            run_counter_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            # Fallback to benchmark's local counters directory (original behavior)
-            run_counter_dir = bench_path / "counters"
             run_counter_dir.mkdir(parents=True, exist_ok=True)
 
         # Ensure perf output directory exists
@@ -2204,25 +2466,17 @@ class BenchmarkRunner:
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
-        # Build OpenMP version - skip for multi-node since OMP is single-node only
+        # Build OpenMP version - always build for verification (runs single-node)
         if phase_callback:
             phase_callback(Phase.BUILD_OMP)
-        if desired_nodes == 1:
-            build_omp = self.build_benchmark(name, size, "openmp", None)
-        else:
-            build_omp = BuildResult(
-                status=Status.SKIP,
-                duration_sec=0.0,
-                output="Skipped: OpenMP does not support multi-node execution",
-                executable=None,
-            )
+        build_omp = self.build_benchmark(name, size, "openmp", None)
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
-        # Setup log files for debug=2
+        # Always set up log files for persistence
         logs_dir = bench_path / "logs"
-        arts_log = logs_dir / "arts.log" if self.debug >= 2 else None
-        omp_log = logs_dir / "omp.log" if self.debug >= 2 else None
+        arts_log = logs_dir / "arts.log"
+        omp_log = logs_dir / "omp.log"
         run_args = self.get_run_args(bench_path, size)
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
@@ -2244,10 +2498,21 @@ class BenchmarkRunner:
         else:
             arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
 
+        # Pre-run cleanup: kill any process holding the ARTS port
+        arts_port = get_arts_cfg_int(effective_arts_cfg, "port") or 34739
+        self._cleanup_port(arts_port)
+
         # Run ARTS version - pass artsConfig env var so runtime uses the effective config.
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
         if build_arts.status == Status.PASS and build_arts.executable:
+            ssh_hosts: List[str] = []
+            if desired_launcher == "ssh":
+                ssh_hosts = self._get_ssh_hosts(effective_arts_cfg)
+                self._cleanup_all_arts_processes(ssh_hosts)
+                self._cleanup_stale_arts_processes(build_arts.executable, ssh_hosts)
+                self._ensure_counter_dir_on_hosts(run_counter_dir, ssh_hosts)
+
             arts_env = dict(common_env)
             if effective_arts_cfg:
                 arts_env["artsConfig"] = str(effective_arts_cfg)
@@ -2265,6 +2530,14 @@ class BenchmarkRunner:
                 perf_output_name=arts_perf_temp.name if arts_perf_temp else "perf_cache_arts.csv",
                 perf_output_dir=perf_timestamp_dir if run_timestamp else effective_perf_dir,
             )
+            if desired_launcher == "ssh" and run_arts.status in (
+                Status.TIMEOUT,
+                Status.CRASH,
+            ):
+                # Only cleanup after failed SSH runs; pre-emptive pkill
+                # can destabilize subsequent benchmark launches.
+                self._cleanup_all_arts_processes(ssh_hosts)
+                self._cleanup_stale_arts_processes(build_arts.executable, ssh_hosts)
             # Append temp perf data to main CSV
             if perf_enabled and arts_perf_temp and arts_perf_main:
                 append_perf_to_main_csv(arts_perf_temp, arts_perf_main, run_number)
@@ -2364,6 +2637,11 @@ class BenchmarkRunner:
             artifacts.arts_log = str(arts_log)
         if omp_log is not None:
             artifacts.omp_log = str(omp_log)
+        if run_counter_dir and run_counter_dir.exists():
+            artifacts.counters_dir = str(run_counter_dir)
+            artifacts.counter_files = sorted(
+                str(f) for f in run_counter_dir.glob("*.json")
+            )
 
         total_duration = time.time() - start_time
 
@@ -2700,20 +2978,25 @@ class BenchmarkRunner:
 
         cleaned = False
 
-        # Remove directories (legacy from make-based builds)
-        for dirname in ["build", "logs", "counters"]:
+        for dirname in BENCHMARK_CLEAN_DIR_NAMES:
             dirpath = bench_path / dirname
             if dirpath.exists():
                 shutil.rmtree(dirpath)
                 cleaned = True
 
-        # Remove files
-        for pattern in ["*.mlir", "*.ll", "*.o", "*-metadata.json", ".carts-metadata.json"]:
+        for pattern in BENCHMARK_CLEAN_DIR_GLOBS:
+            for dirpath in bench_path.glob(pattern):
+                if dirpath.is_dir():
+                    shutil.rmtree(dirpath)
+                    cleaned = True
+
+        for pattern in BENCHMARK_CLEAN_FILE_GLOBS:
             for f in bench_path.glob(pattern):
+                if not f.is_file():
+                    continue
                 f.unlink()
                 cleaned = True
 
-        # Remove executables
         for exe in bench_path.glob("*_arts"):
             if exe.is_file():
                 exe.unlink()
@@ -2724,6 +3007,25 @@ class BenchmarkRunner:
                 cleaned = True
 
         return cleaned
+
+    def clean_shared_artifacts(self) -> int:
+        """Clean benchmark-runner shared artifacts under external/carts-benchmarks."""
+        removed = 0
+
+        for dirname in BENCHMARK_SHARED_CLEAN_DIR_NAMES:
+            dirpath = self.benchmarks_dir / dirname
+            if dirpath.exists():
+                shutil.rmtree(dirpath)
+                removed += 1
+
+        for pattern in ["core", "core.*", "vgcore.*", "*.log", "*.tmp"]:
+            for f in self.benchmarks_dir.glob(pattern):
+                if not f.is_file():
+                    continue
+                f.unlink()
+                removed += 1
+
+        return removed
 
 
 # Worker function for parallel execution (must be at module level for pickling)
@@ -4985,13 +5287,18 @@ def run(
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
     arts_exec_args: Optional[str] = typer.Option(
-        None, "--arts-exec-args", help="Extra carts execute args (e.g., '--partition-fallback=fine')"),
+        None, "--arts-exec-args", help="Extra carts compile args (e.g., '--partition-fallback=fine')"),
     debug_level: int = typer.Option(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=full output"),
     counter_config: Optional[Path] = typer.Option(
         None, "--counter-config", help="Custom counter.cfg file. Triggers ARTS rebuild with this configuration."),
-    counter_dir: Path = typer.Option(
-        "./counters", "--counter-dir", help="Directory for ARTS counter output (cluster.json)"),
+    counter_dir: Optional[Path] = typer.Option(
+        None, "--counter-dir", help="Directory for ARTS counter output (cluster.json). Enables counters when set."),
+    counters: bool = typer.Option(
+        False, "--counters", help="Enable ARTS counter collection (auto-creates counter directory)"),
+    assert_distributed: bool = typer.Option(
+        False, "--assert-distributed",
+        help="Fail multi-node runs if counters do not show distributed activity."),
     runs: int = typer.Option(
         10, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     report: bool = typer.Option(
@@ -5060,10 +5367,15 @@ def run(
             raise typer.Exit(1)
         console.print("[green]ARTS rebuild complete[/]")
 
+    # --counters is sugar for auto-creating the counter directory
+    if counters and counter_dir is None:
+        counter_dir = results_dir / "counters"
+
     # Setup directories - resolve to absolute paths since subprocesses run with different cwd
-    counter_dir = Path(counter_dir)
-    counter_dir.mkdir(parents=True, exist_ok=True)
-    counter_dir = counter_dir.resolve()
+    if counter_dir is not None:
+        counter_dir = Path(counter_dir)
+        counter_dir.mkdir(parents=True, exist_ok=True)
+        counter_dir = counter_dir.resolve()
 
     perf_dir = Path(perf_dir)
     perf_dir.mkdir(parents=True, exist_ok=True)
@@ -5097,6 +5409,10 @@ def run(
             config_items.append(f"debug={debug_level}")
         if counter_config:
             config_items.append(f"counter-config={counter_config.name}")
+        if counter_dir is not None:
+            config_items.append(f"counter-dir={counter_dir}")
+        if assert_distributed:
+            config_items.append("assert-distributed=1")
         if perf:
             config_items.append(f"perf-dir={perf_dir or './perfs'}")
         console.print(f"Config: {', '.join(config_items)}")
@@ -5184,6 +5500,7 @@ def run(
                 base_size,
                 runs,
                 output,  # Pass output_path for artifact organization
+                results_dir,
                 arts_exec_args,
             )
         else:
@@ -5212,6 +5529,50 @@ def run(
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
         raise typer.Exit(1)
+
+    if assert_distributed:
+        distributed_failures: List[str] = []
+        distributed_warnings: List[str] = []
+        for result in results:
+            if result.config.arts_nodes <= 1:
+                continue
+            if result.run_arts.status != Status.PASS:
+                continue
+
+            if not result.artifacts.counter_files:
+                distributed_warnings.append(
+                    f"{result.name} [run {result.run_number}]: "
+                    "missing counter files; skipped distributed assertion "
+                    "(use --counter-dir for strict checks)"
+                )
+                continue
+
+            ok, reason = evaluate_distribution_from_counters(
+                result.artifacts.counter_files, result.config.arts_nodes
+            )
+            if not ok:
+                distributed_failures.append(
+                    f"{result.name} [run {result.run_number}]: {reason}"
+                )
+                result.run_arts.status = Status.FAIL
+                result.run_arts.stderr = (
+                    f"{result.run_arts.stderr}\n{reason}".strip()
+                    if result.run_arts.stderr
+                    else reason
+                )
+
+        if distributed_failures and not quiet:
+            console.print(
+                "\n[red]Distributed assertion failures:[/]"
+            )
+            for failure in distributed_failures:
+                console.print(f"  - {failure}")
+        if distributed_warnings and not quiet:
+            console.print(
+                "\n[yellow]Distributed assertion warnings:[/]"
+            )
+            for warning in distributed_warnings:
+                console.print(f"  - {warning}")
 
     total_duration = time.time() - start_time
 
@@ -5270,12 +5631,20 @@ def run(
             console.print(f"[green]Chart:[/]  {report_chart}")
             console.print(f"[green]Speedup:[/] {report_speedup}")
 
-    # Show JSON artifact path last (after live table + optional report).
+    # Print artifact summary so the user knows where everything landed.
     if not quiet:
         console.print()
+        console.print("[bold]Artifacts:[/]")
+        console.print(f"  Results:  {json_output_path}")
         if experiment_dir:
-            console.print(f"[green]Experiment folder:[/] {experiment_dir}")
-        console.print(f"[green]Results JSON:[/]      {json_output_path}")
+            # Find the first log directory to show as an example
+            log_dirs = sorted(experiment_dir.rglob("arts.log"))
+            if log_dirs:
+                console.print(f"  Logs:     {log_dirs[0].parent}/")
+            else:
+                console.print(f"  Logs:     {experiment_dir}/")
+        if counter_dir is not None:
+            console.print(f"  Counters: {counter_dir}/")
 
     # Exit with error if any failures
     failed = sum(1 for r in results if r.run_arts.status in (
@@ -5382,7 +5751,15 @@ def clean(
         else:
             console.print(f"  [dim]\u25cb[/] {bench} (nothing to clean)")
 
-    console.print(f"\n[bold green]Cleaned {cleaned} benchmarks![/]")
+    shared_cleaned = runner.clean_shared_artifacts()
+    if shared_cleaned:
+        console.print(
+            f"\n[cyan]Removed {shared_cleaned} shared benchmark artifact paths.[/]"
+        )
+
+    console.print(
+        f"\n[bold green]Cleaned {cleaned} benchmarks (+{shared_cleaned} shared paths)![/]"
+    )
 
 
 @app.command()

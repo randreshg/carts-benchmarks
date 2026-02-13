@@ -56,10 +56,10 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--size` | `-s` | Dataset size: `small`, `medium`, `large` (default: small) |
 | `--timeout` | `-t` | Execution timeout in seconds (default: 60) |
 | `--threads` | | Thread counts: `1,2,4,8` or `1:16:2` for sweep |
-| `--runs` | `-r` | Number of runs per configuration (default: 1) |
+| `--runs` | `-r` | Number of runs per configuration (default: 10) |
 | `--omp-threads` | | OpenMP thread count (default: same as ARTS threads) |
 | `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
-| `--node-count` | `-n` | Override ARTS `nodeCount` (default: from benchmark `arts.cfg`) |
+| `--nodes` | `-n` | Override ARTS `nodeCount` (default: from benchmark `arts.cfg`) |
 | `--output` | `-o` | Write results JSON to a custom path |
 | `--trace` | | Show benchmark output (kernel timing and checksum) |
 | `--verbose` | `-v` | Verbose output |
@@ -67,8 +67,9 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--no-verify` | | Disable correctness verification |
 | `--no-clean` | | Skip cleaning before build (faster, may use stale artifacts) |
 | `--debug` | `-d` | Debug level: `0`=off, `1`=commands, `2`=full output to logs |
-| `--counters` | | Counter level: `0`=off, `1`=artsid metrics, `2`=deep captures |
-| `--counter-dir` | | Directory for ARTS counter output |
+| `--counter-config` | | Rebuild ARTS with a specific counter profile config file |
+| `--counter-dir` | | Directory for ARTS counter output (disabled unless set) |
+| `--counters` | | Enable counter collection (auto-creates counter directory) |
 | `--cflags` | | Additional CFLAGS: `-DNI=500 -DNJ=500` |
 | `--weak-scaling` | | Enable weak scaling (auto-scale problem size) |
 | `--base-size` | | Base problem size for weak scaling |
@@ -140,10 +141,16 @@ carts benchmarks run polybench/gemm --size small --threads 2 --debug=1
 carts benchmarks run polybench/gemm --size small --threads 2 --debug=2
 # Check logs at: polybench/gemm/logs/arts.log and polybench/gemm/logs/omp.log
 
-# Enable ARTS counters (requires ARTS built with --counters=1)
+# Enable ARTS counters with explicit output dir
 carts benchmarks run polybench/gemm --size medium --threads 4 \
-    --counters=1 --counter-dir results/counters/gemm_4t \
+    --counter-dir results/counters/gemm_4t \
     -o results/gemm_4t.json
+
+# Rebuild ARTS with a custom counter profile, then run
+carts benchmarks run polybench/gemm --size medium --threads 4 \
+    --counter-config /opt/carts/configs/profile-timing.cfg \
+    --counter-dir results/counters/gemm_4t \
+    -o results/gemm_4t_profile.json
 ```
 
 ### Custom Problem Sizes
@@ -279,10 +286,10 @@ The runner displays the effective ARTS configuration before execution:
 
 ```bash
 # Override launcher and node count
-carts benchmarks run polybench/gemm --launcher slurm --node-count 4
+carts benchmarks run polybench/gemm --launcher slurm --nodes 4
 
 # Override thread count and launcher
-carts benchmarks run polybench/gemm --threads 32 --launcher ssh --node-count 2
+carts benchmarks run polybench/gemm --threads 32 --launcher ssh --nodes 2
 
 # Override OpenMP thread count separately
 carts benchmarks run polybench/gemm --threads 16 --omp-threads 8
@@ -304,7 +311,7 @@ carts benchmarks run polybench/gemm --arts-config multi.cfg
 | Parameter | CLI Option | Description |
 |-----------|------------|-------------|
 | `launcher` | `--launcher` | Job launcher (ssh, slurm, lsf) |
-| `nodeCount` | `--node-count`, `-n` | Number of compute nodes |
+| `nodeCount` | `--nodes`, `-n` | Number of compute nodes |
 | `threads` | `--threads` | ARTS worker threads per node |
 | `omp-threads` | `--omp-threads` | OpenMP threads (separate from ARTS threads) |
 
@@ -432,43 +439,143 @@ Experiment folder: results/gemm_scaling_20251214_182205
 Results JSON:      results/gemm_scaling_20251214_182205/gemm_scaling.json
 ```
 
-## Counter Files
+## Artifact Output
 
-When using `--counters=1` with ARTS built with counter support, additional JSON files are generated:
+Every run persists logs and results to disk, even without `--output`. The default
+results directory is `./results`.
+
+### Directory Structure
 
 ```
-results/counters/gemm_4t/
-  n0_t0.json  # Thread 0 counter data
-  n0_t1.json  # Thread 1 counter data
-  ...
+results/
+  20260212_143052/                        # auto-created every run
+    polybench_gemm/
+      build/
+        2t_1n/
+          arts.cfg                        # build configuration
+          artifacts/                      # build outputs (MLIR, LLVM IR, executables)
+          runs/
+            1/
+              arts.log                    # ARTS runtime stdout/stderr
+              omp.log                     # OpenMP runtime stdout/stderr
+              counters/                   # counter files (if --counters)
+            2/
+    results.json                          # (only with --output)
 ```
 
-Counter files contain EDT (Event-Driven Task) metrics:
+When `--output` is specified, the experiment directory also contains build artifacts
+and the results JSON. Without `--output`, a timestamped directory is still created
+under `./results` for log persistence.
+
+### After a run, the CLI prints an artifact summary:
+
+```
+Artifacts:
+  Results:  ./results/20260212_143052.json
+  Logs:     ./results/20260212_143052/polybench_gemm/build/2t_1n/runs/1/
+  Counters: ./results/counters/  (if --counters)
+```
+
+## Counters
+
+ARTS counters collect per-EDT timing and invocation metrics.
+
+### Quick start
+
+```bash
+# Simple: --counters auto-creates the counter directory
+carts benchmarks run polybench/gemm --size small --threads 2 --counters
+
+# Explicit: specify a custom counter directory
+carts benchmarks run polybench/gemm --size small --threads 2 \
+    --counter-dir results/counters/gemm_2t
+```
+
+`--counters` is sugar for `--counter-dir ./results/counters`. Both enable counter
+collection; `--counter-dir` lets you choose the output location.
+
+### Counter file contents
+
+Counter output is a `cluster.json` file (or per-thread `n0_t0.json`, `n0_t1.json`, etc.)
+containing EDT (Event-Driven Task) metrics:
+
 - `artsIdMetrics.edts[].total_exec_ns` - execution time per arts_id
 - `artsIdMetrics.edts[].invocations` - how often each EDT runs
 - `artsIdMetrics.edts[].total_stall_ns` - time waiting for data
 
-**Note**: Counter files require ARTS to be rebuilt with counter support:
+### Custom counter profiles
+
+Counter files require ARTS to be built with counter support.
+Use `--counter-config` to rebuild ARTS with a specific profile before running:
+
 ```bash
-carts build --arts --counters=1  # Level 1: ArtsID metrics
-carts build --arts --counters=2  # Level 2: Deep captures
+carts benchmarks run polybench/gemm --size medium --threads 4 \
+    --counter-config /opt/carts/configs/profile-timing.cfg \
+    --counters
 ```
 
-## Debug Log Files
+## Debugging a Benchmark
 
-When running with `--debug=2`, log files are written to the benchmark's logs directory:
+### Log files
 
+Logs are always written to disk. For thread sweep mode, they go to the experiment
+directory. For standard (multi-benchmark) mode, they go to `{benchmark}/logs/`.
+
+Each log file contains:
+- The exact command that was executed
+- Execution duration and exit code
+- Full stdout and stderr
+
+### Debug levels
+
+```bash
+# Level 1: print commands being executed to the console
+carts benchmarks run polybench/gemm --size small --threads 2 --debug=1
+
+# Level 2: also print log file paths to the console
+carts benchmarks run polybench/gemm --size small --threads 2 --debug=2
 ```
-polybench/gemm/logs/
-  build_arts.log      # ARTS build output
-  build_openmp.log    # OpenMP build output
-  arts_2t.log         # ARTS runtime output (2 threads)
-  arts_4t.log         # ARTS runtime output (4 threads)
-  arts_4t_r1.log      # ARTS runtime output (4 threads, run 1 when using --runs)
-  arts_4t_r2.log      # ARTS runtime output (4 threads, run 2)
-  omp_2t.log          # OpenMP runtime output
-  ...
+
+### Inspecting MLIR stages
+
+To see the MLIR output at each compiler stage, use `--pipeline` to stop at a
+specific point:
+
+```bash
+# Stop after the concurrency pass (parallel MLIR)
+carts compile polybench/gemm/gemm.c --pipeline concurrency
+
+# Run carts-compile directly for clean MLIR output
+/opt/carts/.install/carts/bin/carts-compile gemm.mlir --O3 --arts-config arts.cfg --concurrency
 ```
+
+## Troubleshooting
+
+### Port conflicts
+
+ARTS uses TCP port 34739 by default. If a previous run left lingering processes,
+the next run may fail with a port-in-use error. The runner automatically kills
+processes on the ARTS port before each run. To manually clear:
+
+```bash
+fuser -k 34739/tcp
+```
+
+### Stale processes
+
+For SSH multi-node runs, the runner cleans up stale ARTS processes before launch.
+If you see issues, manually kill on all nodes:
+
+```bash
+pkill -f '_arts'
+```
+
+### Missing checksums
+
+If a benchmark reports no checksum, check:
+1. The benchmark prints a line matching `checksum: <value>` on stdout
+2. The run didn't crash (check the log file for stderr)
+3. The timeout wasn't exceeded (`--timeout` defaults to 60s)
 
 ## Exit Codes
 

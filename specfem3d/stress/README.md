@@ -50,7 +50,7 @@ specfem3d_stress checksum=0.000558
 - `stress_update.c` - Main source file with OpenMP-parallelized stress update kernel
 - `arts.cfg` - ARTS runtime configuration (threads, ports, etc.)
 - `Makefile` - Build configuration using `../common/carts-example.mk`
-- `docs/analysis.md` - Debugging guide and CARTS limitations documentation
+- [CARTS pipeline guide](/opt/carts/docs/agents.md) - Debugging and pipeline reference
 
 ## Key Implementation Pattern
 
@@ -85,8 +85,8 @@ for (int k = 2; k < NZ - 2; ++k) {
 2. **No collapse clause** - Removed `collapse(2)` from OpenMP pragma
 3. **No early returns** - Removed allocation failure check
 
-See `docs/analysis.md` for detailed debugging steps and workarounds.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps and workarounds.
 
 ## Debugging
 
-See `docs/analysis.md` for detailed debugging steps and pipeline analysis commands.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps and pipeline analysis commands.
