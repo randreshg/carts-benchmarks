@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist pooling.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> pooling_seq.mlir
-      carts run pooling_seq.mlir --collect-metadata &> pooling_arts_metadata.mlir
+      carts compile pooling_seq.mlir --collect-metadata &> pooling_arts_metadata.mlir
       carts cgeist pooling.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities > pooling.mlir
    ```
 
@@ -27,11 +27,11 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the create-dbs pipeline
     ```bash
-      carts run pooling.mlir --create-dbs &> pooling_create-dbs.mlir
+      carts compile pooling.mlir --create-dbs &> pooling_create-dbs.mlir
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute pooling.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile pooling.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./pooling_arts
 ```

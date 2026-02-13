@@ -11,11 +11,11 @@ carts build
 
 # Generate MLIR from source
 carts cgeist 3mm.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities > 3mm_seq.mlir 2>&1
-carts run 3mm_seq.mlir --collect-metadata > 3mm_arts_metadata.mlir 2>&1
+carts compile 3mm_seq.mlir --collect-metadata > 3mm_arts_metadata.mlir 2>&1
 carts cgeist 3mm.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities > 3mm.mlir 2>&1
 
 # Run full pipeline
-carts execute 3mm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+carts compile 3mm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
 ./3mm_arts
 
 # Run benchmarks
@@ -46,7 +46,7 @@ ARTS now has a Stage 6 matmul-focused pass (`arts-loop-transforms`) that:
 
 ```bash
 # Stop after Stage 6 and show both passes
-carts run 3mm.mlir --loop-reordering --debug-only=loop_reordering,loop_transforms 2>&1
+carts compile 3mm.mlir --loop-reordering --debug-only=loop_reordering,loop_transforms 2>&1
 ```
 
 ---
@@ -101,7 +101,7 @@ ARTS partitions parallel loops by the outer loop variable `i`. But in matrix mul
 ### Debug Output
 
 ```bash
-carts run 3mm.mlir --concurrency-opt --debug-only=db 2>&1 | grep -E "SKIP|PASS|Promoting"
+carts compile 3mm.mlir --concurrency-opt --debug-only=db 2>&1 | grep -E "SKIP|PASS|Promoting"
 ```
 
 **Results:**
@@ -150,19 +150,19 @@ Checking allocation: D (3mm.c:107)
 
 ```bash
 # Check DB creation
-carts run 3mm.mlir --create-dbs > 3mm_dbs.mlir 2>&1
+carts compile 3mm.mlir --create-dbs > 3mm_dbs.mlir 2>&1
 
 # Check concurrency
-carts run 3mm.mlir --concurrency > 3mm_conc.mlir 2>&1
+carts compile 3mm.mlir --concurrency > 3mm_conc.mlir 2>&1
 
 # Check DB optimization (partitioning happens here)
-carts run 3mm.mlir --db-opt --debug-only=db 2>&1 | head -100
+carts compile 3mm.mlir --db-opt --debug-only=db 2>&1 | head -100
 
 # Check after LLVM lowering
-carts run 3mm.mlir --arts-to-llvm > 3mm_arts_llvm.mlir 2>&1
+carts compile 3mm.mlir --arts-to-llvm > 3mm_arts_llvm.mlir 2>&1
 
 # Generate LLVM IR
-carts run 3mm.mlir --emit-llvm > 3mm.ll 2>&1
+carts compile 3mm.mlir --emit-llvm > 3mm.ll 2>&1
 ```
 
 ### EDT Structure
@@ -187,7 +187,7 @@ call i64 @artsEdtCreateWithEpochArtsId(ptr @__arts_edt_3, ...)
 
 ```bash
 # Check vectorization hints
-carts run 3mm.mlir --emit-llvm --debug-only=arts_loop_vectorization_hints 2>&1 | grep -E "Processing|Attached|Total"
+carts compile 3mm.mlir --emit-llvm --debug-only=arts_loop_vectorization_hints 2>&1 | grep -E "Processing|Attached|Total"
 
 # Count vector instructions in binary
 objdump -d 3mm_arts | grep -c "fmul.*v.*\.2d"
@@ -238,14 +238,14 @@ Fuse stages 1 & 2 (E=A*B and F=C*D are independent) into a single EDT.
 
 ```bash
 # Full debug output for DB partitioning
-carts run 3mm.mlir --concurrency-opt --debug-only=db 2>&1 | tee 3mm_db_debug.log
+carts compile 3mm.mlir --concurrency-opt --debug-only=db 2>&1 | tee 3mm_db_debug.log
 
 # Acquire-level partitioning debug
-carts run 3mm.mlir --concurrency-opt --debug-only=db_acquire_node 2>&1 | grep -E "Skipping|PASS"
+carts compile 3mm.mlir --concurrency-opt --debug-only=db_acquire_node 2>&1 | grep -E "Skipping|PASS"
 
 # Check loop vectorization hints
-carts run 3mm.mlir --emit-llvm --debug-only=arts_loop_vectorization_hints 2>&1
+carts compile 3mm.mlir --emit-llvm --debug-only=arts_loop_vectorization_hints 2>&1
 
 # Full pipeline with all debug
-carts run 3mm.mlir --O3 --emit-llvm --debug 2>&1 | tee 3mm_full_debug.log
+carts compile 3mm.mlir --O3 --emit-llvm --debug 2>&1 | tee 3mm_full_debug.log
 ```

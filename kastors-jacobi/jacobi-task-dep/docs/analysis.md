@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist jacobi-task-dep.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> jacobi-task-dep_seq.mlir
-      carts run jacobi-task-dep_seq.mlir --collect-metadata &> jacobi-task-dep_arts_metadata.mlir
+      carts compile jacobi-task-dep_seq.mlir --collect-metadata &> jacobi-task-dep_arts_metadata.mlir
       carts cgeist jacobi-task-dep.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> jacobi-task-dep.mlir
    ```
 
@@ -27,7 +27,7 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the create-dbs pipeline
     ```bash
-      carts run jacobi-task-dep.mlir --create-dbs &> jacobi-task-dep_create-dbs.mlir
+      carts compile jacobi-task-dep.mlir --create-dbs &> jacobi-task-dep_create-dbs.mlir
     ```
 
     Analyze the comments within the summarized output.
@@ -179,9 +179,9 @@ Walk through these steps and fix any problem that you find in the way
    }
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute jacobi-task-dep.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile jacobi-task-dep.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./jacobi-task-dep_arts
 ```
 
@@ -210,7 +210,7 @@ In ARTS, EDTs are created with a fixed `numDeps` count at compile time. All slot
 Run the `--db-opt` pass to see how stencil bounds are detected:
 
 ```bash
-carts run jacobi-task-dep.mlir --db-opt --debug-only=db 2>&1 | grep -E "Stencil|bounds"
+carts compile jacobi-task-dep.mlir --db-opt --debug-only=db 2>&1 | grep -E "Stencil|bounds"
 ```
 
 The DbPass (`lib/arts/Passes/Db.cpp:analyzeStencilBounds()`) detects stencil patterns by analyzing index expressions. When it finds an index with non-zero offset (like `i-1` or `i+1`), it generates bounds checks.
@@ -218,7 +218,7 @@ The DbPass (`lib/arts/Passes/Db.cpp:analyzeStencilBounds()`) detects stencil pat
 Run the full pipeline to see the bounds_valid attribute:
 
 ```bash
-carts run jacobi-task-dep.mlir --db-opt &> jacobi-task-dep_db-opt.mlir
+carts compile jacobi-task-dep.mlir --db-opt &> jacobi-task-dep_db-opt.mlir
 ```
 
 Examine the output for stencil dependencies:
@@ -265,7 +265,7 @@ scf.for %arg1 = %c0 to %100 step %c1 {
 Run the `--edt-lowering` pass to see how bounds_valid is propagated:
 
 ```bash
-carts run jacobi-task-dep.mlir --edt-lowering &> jacobi-task-dep_edt-lowering.mlir
+carts compile jacobi-task-dep.mlir --edt-lowering &> jacobi-task-dep_edt-lowering.mlir
 ```
 
 The EdtLowering pass (`lib/arts/Passes/EdtLowering.cpp`) creates `RecordDepOp` with aligned `boundsValids` array:
@@ -288,7 +288,7 @@ arts.record_dep %edtGuid deps(%guid_f, %guid_unew, %guid_u_m1, %guid_u, %guid_u_
 Run the full pipeline to LLVM:
 
 ```bash
-carts run jacobi-task-dep.mlir --arts-to-llvm &> jacobi-task-dep_arts-to-llvm.mlir
+carts compile jacobi-task-dep.mlir --arts-to-llvm &> jacobi-task-dep_arts-to-llvm.mlir
 ```
 
 The ConvertArtsToLLVM pass (`lib/arts/Passes/ConvertArtsToLLVM.cpp:recordSingleDb()`) generates conditional dependency recording:
@@ -358,7 +358,7 @@ if (i == 0 || j == 0 || i == nx-1 || j == ny-1) {
 ### 7. Verification
 
 ```bash
-carts execute jacobi-task-dep.c -O3 -DSIZE=100
+carts compile jacobi-task-dep.c -O3 -DSIZE=100
 ./jacobi-task-dep_arts
 ```
 

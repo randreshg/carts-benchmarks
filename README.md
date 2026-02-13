@@ -8,18 +8,20 @@ A powerful CLI tool for building, running, verifying, and reporting on CARTS ben
 # List available benchmarks
 carts benchmarks list
 
-# Run a single benchmark
+# Run a single benchmark (results in carts-benchmarks/results/{timestamp}/)
 carts benchmarks run polybench/gemm --size small --threads 2
 
 # Run with multiple thread counts (thread sweep)
 carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8
 
+# Node sweep (tests each thread count at each node count)
+carts benchmarks run polybench/gemm --threads 1,2,4 --nodes 1,2
+
 # Run multiple times for statistical significance
 carts benchmarks run polybench/gemm --size medium --threads 4 --runs 5
 
-# A JSON results file is always produced (default: carts-benchmarks/results/).
-# Use --output to choose a custom location/name.
-carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 -o results/gemm_scaling.json
+# Custom results directory
+carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --results-dir results/scaling
 
 # Generate a paper-friendly report (Markdown + SVG figures)
 carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --report
@@ -59,16 +61,15 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--runs` | `-r` | Number of runs per configuration (default: 1) |
 | `--omp-threads` | | OpenMP thread count (default: same as ARTS threads) |
 | `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
-| `--node-count` | `-n` | Override ARTS `nodeCount` (default: from benchmark `arts.cfg`) |
-| `--output` | `-o` | Write results JSON to a custom path |
+| `--nodes` | `-n` | Node counts: single (`2`), list (`1,2,4`), range (`1:8:2`) |
+| `--results-dir` | | Base directory for experiment output (default: `carts-benchmarks/results/`) |
 | `--trace` | | Show benchmark output (kernel timing and checksum) |
 | `--verbose` | `-v` | Verbose output |
 | `--quiet` | `-q` | Minimal output (CI mode) |
 | `--no-verify` | | Disable correctness verification |
 | `--no-clean` | | Skip cleaning before build (faster, may use stale artifacts) |
-| `--debug` | `-d` | Debug level: `0`=off, `1`=commands, `2`=full output to logs |
-| `--counters` | | Counter level: `0`=off, `1`=artsid metrics, `2`=deep captures |
-| `--counter-dir` | | Directory for ARTS counter output |
+| `--debug` | `-d` | Debug level: `0`=off, `1`=commands, `2`=verbose console output (logs always captured) |
+| `--counters` | | Counter level: `0`=off (default), `1`=artsid metrics, `2`=deep captures |
 | `--cflags` | | Additional CFLAGS: `-DNI=500 -DNJ=500` |
 | `--weak-scaling` | | Enable weak scaling (auto-scale problem size) |
 | `--base-size` | | Base problem size for weak scaling |
@@ -109,25 +110,34 @@ carts benchmarks run polybench/gemm --size small --threads 2 --trace
 
 ```bash
 # Strong scaling (fixed problem size, increasing threads)
-carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8,16 \
-    -o results/gemm_strong.json
+carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8,16
 
 # Weak scaling (problem size scales with parallelism)
 carts benchmarks run polybench/gemm --threads 1,2,4,8 \
-    --weak-scaling --base-size 256 \
-    -o results/gemm_weak.json
+    --weak-scaling --base-size 256
+```
+
+### Node Scaling
+
+```bash
+# Single node count override
+carts benchmarks run polybench/gemm --size medium --threads 4 --nodes 2
+
+# Node sweep (tests default threads at each node count)
+carts benchmarks run polybench/gemm --nodes 1,2,4
+
+# 2D sweep: thread x node (4 configs: 1t_1n, 2t_1n, 1t_2n, 2t_2n)
+carts benchmarks run polybench/gemm --threads 1,2 --nodes 1,2
 ```
 
 ### Multiple Runs for Statistics
 
 ```bash
 # Run 5 times per configuration for statistical significance
-carts benchmarks run polybench/gemm --size medium --threads 4 --runs 5 \
-    -o results/gemm_stats.json
+carts benchmarks run polybench/gemm --size medium --threads 4 --runs 5
 
 # Thread sweep with multiple runs
-carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --runs 3 \
-    -o results/gemm_sweep_stats.json
+carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --runs 3
 ```
 
 ### Debug and Counters
@@ -136,14 +146,11 @@ carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --runs 3 \
 # Debug level 1: show commands being executed
 carts benchmarks run polybench/gemm --size small --threads 2 --debug=1
 
-# Debug level 2: write full output to log files
+# Debug level 2: verbose console output (logs are always captured)
 carts benchmarks run polybench/gemm --size small --threads 2 --debug=2
-# Check logs at: polybench/gemm/logs/arts.log and polybench/gemm/logs/omp.log
 
-# Enable ARTS counters (requires ARTS built with --counters=1)
-carts benchmarks run polybench/gemm --size medium --threads 4 \
-    --counters=1 --counter-dir results/counters/gemm_4t \
-    -o results/gemm_4t.json
+# Collect ARTS counters (requires ARTS built with counters enabled)
+carts benchmarks run polybench/gemm --size medium --threads 4 --counters=1
 ```
 
 ### Custom Problem Sizes
@@ -151,8 +158,7 @@ carts benchmarks run polybench/gemm --size medium --threads 4 \
 ```bash
 # Override problem dimensions with CFLAGS
 carts benchmarks run polybench/gemm --threads 8 \
-    --cflags "-DNI=1024 -DNJ=1024 -DNK=1024" \
-    -o results/gemm_1024.json
+    --cflags "-DNI=1024 -DNJ=1024 -DNK=1024"
 ```
 
 ### Suite-wide Execution
@@ -161,8 +167,8 @@ carts benchmarks run polybench/gemm --threads 8 \
 # Run all PolyBench benchmarks
 carts benchmarks run --suite polybench --size medium --threads 8
 
-# Run all benchmarks with JSON export
-carts benchmarks run --size small --threads 2 -o results/all_benchmarks.json
+# Run all benchmarks
+carts benchmarks run --size small --threads 2
 ```
 
 ### Different OpenMP Thread Counts
@@ -170,13 +176,12 @@ carts benchmarks run --size small --threads 2 -o results/all_benchmarks.json
 ```bash
 # Compare ARTS at 4 threads vs OpenMP at 8 threads
 carts benchmarks run polybench/gemm --size medium \
-    --threads 4 --omp-threads 8 \
-    -o results/comparison.json
+    --threads 4 --omp-threads 8
 ```
 
 ## JSON Output Structure
 
-When using `--output`, results are exported as JSON with the following structure:
+Every run produces a `results.json` inside the experiment directory with the following structure:
 
 ```json
 {
@@ -279,10 +284,10 @@ The runner displays the effective ARTS configuration before execution:
 
 ```bash
 # Override launcher and node count
-carts benchmarks run polybench/gemm --launcher slurm --node-count 4
+carts benchmarks run polybench/gemm --launcher slurm --nodes 4
 
 # Override thread count and launcher
-carts benchmarks run polybench/gemm --threads 32 --launcher ssh --node-count 2
+carts benchmarks run polybench/gemm --threads 32 --launcher ssh --nodes 2
 
 # Override OpenMP thread count separately
 carts benchmarks run polybench/gemm --threads 16 --omp-threads 8
@@ -304,7 +309,7 @@ carts benchmarks run polybench/gemm --arts-config multi.cfg
 | Parameter | CLI Option | Description |
 |-----------|------------|-------------|
 | `launcher` | `--launcher` | Job launcher (ssh, slurm, lsf) |
-| `nodeCount` | `--node-count`, `-n` | Number of compute nodes |
+| `nodeCount` | `--nodes`, `-n` | Number of compute nodes (supports sweep) |
 | `threads` | `--threads` | ARTS worker threads per node |
 | `omp-threads` | `--omp-threads` | OpenMP threads (separate from ARTS threads) |
 
@@ -316,7 +321,6 @@ Command-line options take precedence over any configuration file settings.
 |-------|-------------|
 | `metadata.runs_per_config` | Number of times each configuration was run |
 | `metadata.thread_sweep` | List of thread counts tested |
-| `metadata.artifacts_directory` | "." (artifacts are in same folder as JSON) |
 | `summary.total_configs` | Number of unique (benchmark, threads, nodes) configurations |
 | `summary.total_runs` | Total number of benchmark executions |
 | `summary.statistics` | Per-config statistics (only when `--runs > 1`) |
@@ -324,122 +328,78 @@ Command-line options take precedence over any configuration file settings.
 | `results[].run_number` | Which iteration this is (1-N) |
 | `results[].timing.speedup` | OMP kernel time / ARTS kernel time (>1 = ARTS faster) |
 
-## Experiment Organization
+## Experiment Output
 
-When using `--output`, results are placed in a self-contained timestamped experiment directory. The `-o` argument specifies the **base name** (without `.json` extension).
+Every `carts benchmarks run` invocation creates a self-contained timestamped
+experiment directory under `carts-benchmarks/results/`:
 
-### Basic Usage
+### Directory Structure
+
+```
+results/{YYYYMMDD_HHMMSS}/
+├── manifest.json                        # Structure index + quick summary
+├── results.json                         # Full results data
+└── polybench/gemm/                      # Per-benchmark
+    └── 4t_1n/                           # Per-config (threads x nodes)
+        ├── artifacts/                   # Build outputs (shared across runs)
+        │   ├── arts.cfg
+        │   ├── .carts-metadata.json
+        │   ├── gemm_arts_metadata.mlir
+        │   ├── gemm.mlir
+        │   ├── gemm-arts.ll
+        │   ├── gemm_arts, gemm_omp
+        │   └── build_arts.log, build_omp.log
+        ├── run_1/                       # Per-run outputs
+        │   ├── arts.log                 # ARTS stdout+stderr (always captured)
+        │   ├── omp.log                  # OpenMP stdout+stderr
+        │   ├── counters/                # If counters enabled
+        │   │   └── cluster.json
+        │   └── perf/                    # If --perf enabled
+        │       ├── arts_cache.csv
+        │       └── omp_cache.csv
+        └── run_2/                       # If --runs > 1
+            └── ...
+```
+
+### Key Properties
+
+1. **Self-contained**: Everything in one directory — portable, easy to share/archive.
+
+2. **Always captured**: stdout/stderr saved to `arts.log`/`omp.log` in every run (no `--debug` required).
+
+3. **Manifest**: `manifest.json` describes the layout for analysis tools. All paths are relative to the experiment directory, so the folder can be moved or tarred.
+
+4. **Timestamped**: Each run creates a unique `{YYYYMMDD_HHMMSS}/` directory, so multiple runs never overwrite each other.
+
+5. **Build vs Run artifacts**: Each unique config (`{threads}t_{nodes}n/`) has its own build artifacts in `artifacts/` that are shared across multiple runs.
+
+6. **Compiler metadata**: `.carts-metadata.json` contains loop and memory reference analysis from the CARTS compiler.
+
+### Custom Results Directory
 
 ```bash
+# Override the default results location
 carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 \
-    -o results/gemm_scaling
+    --results-dir results/scaling
 ```
-
-Creates:
-```
-results/gemm_scaling_20251214_182205/       # Self-contained experiment folder
-├── gemm_scaling.json                       # Results JSON (inside folder)
-└── polybench/gemm/build/                   # Build artifacts
-    ├── 1t_1n/
-    ├── 2t_1n/
-    ├── 4t_1n/
-    └── 8t_1n/
-```
-
-### Running Multiple Experiments
-
-Organize experiments under a common parent directory:
-
-```bash
-# All experiments go under results/single_rank/
-carts benchmarks run --size small --threads 2 -o results/single_rank/correctness_2t
-carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 -o results/single_rank/gemm_strong
-carts benchmarks run polybench/jacobi2d --size medium --threads 1,2,4,8 -o results/single_rank/jacobi_strong
-```
-
-Result:
-```
-results/single_rank/
-├── correctness_2t_20251214_183000/
-│   ├── correctness_2t.json
-│   └── polybench/...
-├── gemm_strong_20251214_183100/
-│   ├── gemm_strong.json
-│   └── polybench/gemm/build/...
-└── jacobi_strong_20251214_183200/
-    ├── jacobi_strong.json
-    └── polybench/jacobi2d/build/...
-```
-
-### Full Directory Structure
-
-Each experiment folder contains both results and artifacts:
-
-```
-results/gemm_scaling_20251214_182205/
-├── gemm_scaling.json                       # Results JSON
-└── polybench/                              # Suite folder
-    └── gemm/                               # Benchmark folder
-        └── build/                          # All builds for this benchmark
-            ├── 2t_1n/                      # Config: 2 threads, 1 node
-            │   ├── arts.cfg                # Build configuration (INPUT)
-            │   ├── artifacts/              # Build outputs
-            │   │   ├── .carts-metadata.json    # Compiler analysis
-            │   │   ├── gemm_arts_metadata.mlir # MLIR with metadata
-            │   │   ├── gemm.mlir               # Parallel MLIR
-            │   │   ├── gemm-arts.ll            # LLVM IR
-            │   │   ├── gemm_arts               # ARTS executable
-            │   │   ├── gemm_omp                # OpenMP executable
-            │   │   ├── build_arts.log          # ARTS build log
-            │   │   └── build_openmp.log        # OpenMP build log
-            │   └── runs/                   # Execution outputs
-            │       ├── 1/                  # First run
-            │       │   ├── arts.log        # ARTS runtime output
-            │       │   ├── omp.log         # OpenMP runtime output
-            │       │   └── counters/       # Counter files (if --counters)
-            │       ├── 2/                  # Second run
-            │       └── 3/                  # Third run
-            │
-            ├── 4t_1n/                      # Config: 4 threads, 1 node
-            │   ├── arts.cfg
-            │   ├── artifacts/
-            │   └── runs/
-            │
-            └── 8t_1n/                      # Config: 8 threads, 1 node
-                └── ...
-```
-
-### Key Concepts
-
-1. **Self-contained experiments**: Each experiment folder contains both the JSON results and all artifacts, making it portable and easy to share.
-
-2. **Timestamped directories**: Each experiment creates a unique timestamped folder (`{name}_{YYYYMMDD_HHMMSS}/`), so multiple runs don't overwrite each other.
-
-3. **Build vs Run artifacts**: Changing threads or nodes requires recompilation. Each unique config (`{threads}t_{nodes}n/`) has its own build artifacts that are shared across multiple runs.
-
-4. **Finding all results**: Use `find results/ -name "*.json"` to discover all experiment results.
-
-5. **Compiler metadata**: `.carts-metadata.json` contains loop and memory reference analysis from the CARTS compiler, useful for understanding parallelization decisions.
 
 ### CLI Output
-
-When export is enabled, the CLI shows the experiment folder:
 
 ```
 ✓ polybench/gemm [4 threads] PASS (speedup: 1.09x)
 
-Experiment folder: results/gemm_scaling_20251214_182205
-Results JSON:      results/gemm_scaling_20251214_182205/gemm_scaling.json
+Results: carts-benchmarks/results/20251214_182205
 ```
 
 ## Counter Files
 
-When using `--counters=1` with ARTS built with counter support, additional JSON files are generated:
+When ARTS is built with counter support, counter data is automatically saved
+inside each run directory:
 
 ```
-results/counters/gemm_4t/
-  n0_t0.json  # Thread 0 counter data
-  n0_t1.json  # Thread 1 counter data
+run_1/counters/
+  cluster.json    # Cluster-wide counter data (init time, e2e time)
+  n0_t0.json      # Per-thread counter data
   ...
 ```
 
@@ -454,21 +414,18 @@ carts build --arts --counters=1  # Level 1: ArtsID metrics
 carts build --arts --counters=2  # Level 2: Deep captures
 ```
 
-## Debug Log Files
+## Log Files
 
-When running with `--debug=2`, log files are written to the benchmark's logs directory:
+stdout and stderr from every benchmark execution are automatically saved:
 
 ```
-polybench/gemm/logs/
-  build_arts.log      # ARTS build output
-  build_openmp.log    # OpenMP build output
-  arts_2t.log         # ARTS runtime output (2 threads)
-  arts_4t.log         # ARTS runtime output (4 threads)
-  arts_4t_r1.log      # ARTS runtime output (4 threads, run 1 when using --runs)
-  arts_4t_r2.log      # ARTS runtime output (4 threads, run 2)
-  omp_2t.log          # OpenMP runtime output
-  ...
+run_1/
+  arts.log     # ARTS runtime output (always captured)
+  omp.log      # OpenMP runtime output (always captured)
 ```
+
+Use `--debug=1` to show executed commands in the console.
+Use `--debug=2` for verbose console output during execution.
 
 ## Exit Codes
 

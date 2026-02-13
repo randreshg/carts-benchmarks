@@ -29,7 +29,7 @@ Walk through these steps to understand how CARTS transforms matrix multiplicatio
 
    ```bash
    carts cgeist 2mm.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> 2mm_seq.mlir
-   carts run 2mm_seq.mlir --collect-metadata &> 2mm_arts_metadata.mlir
+   carts compile 2mm_seq.mlir --collect-metadata &> 2mm_arts_metadata.mlir
    carts cgeist 2mm.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> 2mm.mlir
    ```
 
@@ -81,7 +81,7 @@ static void kernel_2mm(int ni, int nj, int nk, int nl,
 
 **Command:**
 ```bash
-carts run 2mm.mlir --create-dbs &> 2mm_create-dbs.mlir
+carts compile 2mm.mlir --create-dbs &> 2mm_create-dbs.mlir
 ```
 
 At this stage, all arrays start with `<coarse>` partition mode:
@@ -120,7 +120,7 @@ At this stage, all arrays start with `<coarse>` partition mode:
 
 **Command:**
 ```bash
-carts run 2mm.mlir --concurrency-opt &> 2mm_concurrency-opt.mlir
+carts compile 2mm.mlir --concurrency-opt &> 2mm_concurrency-opt.mlir
 ```
 
 DbPartitioning analyzes memory access patterns and makes partitioning decisions:
@@ -229,7 +229,7 @@ partitioning(<block>, offsets[%38], sizes[%c8])
 
 **Command:**
 ```bash
-carts run 2mm.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "(Decision|mode|canBlock|Partition|coarse|re-analyzing|Plan)"
+carts compile 2mm.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "(Decision|mode|canBlock|Partition|coarse|re-analyzing|Plan)"
 ```
 
 ### For Partitionable Arrays (tmp, A, D)
@@ -292,7 +292,7 @@ carts benchmarks run polybench/2mm
 
 **Quick execution check:**
 ```bash
-carts execute 2mm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+carts compile 2mm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
 ./2mm_arts
 ```
 
@@ -302,17 +302,17 @@ carts execute 2mm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
 
 1. **Check partition modes:**
    ```bash
-   carts run 2mm.mlir --concurrency-opt | grep -E "db_alloc.*block|db_alloc.*coarse"
+   carts compile 2mm.mlir --concurrency-opt | grep -E "db_alloc.*block|db_alloc.*coarse"
    ```
    Should show `<block>` for tmp, A, D and `<coarse>` for B, C.
 
 2. **Verify block sizes:**
    ```bash
-   carts run 2mm.mlir --concurrency-opt | grep "elementSizes"
+   carts compile 2mm.mlir --concurrency-opt | grep "elementSizes"
    ```
    Block arrays should have reduced first dimension (e.g., 8 instead of full size).
 
 3. **Debug partitioning decisions:**
    ```bash
-   carts run 2mm.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "canBlock|Decision"
+   carts compile 2mm.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "canBlock|Decision"
    ```

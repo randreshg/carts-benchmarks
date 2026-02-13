@@ -55,7 +55,6 @@ import slurm_batch
 # Constants
 # ============================================================================
 
-VERSION = "0.1.0"
 DEFAULT_TIMEOUT = 60
 DEFAULT_SIZE = "small"
 DEFAULT_TOLERANCE = 1e-2  # 1% tolerance for FP operation ordering differences
@@ -89,19 +88,11 @@ def filter_benchmark_output(output: str) -> str:
     """
     if not output:
         return ""
-    lines = []
-    for line in output.splitlines():
-        # Keep lines that match benchmark output patterns
-        if (line.startswith("kernel.") or
-            line.startswith("e2e.") or
-            line.startswith("init.") or
-            line.startswith("parallel.") or
-            line.startswith("task.") or
-            line.startswith("checksum:") or
-            line.startswith("tmp_checksum:") or
-                "checksum:" in line.lower()):
-            lines.append(line)
-    return "\n".join(lines)
+    prefixes = ("kernel.", "e2e.", "init.", "parallel.", "task.", "checksum:", "tmp_checksum:")
+    return "\n".join(
+        line for line in output.splitlines()
+        if line.startswith(prefixes) or "checksum:" in line.lower()
+    )
 
 
 def parse_counter_json(counter_dir: Path) -> Tuple[Optional[float], Optional[float]]:
@@ -752,161 +743,224 @@ def get_arts_cfg_nodes(path: Optional[Path]) -> List[str]:
     return [n.strip() for n in nodes_str.split(",") if n.strip()]
 
 
+
+
+
+
 # ============================================================================
-# Artifact Directory Management
+# Artifact Manager
 # ============================================================================
 
 
-def create_experiment_dir(output_base: Path) -> Tuple[Path, Path]:
-    """Create timestamped experiment directory with JSON inside.
+class ArtifactManager:
+    """Manages a self-contained artifact directory for a benchmark experiment.
 
-    This creates a self-contained experiment directory where both the
-    JSON results and all build/run artifacts are stored together.
+    Every execution produces a single timestamped directory with all artifacts,
+    logs, and a manifest.  Both ``run`` and ``slurm-run`` share the same
+    canonical layout:
 
-    Args:
-        output_base: Base path for the experiment (e.g., results/single_rank/foo).
-                     The .json extension is optional and will be stripped.
-
-    Returns:
-        Tuple of (experiment_dir, json_path):
-        - experiment_dir: results/single_rank/foo_20251214_143052/
-        - json_path: results/single_rank/foo_20251214_143052/foo.json
-
-    Example:
-        >>> create_experiment_dir(Path("results/single_rank/foo"))
-        (Path("results/single_rank/foo_20251214_143052/"),
-         Path("results/single_rank/foo_20251214_143052/foo.json"))
-
-        >>> create_experiment_dir(Path("results/foo.json"))
-        (Path("results/foo_20251214_143052/"),
-         Path("results/foo_20251214_143052/foo.json"))
+        {base_results_dir}/{timestamp}/
+          manifest.json
+          results.json
+          {benchmark_name}/
+            {threads}t_{nodes}n/
+              artifacts/          # build outputs (shared across runs)
+              run_1/              # per-run outputs
+                arts.log
+                omp.log
+                counters/         # if counters enabled
+                perf/             # if perf enabled
+              run_2/
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Strip .json extension if provided
-    name = output_base.stem  # "foo" from "foo.json" or "foo"
-    parent = output_base.parent  # "results/single_rank"
 
-    experiment_dir = parent / f"{name}_{timestamp}"
-    experiment_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, base_results_dir: Path, timestamp: str):
+        self.experiment_dir = base_results_dir / timestamp
+        self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        self.results_json_path = self.experiment_dir / "results.json"
+        self.manifest_path = self.experiment_dir / "manifest.json"
+        self._manifest_benchmarks: Dict[str, Dict] = {}
 
-    json_path = experiment_dir / f"{name}.json"
+    # -- directory getters (create on first access) --------------------------
 
-    return experiment_dir, json_path
+    def get_config_dir(self, benchmark_name: str, config: BenchmarkConfig) -> Path:
+        config_label = f"{config.arts_threads}t_{config.arts_nodes}n"
+        d = self.experiment_dir / benchmark_name / config_label
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
+    def get_artifacts_dir(self, benchmark_name: str, config: BenchmarkConfig) -> Path:
+        d = self.get_config_dir(benchmark_name, config) / "artifacts"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-def create_config_directory(
-    artifacts_base_dir: Path,
-    benchmark_name: str,
-    config: BenchmarkConfig,
-) -> Tuple[Path, Path, Path]:
-    """Create config directory structure.
+    def get_run_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
+        d = self.get_config_dir(benchmark_name, config) / f"run_{run_number}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-    Returns:
-        Tuple of (config_dir, artifacts_dir, runs_dir)
+    def get_counter_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
+        d = self.get_run_dir(benchmark_name, config, run_number) / "counters"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-    Creates:
-        {artifacts_base_dir}/{benchmark_name}/build/{threads}t_{nodes}n/
-        {artifacts_base_dir}/{benchmark_name}/build/{threads}t_{nodes}n/artifacts/
-        {artifacts_base_dir}/{benchmark_name}/build/{threads}t_{nodes}n/runs/
-    """
-    config_dir = artifacts_base_dir / benchmark_name / \
-        "build" / f"{config.arts_threads}t_{config.arts_nodes}n"
-    artifacts_dir = config_dir / "artifacts"
-    runs_dir = config_dir / "runs"
+    def get_perf_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
+        d = self.get_run_dir(benchmark_name, config, run_number) / "perf"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-    config_dir.mkdir(parents=True, exist_ok=True)
-    artifacts_dir.mkdir(exist_ok=True)
-    runs_dir.mkdir(exist_ok=True)
+    # -- artifact operations -------------------------------------------------
 
-    return config_dir, artifacts_dir, runs_dir
+    def copy_build_artifacts(
+        self,
+        bench_path: Path,
+        benchmark_name: str,
+        config: BenchmarkConfig,
+        arts_cfg_used: Optional[Path] = None,
+    ) -> Dict[str, Optional[str]]:
+        """Copy build artifacts into the experiment's ``artifacts/`` directory."""
+        artifacts_dir = self.get_artifacts_dir(benchmark_name, config)
+        paths: Dict[str, Optional[str]] = {}
 
+        # arts.cfg (build INPUT)
+        cfg_src = (
+            arts_cfg_used if arts_cfg_used and arts_cfg_used.exists()
+            else (bench_path / "arts.cfg")
+        )
+        if cfg_src.exists():
+            dest = artifacts_dir / "arts.cfg"
+            shutil.copy2(cfg_src, dest)
+            paths["arts_config"] = str(dest)
 
-def create_run_directory(runs_dir: Path, run_number: int) -> Path:
-    """Create numbered run directory.
+        # .carts-metadata.json (compiler metadata)
+        metadata = bench_path / ".carts-metadata.json"
+        if metadata.exists():
+            dest = artifacts_dir / ".carts-metadata.json"
+            shutil.copy2(metadata, dest)
+            paths["carts_metadata"] = str(dest)
 
-    Example: {runs_dir}/1/, {runs_dir}/2/, etc.
-    """
-    run_dir = runs_dir / str(run_number)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+        # *_arts_metadata.mlir
+        for mlir in bench_path.glob("*_arts_metadata.mlir"):
+            dest = artifacts_dir / mlir.name
+            shutil.copy2(mlir, dest)
+            paths["arts_metadata_mlir"] = str(dest)
 
+        # Other MLIR files
+        for mlir in bench_path.glob("*.mlir"):
+            if "_metadata" not in mlir.name:
+                shutil.copy2(mlir, artifacts_dir / mlir.name)
 
-def copy_build_artifacts(
-    bench_path: Path,
-    config_dir: Path,
-    artifacts_dir: Path,
-    *,
-    arts_cfg_used: Optional[Path] = None,
-) -> Dict[str, Optional[str]]:
-    """Copy build artifacts to results directory.
+        # LLVM IR
+        for ll in bench_path.glob("*-arts.ll"):
+            shutil.copy2(ll, artifacts_dir / ll.name)
 
-    Copies:
-    - arts.cfg (used) -> config_dir/ (build INPUT)
-    - .carts-metadata.json -> artifacts_dir/ (compiler metadata)
-    - *_arts_metadata.mlir -> artifacts_dir/ (MLIR with metadata)
-    - *.mlir -> artifacts_dir/ (other MLIR files)
-    - *-arts.ll -> artifacts_dir/ (LLVM IR)
-    - *_arts, *_omp -> artifacts_dir/ (executables)
-    - logs/build_*.log -> artifacts_dir/ (build logs)
+        # Executables
+        for exe in bench_path.glob("*_arts"):
+            if exe.is_file():
+                dest = artifacts_dir / exe.name
+                shutil.copy2(exe, dest)
+                paths["executable_arts"] = str(dest)
+        for exe in list(bench_path.glob("*_omp")) + list(
+            (bench_path / "build").glob("*_omp")
+        ):
+            if exe.is_file():
+                dest = artifacts_dir / exe.name
+                shutil.copy2(exe, dest)
+                paths["executable_omp"] = str(dest)
 
-    Returns:
-        Dict with paths to key artifacts in the results directory.
-    """
-    paths: Dict[str, Optional[str]] = {}
+        # Build logs
+        logs_dir = bench_path / "logs"
+        if logs_dir.exists():
+            for log in ["build_arts.log", "build_openmp.log"]:
+                log_file = logs_dir / log
+                if log_file.exists():
+                    shutil.copy2(log_file, artifacts_dir / log)
 
-    # Copy arts.cfg to config root (it's the build INPUT).
-    # Prefer the effective config actually used for this build/run.
-    cfg_src = arts_cfg_used if arts_cfg_used and arts_cfg_used.exists() else (
-        bench_path / "arts.cfg")
-    if cfg_src.exists():
-        dest = config_dir / "arts.cfg"
-        shutil.copy2(cfg_src, dest)
-        paths["arts_config"] = str(dest)
+        return paths
 
-    # Copy compiler metadata to artifacts/
-    metadata = bench_path / ".carts-metadata.json"
-    if metadata.exists():
-        dest = artifacts_dir / ".carts-metadata.json"
-        shutil.copy2(metadata, dest)
-        paths["carts_metadata"] = str(dest)
+    def record_run(
+        self,
+        benchmark_name: str,
+        config: BenchmarkConfig,
+        run_number: int,
+        has_counters: bool = False,
+        has_perf: bool = False,
+    ):
+        """Track a completed run for the manifest."""
+        config_label = f"{config.arts_threads}t_{config.arts_nodes}n"
+        if benchmark_name not in self._manifest_benchmarks:
+            self._manifest_benchmarks[benchmark_name] = {"configs": {}}
+        configs = self._manifest_benchmarks[benchmark_name]["configs"]
+        if config_label not in configs:
+            configs[config_label] = {
+                "artifacts": str(Path(benchmark_name) / config_label / "artifacts"),
+                "runs": {},
+            }
+        configs[config_label]["runs"][str(run_number)] = {
+            "path": str(Path(benchmark_name) / config_label / f"run_{run_number}"),
+            "has_counters": has_counters,
+            "has_perf": has_perf,
+        }
 
-    # Copy *_arts_metadata.mlir to artifacts/
-    for mlir in bench_path.glob("*_arts_metadata.mlir"):
-        dest = artifacts_dir / mlir.name
-        shutil.copy2(mlir, dest)
-        paths["arts_metadata_mlir"] = str(dest)
+    def write_manifest(
+        self,
+        results: List[BenchmarkResult],
+        command: str,
+        total_duration: float,
+    ) -> Path:
+        """Write ``manifest.json`` — a structure index and quick summary."""
+        import math
+        from collections import Counter as _Counter
 
-    # Copy other MLIR files to artifacts/
-    for mlir in bench_path.glob("*.mlir"):
-        if "_metadata" not in mlir.name:
-            shutil.copy2(mlir, artifacts_dir / mlir.name)
+        passed = sum(
+            1 for r in results
+            if r.run_arts.status == Status.PASS and r.verification.correct
+        )
+        failed = sum(
+            1 for r in results
+            if r.run_arts.status in (Status.FAIL, Status.CRASH)
+        )
+        total_benchmarks = len(set(r.name for r in results))
+        total_configs = len(
+            set((r.name, r.config.arts_threads, r.config.arts_nodes) for r in results)
+        )
+        config_counts = _Counter(
+            (r.name, r.config.arts_threads, r.config.arts_nodes) for r in results
+        )
+        runs_per_config = max(config_counts.values()) if config_counts else 1
+        speedups = [r.timing.speedup for r in results if r.timing.speedup > 0]
+        geomean = (
+            math.exp(sum(math.log(s) for s in speedups) / len(speedups))
+            if speedups else 0.0
+        )
 
-    # Copy LLVM IR to artifacts/
-    for ll in bench_path.glob("*-arts.ll"):
-        shutil.copy2(ll, artifacts_dir / ll.name)
+        carts_dir = get_carts_dir()
+        benchmarks_dir = get_benchmarks_dir()
+        repro = get_reproducibility_metadata(carts_dir, benchmarks_dir)
 
-    # Copy executables to artifacts/
-    for exe in bench_path.glob("*_arts"):
-        if exe.is_file():
-            dest = artifacts_dir / exe.name
-            shutil.copy2(exe, dest)
-            paths["executable_arts"] = str(dest)
-    # OpenMP reference binaries usually live under build/ (common/carts.mk).
-    for exe in list(bench_path.glob("*_omp")) + list((bench_path / "build").glob("*_omp")):
-        if exe.is_file():
-            dest = artifacts_dir / exe.name
-            shutil.copy2(exe, dest)
-            paths["executable_omp"] = str(dest)
+        manifest = {
+            "version": 1,
+            "created": datetime.now().isoformat(),
+            "command": command,
+            "layout": {
+                "results_json": "results.json",
+                "benchmarks": self._manifest_benchmarks,
+            },
+            "summary": {
+                "total_benchmarks": total_benchmarks,
+                "total_configs": total_configs,
+                "runs_per_config": runs_per_config,
+                "passed": passed,
+                "failed": failed,
+                "geometric_mean_speedup": round(geomean, 4),
+                "total_duration_sec": round(total_duration, 1),
+            },
+            "reproducibility": repro,
+        }
 
-    # Copy build logs to artifacts/
-    logs_dir = bench_path / "logs"
-    if logs_dir.exists():
-        for log in ["build_arts.log", "build_openmp.log"]:
-            log_file = logs_dir / log
-            if log_file.exists():
-                shutil.copy2(log_file, artifacts_dir / log)
+        with open(self.manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=str)
 
-    return paths
+        return self.manifest_path
 
 
 # ============================================================================
@@ -925,6 +979,7 @@ class BenchmarkRunner:
         trace: bool = False,
         clean: bool = True,
         debug: int = 0,
+        artifact_manager: Optional[ArtifactManager] = None,
     ):
         self.console = console
         self.verbose = verbose
@@ -932,6 +987,7 @@ class BenchmarkRunner:
         self.trace = trace
         self.clean = clean
         self.debug = debug
+        self.artifact_manager = artifact_manager
         self.carts_dir = get_carts_dir()
         self.benchmarks_dir = get_benchmarks_dir()
         self.results: List[BenchmarkResult] = []
@@ -1253,39 +1309,31 @@ class BenchmarkRunner:
         self,
         name: str,
         size: str,
-        threads_list: List[int],
+        threads_list: List[Optional[int]],
         base_config: Optional[Path],
         cflags: str = "",
         counter_dir: Optional[Path] = None,
         timeout: int = DEFAULT_TIMEOUT,
         omp_threads: Optional[int] = None,
         launcher: Optional[str] = None,
-        nodes: Optional[int] = None,
+        node_counts: Optional[List[Optional[int]]] = None,
         weak_scaling: bool = False,
         base_size: Optional[int] = None,
         runs: int = 1,
-        output_path: Optional[Path] = None,
         arts_exec_args: Optional[str] = None,
-    ) -> Tuple[List[BenchmarkResult], Optional[Path], Optional[Path]]:
+        perf_enabled: bool = False,
+        perf_interval: float = 0.1,
+    ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
-        Args:
-            omp_threads: If specified, use this fixed thread count for OpenMP
-                        instead of matching ARTS thread count. Useful for
-                        comparing ARTS scaling against OpenMP at its optimal.
-            launcher: Optional override for launcher (default: from arts.cfg).
-                      For Slurm, this controls how the executable is invoked (via srun).
-            nodes: Optional override for nodeCount (default: from arts.cfg).
-            weak_scaling: If True, scale problem size with parallelism.
-            base_size: Base problem size for weak scaling.
-            runs: Number of times to run each configuration.
-            output_path: If specified, create experiment directory for reproducibility.
+        Directory management is delegated to ``self.artifact_manager`` when
+        present.  Logs are always captured into the run directory.
 
         Returns:
-            Tuple of (results, experiment_dir, json_path). Both paths are None if
-            output_path was not specified.
+            List of BenchmarkResult objects.
         """
         results = []
+        am = self.artifact_manager  # shorthand (may be None)
 
         # Clean benchmark directory to avoid stale artifacts
         if self.clean:
@@ -1295,10 +1343,7 @@ class BenchmarkRunner:
         run_args = self.get_run_args(bench_path, size)
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
-        # Determine effective config template:
-        # 1. Use explicitly provided base_config
-        # 2. Fall back to benchmark's own arts.cfg
-        # 3. Fall back to default carts-benchmarks config
+        # Determine effective config template
         effective_config = base_config
         if effective_config is None:
             candidate = bench_path / "arts.cfg"
@@ -1308,228 +1353,228 @@ class BenchmarkRunner:
                 effective_config = DEFAULT_ARTS_CONFIG
 
         base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
+        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
         base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
-        desired_nodes = nodes if nodes is not None else base_nodes
         desired_launcher = launcher if launcher is not None else base_launcher
 
-        # Skip benchmarks disabled for multi-node when running with nodeCount > 1
-        if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
-            skip_config = BenchmarkConfig(
-                arts_threads=threads_list[0] if threads_list else 1,
-                arts_nodes=desired_nodes,
-                omp_threads=threads_list[0] if threads_list else 1,
-                launcher=desired_launcher,
-            )
-            return [self._make_skip_result(
-                name, size,
-                "Benchmark disabled for multi-node (has .disable-multinode marker)",
-                skip_config
-            )], None, None
+        effective_node_counts = [n if n is not None else base_nodes
+                                 for n in node_counts] if node_counts else [base_nodes]
 
-        # Create timestamped experiment directory ONCE per experiment
-        # Both JSON results and artifacts will be stored together
-        experiment_dir = None
-        json_path = None
-        if output_path:
-            experiment_dir, json_path = create_experiment_dir(output_path)
-
-        for threads in threads_list:
-            # Generate arts.cfg with thread count, launcher, and node count
-            # Pass nodes (CLI override) instead of desired_nodes to avoid unnecessary nodes= modification
-            arts_cfg = generate_arts_config(
-                effective_config, threads, counter_dir, desired_launcher, nodes
-            )
-
-            # Compute effective cflags (may include weak scaling size overrides)
-            effective_cflags = cflags
-            if weak_scaling and base_size:
-                # Note: complexity is determined inside get_weak_scaling_cflags
-                # based on BENCHMARK_SIZE_PARAMS lookup
-                weak_cflags = get_weak_scaling_cflags(
-                    name, base_size, threads, desired_nodes, base_parallelism=1
+        for desired_nodes in effective_node_counts:
+            # Skip benchmarks disabled for multi-node
+            if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
+                first_threads = threads_list[0] if threads_list[0] is not None else base_threads
+                skip_config = BenchmarkConfig(
+                    arts_threads=first_threads,
+                    arts_nodes=desired_nodes,
+                    omp_threads=first_threads,
+                    launcher=desired_launcher,
                 )
-                if weak_cflags:
-                    effective_cflags = f"{cflags} {weak_cflags}".strip()
+                results.append(self._make_skip_result(
+                    name, size,
+                    "Benchmark disabled for multi-node (has .disable-multinode marker)",
+                    skip_config
+                ))
+                continue
 
-            # Set OMP_NUM_THREADS for OpenMP variant
-            # Use omp_threads if specified, otherwise match ARTS threads
-            actual_omp_threads = omp_threads if omp_threads else threads
-            env = {"OMP_NUM_THREADS": str(actual_omp_threads)}
-            if "OMP_WAIT_POLICY" not in os.environ:
-                env["OMP_WAIT_POLICY"] = "ACTIVE"
-            if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
-                env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
-
-            # Build both variants ONCE per thread config (with potentially different cflags per thread count)
-            build_arts = self.build_benchmark(
-                name, size, "arts", arts_cfg, effective_cflags, arts_exec_args)
-            build_omp = self.build_benchmark(
-                name, size, "openmp", None, effective_cflags)
-
-            # Create config object
-            config = BenchmarkConfig(
-                arts_threads=threads,
-                arts_nodes=desired_nodes,
-                omp_threads=actual_omp_threads,
-                launcher=desired_launcher,
-            )
-
-            # Create artifact directories if output specified (ONCE per config)
-            config_dir = result_artifacts_dir = runs_dir = None
-            artifact_paths: Dict[str, Optional[str]] = {}
-            if experiment_dir:
-                config_dir, result_artifacts_dir, runs_dir = create_config_directory(
-                    experiment_dir, name, config
-                )
-                # Copy build artifacts ONCE per config
-                artifact_paths = copy_build_artifacts(
-                    bench_path, config_dir, result_artifacts_dir, arts_cfg_used=arts_cfg)
-
-            # Run multiple times per configuration
-            for run_num in range(1, runs + 1):
-                # Create run directory if output specified
-                run_dir = None
-                arts_log_path: Optional[str] = None
-                omp_log_path: Optional[str] = None
-
-                if runs_dir:
-                    run_dir = create_run_directory(runs_dir, run_num)
-                    # Logs go to run directory
-                    arts_log = run_dir / "arts.log"
-                    omp_log = run_dir / "omp.log"
-                    arts_log_path = str(arts_log)
-                    omp_log_path = str(omp_log)
-                elif self.debug >= 2:
-                    # Fallback to benchmark logs directory for debug mode without output
-                    logs_dir = bench_path / "logs"
-                    run_suffix = f"_r{run_num}" if runs > 1 else ""
-                    arts_log = logs_dir / f"arts_{threads}t{run_suffix}.log"
-                    omp_log = logs_dir / f"omp_{threads}t{run_suffix}.log"
-                else:
-                    arts_log = None
-                    omp_log = None
-
-                # Run ARTS version - MUST pass artsConfig env var so runtime uses same config as compile
-                # ARTS reads config from: 1) artsConfig env var, 2) ./arts.cfg in CWD
-                # Without this, runtime may use wrong config (thread count mismatch)
-                if build_arts.status == Status.PASS and build_arts.executable:
-                    arts_env = dict(env)
-                    arts_env["artsConfig"] = str(arts_cfg)
-                    run_arts = self.run_benchmark(
-                        build_arts.executable,
-                        timeout,
-                        env=arts_env,
-                        launcher=desired_launcher,
-                        node_count=desired_nodes,
-                        threads=threads,
-                        args=run_args,
-                        log_file=arts_log,
-                    )
-                else:
-                    run_arts = RunResult(
-                        status=Status.SKIP,
-                        duration_sec=0.0,
-                        exit_code=-1,
-                        stdout="",
-                        stderr="Build failed",
-                    )
-
-                # Run OpenMP version (needs OMP_NUM_THREADS env var)
-                if build_omp.status == Status.PASS and build_omp.executable:
-                    run_omp = self.run_benchmark(
-                        build_omp.executable,
-                        timeout,
-                        env=env,
-                        args=run_args,
-                        log_file=omp_log,
-                    )
-                else:
-                    run_omp = RunResult(
-                        status=Status.SKIP,
-                        duration_sec=0.0,
-                        exit_code=-1,
-                        stdout="",
-                        stderr="Build failed",
-                    )
-
-                # Calculate timing
-                timing = self.calculate_timing(run_arts, run_omp)
-
-                # Verify correctness for all thread counts
-                verification = self.verify_correctness(
-                    run_arts, run_omp, tolerance=verify_tolerance
+            for threads_or_none in threads_list:
+                threads = threads_or_none if threads_or_none is not None else base_threads
+                actual_omp_threads = omp_threads if omp_threads else threads
+                config = BenchmarkConfig(
+                    arts_threads=threads,
+                    arts_nodes=desired_nodes,
+                    omp_threads=actual_omp_threads,
+                    launcher=desired_launcher,
                 )
 
-                # Collect artifacts from benchmark source directory
-                artifacts = self.collect_artifacts(bench_path)
+                # Counter directory: artifact_manager path or explicit --counter-dir
+                run_counter_dir: Optional[Path] = None
+                if am:
+                    # Always set counterFolder so counters land in place
+                    run_counter_dir = am.get_counter_dir(name, config, 1)
+                elif counter_dir is not None:
+                    run_counter_dir = counter_dir
 
-                # If output specified, update artifacts with paths in results directory
-                if experiment_dir and run_dir:
-                    # Update build artifacts from copied locations
-                    if artifact_paths.get("arts_config"):
-                        artifacts.arts_config = artifact_paths["arts_config"]
-                    if artifact_paths.get("carts_metadata"):
-                        artifacts.carts_metadata = artifact_paths["carts_metadata"]
-                    if artifact_paths.get("arts_metadata_mlir"):
-                        artifacts.arts_metadata_mlir = artifact_paths["arts_metadata_mlir"]
-                    if artifact_paths.get("executable_arts"):
-                        artifacts.executable_arts = artifact_paths["executable_arts"]
-                    if artifact_paths.get("executable_omp"):
-                        artifacts.executable_omp = artifact_paths["executable_omp"]
-                    if result_artifacts_dir:
-                        artifacts.build_dir = str(result_artifacts_dir)
+                # Generate arts.cfg with thread count, launcher, node count, counter dir
+                arts_cfg = generate_arts_config(
+                    effective_config, threads, run_counter_dir,
+                    desired_launcher, desired_nodes
+                )
 
-                    # Update run artifacts
-                    artifacts.run_dir = str(run_dir)
-                    artifacts.arts_log = arts_log_path
-                    artifacts.omp_log = omp_log_path
+                # Compute effective cflags (may include weak scaling size overrides)
+                effective_cflags = cflags
+                if weak_scaling and base_size:
+                    weak_cflags = get_weak_scaling_cflags(
+                        name, base_size, threads, desired_nodes, base_parallelism=1
+                    )
+                    if weak_cflags:
+                        effective_cflags = f"{cflags} {weak_cflags}".strip()
 
-                    # Handle counter files - check explicit counter_dir or ARTS default ./counter
-                    effective_counter_dir = None
-                    if counter_dir and counter_dir.exists():
-                        effective_counter_dir = counter_dir
-                    else:
-                        default_counter_dir = bench_path / "counters"
-                        if default_counter_dir.exists():
-                            effective_counter_dir = default_counter_dir
+                env = {"OMP_NUM_THREADS": str(actual_omp_threads)}
+                if "OMP_WAIT_POLICY" not in os.environ:
+                    env["OMP_WAIT_POLICY"] = "ACTIVE"
+                if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
+                    env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
 
-                    if effective_counter_dir and run_dir:
-                        run_counters_dir = run_dir / "counters"
-                        run_counters_dir.mkdir(exist_ok=True)
-                        for counter_file in effective_counter_dir.glob("*.json"):
-                            shutil.copy2(
-                                counter_file, run_counters_dir / counter_file.name)
-                        artifacts.counters_dir = str(run_counters_dir)
-                        artifacts.counter_files = sorted(
-                            str(f) for f in run_counters_dir.glob("*.json")
+                # Build ARTS variant
+                build_arts = self.build_benchmark(
+                    name, size, "arts", arts_cfg, effective_cflags, arts_exec_args)
+
+                # Build OpenMP variant (skip for multi-node)
+                if desired_nodes == 1:
+                    build_omp = self.build_benchmark(
+                        name, size, "openmp", None, effective_cflags)
+                else:
+                    build_omp = BuildResult(
+                        status=Status.SKIP, duration_sec=0.0,
+                        output="Skipped: OpenMP not applicable for multi-node",
+                        executable=None)
+
+                # Copy build artifacts ONCE per config (via artifact manager)
+                artifact_paths: Dict[str, Optional[str]] = {}
+                if am:
+                    artifact_paths = am.copy_build_artifacts(
+                        bench_path, name, config, arts_cfg_used=arts_cfg)
+
+                # Run multiple times per configuration
+                for run_num in range(1, runs + 1):
+                    arts_log: Optional[Path] = None
+                    omp_log: Optional[Path] = None
+
+                    if am:
+                        run_dir = am.get_run_dir(name, config, run_num)
+                        arts_log = run_dir / "arts.log"
+                        omp_log = run_dir / "omp.log"
+                        # Update counter dir for this specific run
+                        if run_num > 1:
+                            run_counter_dir = am.get_counter_dir(name, config, run_num)
+                            # Regenerate arts.cfg with updated counterFolder
+                            arts_cfg = generate_arts_config(
+                                effective_config, threads, run_counter_dir,
+                                desired_launcher, desired_nodes
+                            )
+                    elif self.debug >= 2:
+                        logs_dir = bench_path / "logs"
+                        run_suffix = f"_r{run_num}" if runs > 1 else ""
+                        arts_log = logs_dir / f"arts_{threads}t{run_suffix}.log"
+                        omp_log = logs_dir / f"omp_{threads}t{run_suffix}.log"
+
+                    # Perf setup
+                    arts_perf_name = omp_perf_name = None
+                    perf_output_dir: Optional[Path] = None
+                    if perf_enabled and am:
+                        perf_output_dir = am.get_perf_dir(name, config, run_num)
+                        arts_perf_name = "arts_cache.csv"
+                        omp_perf_name = "omp_cache.csv"
+
+                    # Run ARTS version
+                    if build_arts.status == Status.PASS and build_arts.executable:
+                        run_arts = self.run_benchmark(
+                            build_arts.executable,
+                            timeout,
+                            env=env,
+                            launcher=desired_launcher,
+                            node_count=desired_nodes,
+                            threads=threads,
+                            args=run_args,
+                            log_file=arts_log,
+                            perf_enabled=perf_enabled,
+                            perf_interval=perf_interval,
+                            perf_output_name=arts_perf_name or "perf_cache_arts.csv",
+                            perf_output_dir=perf_output_dir,
                         )
-                        # Parse counter JSON for timing data
-                        init_sec, e2e_sec = parse_counter_json(run_counters_dir)
-                        run_arts.counter_init_sec = init_sec
-                        run_arts.counter_e2e_sec = e2e_sec
+                    else:
+                        run_arts = RunResult(
+                            status=Status.SKIP, duration_sec=0.0,
+                            exit_code=-1, stdout="", stderr="Build failed",
+                        )
 
-                # Store with config and run number
-                result = BenchmarkResult(
-                    name=name,
-                    suite=name.split("/")[0] if "/" in name else "",
-                    size=size,
-                    config=config,
-                    run_number=run_num,
-                    build_arts=build_arts,
-                    build_omp=build_omp,
-                    run_arts=run_arts,
-                    run_omp=run_omp,
-                    timing=timing,
-                    verification=verification,
-                    artifacts=artifacts,
-                    timestamp=datetime.now().isoformat(),
-                    total_duration_sec=0.0,  # Will be calculated later
-                    size_params=self.get_size_params(bench_path, size),
-                )
+                    # Run OpenMP version
+                    if build_omp.status == Status.PASS and build_omp.executable:
+                        run_omp = self.run_benchmark(
+                            build_omp.executable,
+                            timeout,
+                            env=env,
+                            args=run_args,
+                            log_file=omp_log,
+                            perf_enabled=perf_enabled,
+                            perf_interval=perf_interval,
+                            perf_output_name=omp_perf_name or "perf_cache_omp.csv",
+                            perf_output_dir=perf_output_dir,
+                        )
+                    else:
+                        run_omp = RunResult(
+                            status=Status.SKIP, duration_sec=0.0,
+                            exit_code=-1, stdout="", stderr="Build failed",
+                        )
 
-                results.append(result)
+                    timing = self.calculate_timing(run_arts, run_omp)
+                    verification = self.verify_correctness(
+                        run_arts, run_omp, tolerance=verify_tolerance)
+                    artifacts = self.collect_artifacts(bench_path)
 
-        return results, experiment_dir, json_path
+                    # Update artifacts with paths inside experiment directory
+                    has_counters = False
+                    has_perf = False
+                    if am:
+                        run_dir = am.get_run_dir(name, config, run_num)
+                        artifacts_dir = am.get_artifacts_dir(name, config)
+
+                        # Build artifact paths
+                        for key, attr in [
+                            ("arts_config", "arts_config"),
+                            ("carts_metadata", "carts_metadata"),
+                            ("arts_metadata_mlir", "arts_metadata_mlir"),
+                            ("executable_arts", "executable_arts"),
+                            ("executable_omp", "executable_omp"),
+                        ]:
+                            if artifact_paths.get(key):
+                                setattr(artifacts, attr, artifact_paths[key])
+                        artifacts.build_dir = str(artifacts_dir)
+                        artifacts.run_dir = str(run_dir)
+                        artifacts.arts_log = str(arts_log) if arts_log else None
+                        artifacts.omp_log = str(omp_log) if omp_log else None
+
+                        # Counter files (already landed in place via counterFolder)
+                        counter_path = am.get_counter_dir(name, config, run_num)
+                        counter_files = sorted(counter_path.glob("*.json"))
+                        if counter_files:
+                            has_counters = True
+                            artifacts.counters_dir = str(counter_path)
+                            artifacts.counter_files = [str(f) for f in counter_files]
+                            init_sec, e2e_sec = parse_counter_json(counter_path)
+                            run_arts.counter_init_sec = init_sec
+                            run_arts.counter_e2e_sec = e2e_sec
+
+                        # Perf
+                        if perf_enabled and perf_output_dir and perf_output_dir.exists():
+                            perf_files = list(perf_output_dir.glob("*.csv"))
+                            if perf_files:
+                                has_perf = True
+
+                        am.record_run(name, config, run_num,
+                                      has_counters=has_counters, has_perf=has_perf)
+
+                    result = BenchmarkResult(
+                        name=name,
+                        suite=name.split("/")[0] if "/" in name else "",
+                        size=size,
+                        config=config,
+                        run_number=run_num,
+                        build_arts=build_arts,
+                        build_omp=build_omp,
+                        run_arts=run_arts,
+                        run_omp=run_omp,
+                        timing=timing,
+                        verification=verification,
+                        artifacts=artifacts,
+                        timestamp=datetime.now().isoformat(),
+                        total_duration_sec=0.0,
+                        size_params=self.get_size_params(bench_path, size),
+                    )
+                    results.append(result)
+
+        return results
 
     def run_benchmark(
         self,
@@ -1655,32 +1700,32 @@ class BenchmarkRunner:
             )
             duration = time.time() - start
 
-            # Debug output level 2: write to log file (ARTS output can be huge)
-            if self.debug >= 2:
-                if log_file:
-                    log_file.parent.mkdir(parents=True, exist_ok=True)
-                    with open(log_file, "w") as f:
-                        f.write(f"# Command: {' '.join(cmd)}\n")
-                        f.write(f"# Duration: {duration:.3f}s\n")
-                        f.write(f"# Exit code: {result.returncode}\n\n")
-                        if result.stdout:
-                            f.write("=== STDOUT ===\n")
-                            f.write(result.stdout)
-                            f.write("\n")
-                        if result.stderr:
-                            f.write("=== STDERR ===\n")
-                            f.write(result.stderr)
-                            f.write("\n")
+            # Always write log file when path is provided
+            if log_file:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "w") as f:
+                    f.write(f"# Command: {' '.join(cmd)}\n")
+                    f.write(f"# Duration: {duration:.3f}s\n")
+                    f.write(f"# Exit code: {result.returncode}\n\n")
+                    if result.stdout:
+                        f.write("=== STDOUT ===\n")
+                        f.write(result.stdout)
+                        f.write("\n")
+                    if result.stderr:
+                        f.write("=== STDERR ===\n")
+                        f.write(result.stderr)
+                        f.write("\n")
+                if self.debug >= 2:
                     self.console.print(f"[dim]  Log: {log_file}[/]")
-                else:
-                    # No log file specified, print summary only
-                    lines = (result.stdout + result.stderr).strip().split('\n')
-                    if len(lines) > 10:
-                        self.console.print(
-                            f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
-                    elif lines and lines[0]:
-                        for line in lines[:10]:
-                            self.console.print(f"[dim]  {line}[/]")
+            elif self.debug >= 2:
+                # No log file specified, print summary only
+                lines = (result.stdout + result.stderr).strip().split('\n')
+                if len(lines) > 10:
+                    self.console.print(
+                        f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
+                elif lines and lines[0]:
+                    for line in lines[:10]:
+                        self.console.print(f"[dim]  {line}[/]")
 
             # Determine status based on exit code
             if result.returncode == 0:
@@ -2143,35 +2188,34 @@ class BenchmarkRunner:
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
 
+        # Compute config early (needed by artifact_manager)
+        actual_omp_threads = (
+            omp_threads_override if omp_threads_override is not None else desired_threads
+        )
+        config = BenchmarkConfig(
+            arts_threads=desired_threads,
+            arts_nodes=desired_nodes,
+            omp_threads=actual_omp_threads,
+            launcher=desired_launcher,
+        )
+        am = self.artifact_manager  # shorthand (may be None)
+
         # Skip benchmarks disabled for multi-node when running with nodeCount > 1
         if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
-            skip_config = BenchmarkConfig(
-                arts_threads=desired_threads,
-                arts_nodes=desired_nodes,
-                omp_threads=omp_threads_override if omp_threads_override else desired_threads,
-                launcher=desired_launcher,
-            )
             return self._make_skip_result(
                 name, size,
                 "Benchmark disabled for multi-node (has .disable-multinode marker)",
-                skip_config
+                config,
             )
 
-        # Create per-run counter subdirectory to preserve counter data across runs
-        # Format: {counter_dir}/{timestamp}/{benchmark_name}_{run}/
+        # Counter directory: artifact_manager path or explicit --counter-dir
         safe_bench_name = name.replace("/", "_")
-        if counter_dir is not None:
+        run_counter_dir: Optional[Path] = None
+        if am:
+            run_counter_dir = am.get_counter_dir(name, config, run_number)
+        elif counter_dir is not None:
             run_counter_dir = counter_dir / run_timestamp / f"{safe_bench_name}_{run_number}"
             run_counter_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            # Fallback to benchmark's local counters directory (original behavior)
-            run_counter_dir = bench_path / "counters"
-            run_counter_dir.mkdir(parents=True, exist_ok=True)
-
-        # Ensure perf output directory exists
-        if perf_enabled:
-            effective_perf_dir = perf_dir or Path("./perfs")
-            effective_perf_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate config with overrides only if values actually differ from base
         need_generated = False
@@ -2219,10 +2263,24 @@ class BenchmarkRunner:
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
-        # Setup log files for debug=2
-        logs_dir = bench_path / "logs"
-        arts_log = logs_dir / "arts.log" if self.debug >= 2 else None
-        omp_log = logs_dir / "omp.log" if self.debug >= 2 else None
+        # Copy build artifacts via artifact manager (ONCE per config)
+        artifact_paths: Dict[str, Optional[str]] = {}
+        if am:
+            artifact_paths = am.copy_build_artifacts(
+                bench_path, name, config, arts_cfg_used=effective_arts_cfg)
+
+        # Setup log files
+        arts_log: Optional[Path] = None
+        omp_log: Optional[Path] = None
+        if am:
+            run_dir = am.get_run_dir(name, config, run_number)
+            arts_log = run_dir / "arts.log"
+            omp_log = run_dir / "omp.log"
+        elif self.debug >= 2:
+            logs_dir = bench_path / "logs"
+            arts_log = logs_dir / "arts.log"
+            omp_log = logs_dir / "omp.log"
+
         run_args = self.get_run_args(bench_path, size)
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
@@ -2231,30 +2289,40 @@ class BenchmarkRunner:
         if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
             common_env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
 
-        # Setup perf output paths (temp file per run, main file for appending)
-        # Format: {perf_dir}/{timestamp}/{benchmark_name}_{arts|omp}.csv
-        effective_perf_dir = perf_dir or Path("./perfs")
-        if run_timestamp:
-            perf_timestamp_dir = effective_perf_dir / run_timestamp
-            perf_timestamp_dir.mkdir(parents=True, exist_ok=True)
-            arts_perf_main = perf_timestamp_dir / f"{safe_bench_name}_arts.csv"
-            arts_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_arts_{run_number}.csv"
-            omp_perf_main = perf_timestamp_dir / f"{safe_bench_name}_omp.csv"
-            omp_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_omp_{run_number}.csv"
-        else:
-            arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
+        # Setup perf output paths
+        perf_output_dir: Optional[Path] = None
+        arts_perf_name = omp_perf_name = None
+        arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
 
-        # Run ARTS version - pass artsConfig env var so runtime uses the effective config.
+        if perf_enabled and am:
+            # Perf CSVs land inside the run directory
+            perf_output_dir = am.get_perf_dir(name, config, run_number)
+            arts_perf_name = "arts_cache.csv"
+            omp_perf_name = "omp_cache.csv"
+        elif perf_enabled:
+            effective_perf_dir = perf_dir or Path("./perfs")
+            if run_timestamp:
+                perf_timestamp_dir = effective_perf_dir / run_timestamp
+                perf_timestamp_dir.mkdir(parents=True, exist_ok=True)
+                perf_output_dir = perf_timestamp_dir
+                arts_perf_main = perf_timestamp_dir / f"{safe_bench_name}_arts.csv"
+                arts_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_arts_{run_number}.csv"
+                omp_perf_main = perf_timestamp_dir / f"{safe_bench_name}_omp.csv"
+                omp_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_omp_{run_number}.csv"
+                arts_perf_name = arts_perf_temp.name
+                omp_perf_name = omp_perf_temp.name
+            else:
+                effective_perf_dir.mkdir(parents=True, exist_ok=True)
+                perf_output_dir = effective_perf_dir
+
+        # Run ARTS version (config is embedded at compile time)
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
         if build_arts.status == Status.PASS and build_arts.executable:
-            arts_env = dict(common_env)
-            if effective_arts_cfg:
-                arts_env["artsConfig"] = str(effective_arts_cfg)
             run_arts = self.run_benchmark(
                 build_arts.executable,
                 timeout,
-                env=arts_env,
+                env=common_env,
                 launcher=desired_launcher,
                 node_count=desired_nodes,
                 threads=desired_threads,
@@ -2262,19 +2330,16 @@ class BenchmarkRunner:
                 log_file=arts_log,
                 perf_enabled=perf_enabled,
                 perf_interval=perf_interval,
-                perf_output_name=arts_perf_temp.name if arts_perf_temp else "perf_cache_arts.csv",
-                perf_output_dir=perf_timestamp_dir if run_timestamp else effective_perf_dir,
+                perf_output_name=arts_perf_name or "perf_cache_arts.csv",
+                perf_output_dir=perf_output_dir,
             )
-            # Append temp perf data to main CSV
+            # Append temp perf data to main CSV (legacy path, not used with artifact_manager)
             if perf_enabled and arts_perf_temp and arts_perf_main:
                 append_perf_to_main_csv(arts_perf_temp, arts_perf_main, run_number)
         else:
             run_arts = RunResult(
-                status=Status.SKIP,
-                duration_sec=0.0,
-                exit_code=-1,
-                stdout="",
-                stderr="Build failed",
+                status=Status.SKIP, duration_sec=0.0,
+                exit_code=-1, stdout="", stderr="Build failed",
             )
 
         # Parse counter JSON for timing data from run-specific counter directory
@@ -2291,9 +2356,6 @@ class BenchmarkRunner:
             phase_callback(Phase.RUN_OMP)
         if build_omp.status == Status.PASS and build_omp.executable:
             omp_env = dict(common_env)
-            actual_omp_threads = (
-                omp_threads_override if omp_threads_override is not None else desired_threads
-            )
             omp_env["OMP_NUM_THREADS"] = str(actual_omp_threads)
             if "OMP_WAIT_POLICY" not in os.environ:
                 omp_env["OMP_WAIT_POLICY"] = "ACTIVE"
@@ -2305,25 +2367,21 @@ class BenchmarkRunner:
                 log_file=omp_log,
                 perf_enabled=perf_enabled,
                 perf_interval=perf_interval,
-                perf_output_name=omp_perf_temp.name if omp_perf_temp else "perf_cache_omp.csv",
-                perf_output_dir=perf_timestamp_dir if run_timestamp else effective_perf_dir,
+                perf_output_name=omp_perf_name or "perf_cache_omp.csv",
+                perf_output_dir=perf_output_dir,
             )
-            # Append temp perf data to main CSV
+            # Append temp perf data to main CSV (legacy path)
             if perf_enabled and omp_perf_temp and omp_perf_main:
                 append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
         else:
-            # Determine skip reason - multi-node or build failure
             skip_reason = (
                 "Skipped: OpenMP does not support multi-node execution"
                 if desired_nodes > 1
                 else "Build failed"
             )
             run_omp = RunResult(
-                status=Status.SKIP,
-                duration_sec=0.0,
-                exit_code=-1,
-                stdout="",
-                stderr=skip_reason,
+                status=Status.SKIP, duration_sec=0.0,
+                exit_code=-1, stdout="", stderr=skip_reason,
             )
 
         # Print trace output if enabled
@@ -2358,24 +2416,51 @@ class BenchmarkRunner:
 
         # Collect artifacts
         artifacts = self.collect_artifacts(bench_path)
-        if effective_arts_cfg:
-            artifacts.arts_config = str(effective_arts_cfg)
-        if arts_log is not None:
-            artifacts.arts_log = str(arts_log)
-        if omp_log is not None:
-            artifacts.omp_log = str(omp_log)
+
+        # Update artifacts with experiment directory paths when using artifact_manager
+        has_counters = False
+        has_perf = False
+        if am:
+            run_dir = am.get_run_dir(name, config, run_number)
+            artifacts_dir = am.get_artifacts_dir(name, config)
+            for key, attr in [
+                ("arts_config", "arts_config"),
+                ("carts_metadata", "carts_metadata"),
+                ("arts_metadata_mlir", "arts_metadata_mlir"),
+                ("executable_arts", "executable_arts"),
+                ("executable_omp", "executable_omp"),
+            ]:
+                if artifact_paths.get(key):
+                    setattr(artifacts, attr, artifact_paths[key])
+            artifacts.build_dir = str(artifacts_dir)
+            artifacts.run_dir = str(run_dir)
+            artifacts.arts_log = str(arts_log) if arts_log else None
+            artifacts.omp_log = str(omp_log) if omp_log else None
+
+            # Counter files (already landed in place via counterFolder)
+            counter_path = am.get_counter_dir(name, config, run_number)
+            counter_files = sorted(counter_path.glob("*.json"))
+            if counter_files:
+                has_counters = True
+                artifacts.counters_dir = str(counter_path)
+                artifacts.counter_files = [str(f) for f in counter_files]
+
+            # Perf
+            if perf_enabled and perf_output_dir and perf_output_dir.exists():
+                if list(perf_output_dir.glob("*.csv")):
+                    has_perf = True
+
+            am.record_run(name, config, run_number,
+                          has_counters=has_counters, has_perf=has_perf)
+        else:
+            if effective_arts_cfg:
+                artifacts.arts_config = str(effective_arts_cfg)
+            if arts_log is not None:
+                artifacts.arts_log = str(arts_log)
+            if omp_log is not None:
+                artifacts.omp_log = str(omp_log)
 
         total_duration = time.time() - start_time
-
-        # Default config for single runs (no thread sweep)
-        config = BenchmarkConfig(
-            arts_threads=desired_threads,
-            arts_nodes=desired_nodes,
-            omp_threads=(
-                omp_threads_override if omp_threads_override is not None else desired_threads
-            ),
-            launcher=desired_launcher,
-        )
 
         return BenchmarkResult(
             name=name,
@@ -3845,262 +3930,6 @@ def generate_markdown_report(
     return chart_svg_path, speedup_svg_path
 
 
-def generate_markdown_report_from_json(
-    data: Dict[str, Any],
-    *,
-    input_path: Path,
-    output_md: Path,
-) -> Tuple[Path, Path, Path]:
-    """Generate a Markdown+SVG report from an exported results JSON."""
-    output_md.parent.mkdir(parents=True, exist_ok=True)
-    figures_dir = output_md.parent / f"{output_md.stem}_figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    chart_svg_path = output_md.parent / \
-        f"{output_md.stem}_init_e2e_small_multiples.svg"
-    out_speedup_svg = output_md.parent / \
-        f"{output_md.stem}_speedup_bar_chart.svg"
-
-    results = data.get("results", [])
-    if not results:
-        output_md.write_text("# CARTS Benchmarks Report\n\n(no results)\n")
-        _write_small_multiples_svg([], chart_svg_path)
-        _write_speedup_bar_chart([], out_speedup_svg)
-        return chart_svg_path, out_speedup_svg, figures_dir
-
-    # Group by config (name + threads + nodes + omp_threads + launcher)
-    grouped: Dict[Tuple, List[Dict[str, Any]]] = {}
-    for r in results:
-        cfg = r.get("config", {})
-        key = (
-            r.get("name", ""),
-            cfg.get("arts_threads"),
-            cfg.get("arts_nodes"),
-            cfg.get("omp_threads"),
-            cfg.get("launcher"),
-        )
-        grouped.setdefault(key, []).append(r)
-
-    def mean_std(vals: List[float]) -> Tuple[Optional[float], Optional[float]]:
-        if not vals:
-            return None, None
-        if len(vals) == 1:
-            return vals[0], 0.0
-        from statistics import mean, stdev
-        return mean(vals), stdev(vals)
-
-    def sum_map(m: Any) -> Optional[float]:
-        if not isinstance(m, dict) or not m:
-            return None
-        return sum(float(v) for v in m.values())
-
-    def fmt_mean_std(m: Optional[float], s: Optional[float]) -> str:
-        if m is None:
-            return "-"
-        if s is None:
-            return f"{m:.6f}"
-        return f"{m:.6f} ± {s:.6f}"
-
-    def fmt_s(m: Optional[float]) -> str:
-        return "-" if m is None else f"{m:.6f}"
-
-    def kv_lines(m: Any) -> str:
-        if not isinstance(m, dict) or not m:
-            return "-"
-        return ", ".join(f"`{k}`={float(v):.6f}s" for k, v in sorted(m.items()))
-
-    panel_groups: List[Dict[str, Any]] = []
-    report_rows: List[Dict[str, Any]] = []
-
-    for key, runs in sorted(grouped.items(), key=lambda kv: kv[0][0]):
-        name, arts_t, arts_n, omp_t, launcher_v = key
-        first = runs[0]
-        timing0 = first.get("timing", {})
-        run_arts0 = first.get("run_arts", {})
-        run_omp0 = first.get("run_omp", {})
-        speedup_vals = [
-            float(r.get("timing", {}).get("speedup") or 0.0)
-            for r in runs
-            if float(r.get("timing", {}).get("speedup") or 0.0) > 0.0
-        ]
-        sp_mean, sp_std = mean_std(speedup_vals)
-
-        arts_init_vals = [
-            float(r.get("run_arts", {}).get("init_timings", {}).get("arts"))
-            for r in runs
-            if r.get("run_arts", {}).get("init_timings", {}).get("arts") is not None
-        ]
-        omp_init_vals = [
-            float(r.get("run_omp", {}).get("init_timings", {}).get("omp"))
-            for r in runs
-            if r.get("run_omp", {}).get("init_timings", {}).get("omp") is not None
-        ]
-
-        arts_e2e_vals = [
-            sum_map(r.get("run_arts", {}).get("e2e_timings")) for r in runs]
-        arts_e2e_vals = [v for v in arts_e2e_vals if v is not None]
-        omp_e2e_vals = [
-            sum_map(r.get("run_omp", {}).get("e2e_timings")) for r in runs]
-        omp_e2e_vals = [v for v in omp_e2e_vals if v is not None]
-
-        arts_kernel_vals = [
-            sum_map(r.get("run_arts", {}).get("kernel_timings")) for r in runs]
-        arts_kernel_vals = [v for v in arts_kernel_vals if v is not None]
-        omp_kernel_vals = [
-            sum_map(r.get("run_omp", {}).get("kernel_timings")) for r in runs]
-        omp_kernel_vals = [v for v in omp_kernel_vals if v is not None]
-
-        arts_init_mean, arts_init_std = mean_std(arts_init_vals)
-        omp_init_mean, omp_init_std = mean_std(omp_init_vals)
-        arts_e2e_mean, arts_e2e_std = mean_std(arts_e2e_vals)
-        omp_e2e_mean, omp_e2e_std = mean_std(omp_e2e_vals)
-        arts_kernel_mean, arts_kernel_std = mean_std(arts_kernel_vals)
-        omp_kernel_mean, omp_kernel_std = mean_std(omp_kernel_vals)
-
-        arts_other = None if arts_e2e_mean is None or arts_kernel_mean is None else max(
-            arts_e2e_mean - arts_kernel_mean, 0.0)
-        omp_other = None if omp_e2e_mean is None or omp_kernel_mean is None else max(
-            omp_e2e_mean - omp_kernel_mean, 0.0)
-
-        arts_total = float((arts_init_mean or 0.0) + (arts_e2e_mean or 0.0))
-        omp_total = float((omp_init_mean or 0.0) + (omp_e2e_mean or 0.0))
-        scale_max = max(arts_total, omp_total, 1e-12)
-
-        arts_segments = [
-            ("__init__", float(arts_init_mean or 0.0)),
-            ("__other__", float(arts_other or 0.0)),
-            ("__kernel__", float(arts_kernel_mean or 0.0)),
-        ]
-        omp_segments = [
-            ("__init__", float(omp_init_mean or 0.0)),
-            ("__other__", float(omp_other or 0.0)),
-            ("__kernel__", float(omp_kernel_mean or 0.0)),
-        ]
-        panel_groups.append({
-            "benchmark": name,
-            "speedup": sp_mean,
-            "speedup_basis": timing0.get("speedup_basis", "total"),
-            "scale_max": scale_max,
-            "arts_segments": arts_segments,
-            "omp_segments": omp_segments,
-            "arts_total": sum(v for _, v in arts_segments),
-            "omp_total": sum(v for _, v in omp_segments),
-        })
-
-        fig_svg = figures_dir / \
-            f"{_sanitize_filename(name)}_{arts_t}t_{arts_n}n.svg"
-        _write_per_benchmark_timeline_svg(
-            name,
-            dict(run_arts0.get("init_timings") or {}),
-            dict(run_arts0.get("e2e_timings") or {}),
-            dict(run_arts0.get("kernel_timings") or {}),
-            dict(run_omp0.get("init_timings") or {}),
-            dict(run_omp0.get("e2e_timings") or {}),
-            dict(run_omp0.get("kernel_timings") or {}),
-            speedup=sp_mean,
-            speedup_basis=str(timing0.get("speedup_basis", "total")),
-            svg_path=fig_svg,
-        )
-
-        report_rows.append({
-            "name": name,
-            "benchmark": name,
-            "arts_threads": arts_t,
-            "arts_nodes": arts_n,
-            "omp_threads": omp_t,
-            "launcher": launcher_v,
-            "arts_status": run_arts0.get("status", ""),
-            "omp_status": run_omp0.get("status", ""),
-            "arts_init": (arts_init_mean, arts_init_std),
-            "arts_e2e": (arts_e2e_mean, arts_e2e_std),
-            "arts_kernel": (arts_kernel_mean, arts_kernel_std),
-            "arts_other": arts_other,
-            "omp_init": (omp_init_mean, omp_init_std),
-            "omp_e2e": (omp_e2e_mean, omp_e2e_std),
-            "omp_kernel": (omp_kernel_mean, omp_kernel_std),
-            "omp_other": omp_other,
-            "speedup_mean": sp_mean,
-            "speedup_std": sp_std,
-            "speedup_basis": timing0.get("speedup_basis", "total"),
-            "verification_note": first.get("verification", {}).get("note", ""),
-            "correct": bool(first.get("verification", {}).get("correct", False)),
-            "arts_init_map": run_arts0.get("init_timings") or {},
-            "arts_e2e_map": run_arts0.get("e2e_timings") or {},
-            "arts_kernel_map": run_arts0.get("kernel_timings") or {},
-            "omp_init_map": run_omp0.get("init_timings") or {},
-            "omp_e2e_map": run_omp0.get("e2e_timings") or {},
-            "omp_kernel_map": run_omp0.get("kernel_timings") or {},
-            "figure": fig_svg.name,
-        })
-
-    _write_small_multiples_svg(panel_groups, chart_svg_path)
-    _write_speedup_bar_chart(report_rows, out_speedup_svg)
-
-    meta = data.get("metadata", {})
-    lines: List[str] = []
-    lines.append("# CARTS Benchmarks Report")
-    lines.append("")
-    lines.append(f"- Source JSON: `{input_path}`")
-    lines.append(f"- Timestamp: {meta.get('timestamp', '-')}")
-    lines.append(f"- Size: {meta.get('size', '-')}")
-    lines.append(f"- Runs per config: {meta.get('runs_per_config', '-')}")
-    lines.append(f"- Figures: `{figures_dir.name}/`")
-    lines.append("")
-    lines.append("## Summary Figure (local scale per benchmark)")
-    lines.append("")
-    lines.append(f"![init+e2e small multiples]({chart_svg_path.name})")
-    lines.append("")
-    lines.append("## Speedup Figure (local scale per benchmark)")
-    lines.append("")
-    lines.append(f"![speedup small multiples]({out_speedup_svg.name})")
-    lines.append("")
-    lines.append("## Results (mean ± std, seconds)")
-    lines.append("")
-    lines.append("| Benchmark | t | n | ARTS status | OMP status | ARTS init | ARTS e2e | ARTS kernel | ARTS other | OMP init | OMP e2e | OMP kernel | OMP other | Speedup | Correct |")
-    lines.append(
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|")
-    for r in report_rows:
-        speed_txt = "-"
-        if r.get("speedup_mean") is not None:
-            sp_m = float(r["speedup_mean"])
-            sp_s = r.get("speedup_std")
-            if sp_s is None:
-                speed_txt = f"{sp_m:.2f}x ({r['speedup_basis']})"
-            else:
-                speed_txt = f"{sp_m:.2f} ± {float(sp_s):.2f}x ({r['speedup_basis']})"
-        if r["verification_note"] == "Verification disabled":
-            correct_txt = "N/A"
-        else:
-            correct_txt = "YES" if r["correct"] else "NO"
-        lines.append(
-            f"| {r['name']} | {r['arts_threads']} | {r['arts_nodes']} | {r['arts_status']} | {r['omp_status']} | "
-            f"{fmt_mean_std(*r['arts_init'])} | {fmt_mean_std(*r['arts_e2e'])} | {fmt_mean_std(*r['arts_kernel'])} | {fmt_s(r['arts_other'])} | "
-            f"{fmt_mean_std(*r['omp_init'])} | {fmt_mean_std(*r['omp_e2e'])} | {fmt_mean_std(*r['omp_kernel'])} | {fmt_s(r['omp_other'])} | "
-            f"{speed_txt} | {correct_txt} |"
-        )
-    lines.append("")
-    lines.append("## Per-Benchmark Figures")
-    lines.append("")
-    for r in report_rows:
-        lines.append(f"### {r['name']}")
-        lines.append("")
-        lines.append(f"![{r['name']}]({figures_dir.name}/{r['figure']})")
-        lines.append("")
-        lines.append(
-            f"- Config: `threads={r['arts_threads']}`, `nodes={r['arts_nodes']}`, `omp_threads={r['omp_threads']}`, `launcher={r['launcher']}`")
-        lines.append(f"- ARTS init breakdown: {kv_lines(r['arts_init_map'])}")
-        lines.append(f"- ARTS e2e breakdown: {kv_lines(r['arts_e2e_map'])}")
-        lines.append(
-            f"- ARTS kernel breakdown: {kv_lines(r['arts_kernel_map'])}")
-        lines.append(f"- OMP init breakdown: {kv_lines(r['omp_init_map'])}")
-        lines.append(f"- OMP e2e breakdown: {kv_lines(r['omp_e2e_map'])}")
-        lines.append(
-            f"- OMP kernel breakdown: {kv_lines(r['omp_kernel_map'])}")
-        lines.append("")
-
-    output_md.write_text("\n".join(lines))
-    return chart_svg_path, out_speedup_svg, figures_dir
-
-
 def create_live_table(
     benchmarks: List[str],
     results: Dict[str, List[BenchmarkResult]],
@@ -4961,7 +4790,7 @@ def run(
     arts_config: Optional[Path] = typer.Option(
         None, "--arts-config", help="Custom arts.cfg file"),
     output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Export results to JSON file"),
+        None, "--output", "-o", help="[deprecated] Alias for --results-dir", hidden=True),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
     verbose: bool = typer.Option(
@@ -4976,8 +4805,8 @@ def run(
         None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
     launcher: Optional[str] = typer.Option(
         None, "--launcher", "-l", help="Override ARTS launcher: ssh, slurm, lsf, local (default: from arts.cfg)"),
-    nodes: Optional[int] = typer.Option(
-        None, "--nodes", "-n", help="Override nodeCount from config (uses first N nodes)"),
+    nodes: Optional[str] = typer.Option(
+        None, "--nodes", "-n", help="Node counts: single (2), list (1,2,4), range (1:8:2)"),
     weak_scaling: bool = typer.Option(
         False, "--weak-scaling", help="Enable weak scaling: auto-scale problem size with parallelism"),
     base_size: Optional[int] = typer.Option(
@@ -4985,27 +4814,27 @@ def run(
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
     arts_exec_args: Optional[str] = typer.Option(
-        None, "--arts-exec-args", help="Extra carts execute args (e.g., '--partition-fallback=fine')"),
+        None, "--arts-exec-args", help="Extra carts compile args (e.g., '--partition-fallback=fine')"),
     debug_level: int = typer.Option(
-        0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=full output"),
-    counter_config: Optional[Path] = typer.Option(
-        None, "--counter-config", help="Custom counter.cfg file. Triggers ARTS rebuild with this configuration."),
-    counter_dir: Path = typer.Option(
-        "./counters", "--counter-dir", help="Directory for ARTS counter output (cluster.json)"),
+        0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=verbose console output"),
+    profile: Optional[Path] = typer.Option(
+        None, "--profile", help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
+    counter_dir: Optional[Path] = typer.Option(
+        None, "--counter-dir", help="[deprecated] Counters auto-stored in run dir", hidden=True),
     runs: int = typer.Option(
-        10, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
+        1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     report: bool = typer.Option(
         False, "--report", help="Generate a Markdown+SVG report artifact after running"),
     report_dir: Optional[Path] = typer.Option(
-        None, "--report-dir", help="Directory for report outputs (default: alongside JSON output)"),
+        None, "--report-dir", help="Directory for report outputs (default: alongside results)"),
     perf: bool = typer.Option(
         False, "--perf", help="Enable perf stat profiling for cache metrics"),
     perf_interval: float = typer.Option(
         0.1, "--perft", help="Perf stat sampling interval in seconds"),
-    perf_dir: Path = typer.Option(
-        "./perfs", "--perf-dir", help="Directory for perf stat CSV output"),
-    results_dir: Path = typer.Option(
-        "./results", "--results-dir", help="Directory for results JSON output"),
+    perf_dir: Optional[Path] = typer.Option(
+        None, "--perf-dir", help="[deprecated] Perf output auto-stored in run dir", hidden=True),
+    results_dir: Optional[Path] = typer.Option(
+        None, "--results-dir", help="Base directory for experiment output (default: carts-benchmarks/results/)"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -5013,15 +4842,45 @@ def run(
     """Run benchmarks with verification and timing."""
     verify = not no_verify
     clean = not no_clean
-    runner = BenchmarkRunner(
-        console, verbose=verbose, quiet=quiet, trace=trace, clean=clean, debug=debug_level)
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Deprecation warnings
+    if output:
+        console.print("[yellow]Warning: --output/-o is deprecated. "
+                       "Results are now auto-organized under --results-dir.[/]")
+        if not results_dir:
+            results_dir = output.parent
+    if counter_dir:
+        console.print("[yellow]Warning: --counter-dir is deprecated. "
+                       "Counters are now stored inside each run directory.[/]")
+    if perf_dir:
+        console.print("[yellow]Warning: --perf-dir is deprecated. "
+                       "Perf output is now stored inside each run directory.[/]")
+
+    # Resolve results_dir — default to carts-benchmarks/results/
+    if results_dir is None:
+        results_dir = get_benchmarks_dir() / "results"
+    results_dir = Path(results_dir).resolve()
+
+    # Create ArtifactManager — every run gets a self-contained timestamped directory
+    am = ArtifactManager(results_dir, run_timestamp)
+
+    # Create runner with artifact manager
+    runner = BenchmarkRunner(
+        console, verbose=verbose, quiet=quiet, trace=trace, clean=clean,
+        debug=debug_level, artifact_manager=am,
+    )
 
     # Parse thread specification
     threads_list = None
     if threads:
         threads_list = parse_threads(threads)
+
+    # Parse node specification
+    node_counts = None
+    if nodes:
+        node_counts = parse_threads(nodes)
 
     # Discover or use provided benchmarks
     if benchmarks:
@@ -5042,16 +4901,16 @@ def run(
         console.print("[yellow]No benchmarks found.[/]")
         raise typer.Exit(1)
 
-    # Handle custom counter configuration (triggers ARTS rebuild)
-    if counter_config:
-        if not counter_config.exists():
-            console.print(f"[red]Error: Counter config not found: {counter_config}[/]")
+    # Handle custom counter profile (triggers ARTS rebuild)
+    if profile:
+        if not profile.exists():
+            console.print(f"[red]Error: Profile not found: {profile}[/]")
             raise typer.Exit(1)
 
-        console.print(f"[yellow]Rebuilding ARTS with counter config: {counter_config}[/]")
+        console.print(f"[yellow]Rebuilding ARTS with profile: {profile}[/]")
         import subprocess
         result = subprocess.run(
-            ["carts", "build", "--arts", f"--counter-config={counter_config}"],
+            ["carts", "build", "--arts", f"--profile={profile}"],
             capture_output=True,
             text=True
         )
@@ -5060,22 +4919,9 @@ def run(
             raise typer.Exit(1)
         console.print("[green]ARTS rebuild complete[/]")
 
-    # Setup directories - resolve to absolute paths since subprocesses run with different cwd
-    counter_dir = Path(counter_dir)
-    counter_dir.mkdir(parents=True, exist_ok=True)
-    counter_dir = counter_dir.resolve()
-
-    perf_dir = Path(perf_dir)
-    perf_dir.mkdir(parents=True, exist_ok=True)
-    perf_dir = perf_dir.resolve()
-
-    results_dir = Path(results_dir)
-    results_dir.mkdir(parents=True, exist_ok=True)
-    results_dir = results_dir.resolve()
-
     # Print header
     if not quiet:
-        console.print(f"\n[bold]CARTS Benchmark Runner v{VERSION}[/]")
+        console.print(f"\n[bold]CARTS Benchmark Runner[/]")
         console.print("\u2501" * 30)
 
         # Show benchmark runner config
@@ -5085,7 +4931,7 @@ def run(
             config_items.append(f"threads={threads}")
         if launcher is not None:
             config_items.append(f"launcher={launcher}")
-        if nodes is not None:
+        if node_counts is not None:
             config_items.append(f"nodes={nodes}")
         if runs > 1:
             config_items.append(f"runs={runs}")
@@ -5095,10 +4941,10 @@ def run(
             config_items.append(f"arts-exec-args={arts_exec_args}")
         if debug_level > 0:
             config_items.append(f"debug={debug_level}")
-        if counter_config:
-            config_items.append(f"counter-config={counter_config.name}")
+        if profile:
+            config_items.append(f"profile={profile.name}")
         if perf:
-            config_items.append(f"perf-dir={perf_dir or './perfs'}")
+            config_items.append("perf=on")
         console.print(f"Config: {', '.join(config_items)}")
 
         # Show effective ARTS configuration
@@ -5153,44 +4999,57 @@ def run(
 
     # Run benchmarks
     start_time = time.time()
-    experiment_dir: Optional[Path] = None
-    actual_json_path: Optional[Path] = None
 
+    # Validate multi-benchmark restrictions
     threads_override: Optional[int] = None
-    if threads_list and len(bench_list) > 1:
-        if len(threads_list) != 1:
+    if len(bench_list) > 1:
+        if threads_list and len(threads_list) > 1:
             console.print(
                 "[red]Error:[/] For multiple benchmarks, `--threads` must specify a single value (e.g., `--threads 8`)."
             )
             raise typer.Exit(2)
-        threads_override = int(threads_list[0])
-        threads_list = None
+        if node_counts and len(node_counts) > 1:
+            console.print(
+                "[red]Error:[/] For multiple benchmarks, `--nodes` must specify a single value (e.g., `--nodes 2`)."
+            )
+            raise typer.Exit(2)
+        if threads_list:
+            threads_override = int(threads_list[0])
+            threads_list = None
+
+    # Determine if sweep mode
+    has_thread_sweep = threads_list and len(threads_list) > 1
+    has_node_sweep = node_counts and len(node_counts) > 1
 
     try:
-        if threads_list and len(bench_list) == 1 and len(threads_list) > 1:
-            # Thread sweep mode for single benchmark
-            results, experiment_dir, actual_json_path = runner.run_with_thread_sweep(
+        if len(bench_list) == 1 and (has_thread_sweep or has_node_sweep):
+            # Sweep mode for single benchmark
+            effective_threads = threads_list if threads_list else [None]
+            effective_nodes = node_counts if node_counts else [None]
+            results = runner.run_with_thread_sweep(
                 bench_list[0],
                 size,
-                threads_list,
+                effective_threads,
                 arts_config,
                 cflags or "",
                 counter_dir,
                 timeout,
                 omp_threads,
                 launcher,
-                nodes,
-                weak_scaling,
-                base_size,
-                runs,
-                output,  # Pass output_path for artifact organization
-                arts_exec_args,
+                node_counts=effective_nodes,
+                weak_scaling=weak_scaling,
+                base_size=base_size,
+                runs=runs,
+                arts_exec_args=arts_exec_args,
+                perf_enabled=perf,
+                perf_interval=perf_interval,
             )
         else:
             # Standard mode
             if threads_list and len(threads_list) == 1:
                 threads_override = int(threads_list[0])
                 threads_list = None
+            nodes_int = int(node_counts[0]) if node_counts else None
             results = runner.run_all(
                 bench_list,
                 size=size,
@@ -5198,7 +5057,7 @@ def run(
                 verify=verify,
                 arts_config=arts_config,
                 threads_override=threads_override,
-                nodes_override=nodes,
+                nodes_override=nodes_int,
                 launcher_override=launcher,
                 omp_threads_override=omp_threads,
                 counter_dir=counter_dir,
@@ -5221,18 +5080,10 @@ def run(
         console.print()
         console.print(create_summary_panel(results, total_duration))
 
-    # Always export a JSON artifact (for paper-quality reporting + reproducibility).
-    # If --output is not provided, write `<timestamp>.json` to results_dir (default: ./results).
-    json_output_path = (
-        (actual_json_path if actual_json_path else output)
-        if output
-        else (results_dir / f"{run_timestamp}.json")
-    )
-
-    artifacts_dir_name = "." if experiment_dir else None
+    # Write results.json into the experiment directory
     export_json(
         results,
-        json_output_path,
+        am.results_json_path,
         size,
         total_duration,
         threads_list,
@@ -5241,23 +5092,19 @@ def run(
         weak_scaling,
         base_size,
         runs,
-        artifacts_dir_name,
+        ".",  # artifacts are in same directory
         fixed_threads=threads_override,
         fixed_nodes=nodes,
         omp_threads_override=omp_threads,
         arts_config_override=str(arts_config) if arts_config else None,
     )
 
-    if report:
-        if report_dir:
-            out_dir = report_dir
-        elif experiment_dir:
-            out_dir = experiment_dir
-        elif output:
-            out_dir = output.parent
-        else:
-            out_dir = get_benchmarks_dir() / "reports"
+    # Write manifest.json
+    command_str = "carts benchmarks " + " ".join(sys.argv[1:])
+    am.write_manifest(results, command_str, total_duration)
 
+    if report:
+        out_dir = report_dir or am.experiment_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         report_md = out_dir / f"benchmark_report_{run_timestamp}.md"
         report_svg = out_dir / \
@@ -5270,12 +5117,10 @@ def run(
             console.print(f"[green]Chart:[/]  {report_chart}")
             console.print(f"[green]Speedup:[/] {report_speedup}")
 
-    # Show JSON artifact path last (after live table + optional report).
+    # Show single results path
     if not quiet:
         console.print()
-        if experiment_dir:
-            console.print(f"[green]Experiment folder:[/] {experiment_dir}")
-        console.print(f"[green]Results JSON:[/]      {json_output_path}")
+        console.print(f"[green]Results:[/] {am.experiment_dir}")
 
     # Exit with error if any failures
     failed = sum(1 for r in results if r.run_arts.status in (
@@ -5385,436 +5230,6 @@ def clean(
     console.print(f"\n[bold green]Cleaned {cleaned} benchmarks![/]")
 
 
-@app.command()
-def report(
-    input: Optional[Path] = typer.Option(
-        None, "--input", "-i", help="Input JSON file"),
-    format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table, bars, detailed, json, csv"),
-    output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Output file"),
-):
-    """View or export benchmark results."""
-    if not input:
-        # Look for most recent results file in common locations (CWD and
-        # carts-benchmarks/results).
-        candidates: List[Path] = []
-        candidates.extend(Path(".").glob("benchmark_results_*.json"))
-        candidates.extend(
-            (get_benchmarks_dir() / "results").glob("benchmark_results_*.json"))
-        candidates = [p for p in candidates if p.exists()]
-        if candidates:
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            input = candidates[0]
-        else:
-            console.print(
-                "[yellow]No results file found. Run benchmarks first.[/]")
-            raise typer.Exit(1)
-
-    with open(input) as f:
-        data = json.load(f)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_dir = output.parent if output else input.parent
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_md = report_dir / f"benchmark_report_{timestamp}.md"
-    report_chart, report_speedup, figures_dir = generate_markdown_report_from_json(
-        data,
-        input_path=input,
-        output_md=report_md,
-    )
-
-    if format == "json":
-        if output:
-            with open(output, "w") as f:
-                json.dump(data, f, indent=2)
-        else:
-            console.print_json(data=data)
-    elif format == "bars":
-        results = data.get("results", [])
-        if not results:
-            console.print("[yellow]No results to display.[/]")
-            raise typer.Exit(1)
-
-        max_total = 0.0
-        for r in results:
-            timing = r.get("timing", {})
-            for init_key, e2e_key in (
-                ("arts_init_sec", "arts_e2e_sec"),
-                ("omp_init_sec", "omp_e2e_sec"),
-            ):
-                init_val = float(timing.get(init_key) or 0.0)
-                e2e_val = float(timing.get(e2e_key) or 0.0)
-                max_total = max(max_total, init_val + e2e_val)
-
-        chart = Table(box=box.SIMPLE, show_header=True, header_style="bold")
-        chart.add_column("Benchmark", style="cyan", no_wrap=True)
-        chart.add_column("ARTS init+e2e")
-        chart.add_column("OMP init+e2e")
-        for r in results:
-            timing = r.get("timing", {})
-            chart.add_row(
-                r.get("name", ""),
-                _render_init_e2e_bar(timing.get(
-                    "arts_init_sec"), timing.get("arts_e2e_sec"), max_total),
-                _render_init_e2e_bar(timing.get(
-                    "omp_init_sec"), timing.get("omp_e2e_sec"), max_total),
-            )
-        chart.caption = "[dim]Bar colors: init=red, e2e=green[/]"
-        console.print(chart)
-    elif format == "detailed":
-        results = data.get("results", [])
-        if not results:
-            console.print("[yellow]No results to display.[/]")
-            raise typer.Exit(1)
-
-        def _sum_and_count(d: Any) -> Tuple[Optional[float], int]:
-            if not isinstance(d, dict) or not d:
-                return None, 0
-            vals = []
-            for v in d.values():
-                try:
-                    vals.append(float(v))
-                except Exception:
-                    pass
-            return (sum(vals), len(vals)) if vals else (None, 0)
-
-        table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
-        table.add_column("Benchmark", style="cyan", no_wrap=True)
-        table.add_column("ARTS init", justify="right")
-        table.add_column("ARTS e2e", justify="right")
-        table.add_column("ARTS kernel", justify="right")
-        table.add_column("OMP init", justify="right")
-        table.add_column("OMP e2e", justify="right")
-        table.add_column("OMP kernel", justify="right")
-        table.add_column("Speedup", justify="right")
-
-        for r in results:
-            timing = r.get("timing", {})
-            arts = r.get("run_arts", {})
-            omp = r.get("run_omp", {})
-
-            arts_init, arts_init_n = _sum_and_count(arts.get("init_timings"))
-            arts_e2e, arts_e2e_n = _sum_and_count(arts.get("e2e_timings"))
-            arts_kernel, arts_kernel_n = _sum_and_count(
-                arts.get("kernel_timings"))
-            omp_init, omp_init_n = _sum_and_count(omp.get("init_timings"))
-            omp_e2e, omp_e2e_n = _sum_and_count(omp.get("e2e_timings"))
-            omp_kernel, omp_kernel_n = _sum_and_count(
-                omp.get("kernel_timings"))
-
-            def _fmt(v: Optional[float], n: int) -> str:
-                if v is None:
-                    return "[dim]-[/]"
-                if n > 1:
-                    return f"{v:.4f}s [{n}]"
-                return f"{v:.4f}s"
-
-            sp = timing.get("speedup")
-            basis = timing.get("speedup_basis", "total")
-            if sp is None or sp == 0:
-                sp_str = "[dim]-[/]"
-            else:
-                sp_val = float(sp)
-                sp_str = f"{sp_val:.2f}x ({basis})"
-
-            table.add_row(
-                r.get("name", ""),
-                _fmt(arts_init, arts_init_n),
-                _fmt(arts_e2e, arts_e2e_n),
-                _fmt(arts_kernel, arts_kernel_n),
-                _fmt(omp_init, omp_init_n),
-                _fmt(omp_e2e, omp_e2e_n),
-                _fmt(omp_kernel, omp_kernel_n),
-                sp_str,
-            )
-
-        console.print(table)
-    elif format == "csv":
-        import csv
-        rows = []
-        for r in data["results"]:
-            timing = r["timing"]
-            rows.append({
-                "name": r["name"],
-                "suite": r["suite"],
-                "size": r["size"],
-                "build_arts": r["build_arts"]["status"],
-                "build_omp": r["build_omp"]["status"],
-                "run_arts": r["run_arts"]["status"],
-                "run_omp": r["run_omp"]["status"],
-                "arts_time": timing.get("arts_time_sec"),
-                "omp_time": timing.get("omp_time_sec"),
-                "speedup_basis": timing.get("speedup_basis", "total"),
-                "arts_kernel": timing.get("arts_kernel_sec"),
-                "omp_kernel": timing.get("omp_kernel_sec"),
-                "arts_init": timing.get("arts_init_sec"),
-                "omp_init": timing.get("omp_init_sec"),
-                "arts_e2e": timing.get("arts_e2e_sec"),
-                "omp_e2e": timing.get("omp_e2e_sec"),
-                "arts_total": timing.get("arts_total_sec"),
-                "omp_total": timing.get("omp_total_sec"),
-                "speedup": timing.get("speedup"),
-                "correct": r["verification"]["correct"],
-            })
-
-        if output:
-            with open(output, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-                writer.writeheader()
-                writer.writerows(rows)
-            console.print(f"[dim]Results exported to: {output}[/]")
-        else:
-            console.print("[yellow]Use --output to export CSV[/]")
-    else:
-        # Table format
-        console.print(f"\n[bold]Results from {input}[/]\n")
-        console.print(f"Timestamp: {data['metadata']['timestamp']}")
-        console.print(f"Size: {data['metadata']['size']}")
-        console.print()
-
-        summary = data["summary"]
-        console.print(Panel(
-            f"[green]\u2713 {summary['passed']}[/] passed  "
-            f"[red]\u2717 {summary['failed']}[/] failed  "
-            f"[dim]\u25cb {summary['skipped']}[/] skipped\n\n"
-            f"Geometric mean speedup: [cyan]{summary['geometric_mean_speedup']:.2f}x[/]",
-            title="Summary",
-        ))
-
-    console.print()
-    console.print(f"[green]Report:[/] {report_md}")
-    console.print(f"[green]Chart:[/]  {report_chart}")
-    console.print(f"[green]Speedup:[/] {report_speedup}")
-    return
-
-
-@app.command()
-def analyze(
-    input: Optional[Path] = typer.Option(
-        None, "--input", "-i", help="Input JSON file with benchmark results"),
-    benchmark: Optional[str] = typer.Option(
-        None, "--benchmark", "-b", help="Specific benchmark to analyze"),
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Show detailed per-worker timings"),
-):
-    """Analyze parallel region and task timing results.
-
-    Computes efficiency ratios to determine if delayed MLIR optimizations
-    (CSE, DCE) impact sequential kernel performance. See docs/hypothesis.md.
-
-    The key metric is:
-        η = T_task(CARTS) / T_task(OpenMP)
-
-    Where:
-        η ≈ 1.0  → LLVM -O3 recovers optimizations well
-        η > 1.0  → CARTS sequential code is slower (delayed opts hurt)
-    """
-    if not input:
-        # Look for most recent results file
-        results_files = sorted(Path(".").glob(
-            "benchmark_results_*.json"), reverse=True)
-        if results_files:
-            input = results_files[0]
-        else:
-            console.print(
-                "[yellow]No results file found. Run benchmarks first with --output.[/]")
-            raise typer.Exit(1)
-
-    with open(input) as f:
-        data = json.load(f)
-
-    console.print(f"\n[bold]Parallel/Task Timing Analysis[/]")
-    console.print(f"Source: {input}")
-    console.print("=" * 60)
-
-    # Filter by benchmark if specified
-    results = data.get("results", [])
-    if benchmark:
-        results = [r for r in results if benchmark in r["name"]]
-
-    if not results:
-        console.print("[yellow]No matching benchmarks found.[/]")
-        raise typer.Exit(1)
-
-    # Analyze each benchmark
-    analysis_results = []
-
-    for r in results:
-        name = r["name"]
-
-        # Check if we have parallel/task timing data
-        arts_pt = r.get("run_arts", {}).get("parallel_task_timing")
-        omp_pt = r.get("run_omp", {}).get("parallel_task_timing")
-
-        if not arts_pt and not omp_pt:
-            # No timing data for this benchmark
-            continue
-
-        console.print(f"\n[cyan]{name}[/]")
-        console.print("-" * 40)
-
-        # Analyze CARTS (ARTS) timings
-        if arts_pt:
-            console.print("\n[bold]CARTS Timings:[/]")
-            for task_name, timings in arts_pt.get("task_timings", {}).items():
-                times = [t["time_sec"] for t in timings]
-                if times:
-                    mean = sum(times) / len(times)
-                    console.print(
-                        f"  task.{task_name}: mean={mean:.6f}s (n={len(times)} workers)")
-                    if verbose:
-                        for t in timings:
-                            console.print(
-                                f"    worker {t['worker_id']}: {t['time_sec']:.6f}s")
-
-            for par_name, timings in arts_pt.get("parallel_timings", {}).items():
-                times = [t["time_sec"] for t in timings]
-                if times:
-                    mean = sum(times) / len(times)
-                    console.print(
-                        f"  parallel.{par_name}: mean={mean:.6f}s (n={len(times)} workers)")
-
-        # Analyze OpenMP timings
-        if omp_pt:
-            console.print("\n[bold]OpenMP Timings:[/]")
-            for task_name, timings in omp_pt.get("task_timings", {}).items():
-                times = [t["time_sec"] for t in timings]
-                if times:
-                    mean = sum(times) / len(times)
-                    console.print(
-                        f"  task.{task_name}: mean={mean:.6f}s (n={len(times)} workers)")
-                    if verbose:
-                        for t in timings:
-                            console.print(
-                                f"    worker {t['worker_id']}: {t['time_sec']:.6f}s")
-
-            for par_name, timings in omp_pt.get("parallel_timings", {}).items():
-                times = [t["time_sec"] for t in timings]
-                if times:
-                    mean = sum(times) / len(times)
-                    console.print(
-                        f"  parallel.{par_name}: mean={mean:.6f}s (n={len(times)} workers)")
-
-        # Compute efficiency ratio if we have both
-        if arts_pt and omp_pt:
-            console.print("\n[bold]Efficiency Analysis:[/]")
-
-            # Find matching task names
-            arts_tasks = arts_pt.get("task_timings", {})
-            omp_tasks = omp_pt.get("task_timings", {})
-
-            for task_name in set(arts_tasks.keys()) & set(omp_tasks.keys()):
-                arts_times = [t["time_sec"] for t in arts_tasks[task_name]]
-                omp_times = [t["time_sec"] for t in omp_tasks[task_name]]
-
-                if arts_times and omp_times:
-                    arts_mean = sum(arts_times) / len(arts_times)
-                    omp_mean = sum(omp_times) / len(omp_times)
-
-                    if omp_mean > 0:
-                        eta = arts_mean / omp_mean
-                        analysis_results.append({
-                            "benchmark": name,
-                            "task": task_name,
-                            "eta": eta,
-                            "arts_mean": arts_mean,
-                            "omp_mean": omp_mean,
-                        })
-
-                        # Interpret the result
-                        if 0.95 <= eta <= 1.05:
-                            interpretation = "[green]LLVM -O3 recovers optimizations well[/]"
-                        elif eta < 0.95:
-                            interpretation = "[blue]CARTS faster (unexpected)[/]"
-                        elif eta <= 1.5:
-                            interpretation = "[yellow]Partial recovery - some opts lost[/]"
-                        else:
-                            interpretation = "[red]Significant degradation - delayed opts hurt[/]"
-
-                        console.print(f"  task.{task_name}:")
-                        console.print(
-                            f"    η = {eta:.3f} (CARTS={arts_mean:.6f}s / OMP={omp_mean:.6f}s)")
-                        console.print(f"    {interpretation}")
-
-            # Compute overhead if we have matching parallel/task names
-            arts_parallel = arts_pt.get("parallel_timings", {})
-            omp_parallel = omp_pt.get("parallel_timings", {})
-
-            # Try to find matching parallel and task names for overhead calculation
-            for par_name in set(arts_parallel.keys()) & set(omp_parallel.keys()):
-                # Find a task that might correspond (e.g., "gemm" -> "gemm:kernel")
-                matching_tasks = [
-                    t for t in arts_tasks.keys() if t.startswith(par_name)]
-                if matching_tasks:
-                    task_name = matching_tasks[0]
-                    if task_name in arts_tasks and task_name in omp_tasks:
-                        arts_par_times = [t["time_sec"]
-                                          for t in arts_parallel[par_name]]
-                        arts_task_times = [t["time_sec"]
-                                           for t in arts_tasks[task_name]]
-                        omp_par_times = [t["time_sec"]
-                                         for t in omp_parallel[par_name]]
-                        omp_task_times = [t["time_sec"]
-                                          for t in omp_tasks[task_name]]
-
-                        if arts_par_times and arts_task_times and omp_par_times and omp_task_times:
-                            arts_overhead = sum(
-                                arts_par_times) / len(arts_par_times) - sum(arts_task_times) / len(arts_task_times)
-                            omp_overhead = sum(
-                                omp_par_times) / len(omp_par_times) - sum(omp_task_times) / len(omp_task_times)
-
-                            console.print(
-                                f"\n  Overhead Analysis (parallel.{par_name} - task.{task_name}):")
-                            console.print(
-                                f"    CARTS overhead: {arts_overhead:.6f}s")
-                            console.print(
-                                f"    OMP overhead:   {omp_overhead:.6f}s")
-
-    # Summary
-    if analysis_results:
-        console.print("\n" + "=" * 60)
-        console.print("[bold]Summary[/]")
-        console.print("-" * 40)
-
-        # Compute aggregate statistics
-        etas = [r["eta"] for r in analysis_results]
-        avg_eta = sum(etas) / len(etas)
-
-        # Geometric mean
-        import math
-        geomean_eta = math.exp(sum(math.log(e) for e in etas) / len(etas))
-
-        console.print(f"Benchmarks analyzed: {len(analysis_results)}")
-        console.print(f"Average η:          {avg_eta:.3f}")
-        console.print(f"Geometric mean η:   {geomean_eta:.3f}")
-
-        # Overall interpretation
-        console.print("\n[bold]Interpretation:[/]")
-        if geomean_eta <= 1.05:
-            console.print(
-                "[green]✓ Delayed optimizations have minimal impact.[/]")
-            console.print(
-                "  LLVM -O3 successfully recovers most optimizations.")
-        elif geomean_eta <= 1.2:
-            console.print(
-                "[yellow]⚠ Minor performance impact from delayed optimizations.[/]")
-            console.print(
-                "  Some optimization opportunities are lost at MLIR level.")
-        else:
-            console.print(
-                "[red]✗ Significant performance degradation detected.[/]")
-            console.print(
-                "  Delayed MLIR optimizations hurt sequential kernel performance.")
-            console.print(
-                "  Consider investigating optimization ordering in CARTS pipeline.")
-    else:
-        console.print(
-            "\n[yellow]No parallel/task timing data found in results.[/]")
-        console.print(
-            "Make sure benchmarks use CARTS_PARALLEL_TIMER_* and CARTS_TASK_TIMER_* macros.")
-
-
 # ============================================================================
 # SLURM Batch Command
 # ============================================================================
@@ -5831,7 +5246,7 @@ def slurm_run(
         DEFAULT_SIZE, "--size", "-s",
         help="Dataset size: small, medium, large, extralarge"),
     runs: int = typer.Option(
-        10, "--runs", "-r", help="Number of runs per benchmark"),
+        1, "--runs", "-r", help="Number of runs per benchmark"),
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p",
         help="SLURM partition (uses cluster default if not specified)"),
@@ -5863,9 +5278,9 @@ def slurm_run(
     gdb: bool = typer.Option(
         False, "--gdb",
         help="Wrap executable with gdb for backtrace on crash"),
-    counter_config: Optional[Path] = typer.Option(
-        None, "--counter-config",
-        help="Custom counter.cfg file. Triggers ARTS rebuild with this configuration."),
+    profile: Optional[Path] = typer.Option(
+        None, "--profile",
+        help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
     perf: bool = typer.Option(
         False, "--perf",
         help="Enable perf stat profiling for cache metrics"),
@@ -5897,6 +5312,7 @@ def slurm_run(
     - Sweep across multiple node counts with --nodes=1-15
     """
     # Initialize
+    slurm_start_time = time.time()
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
 
     # Parse node counts from --nodes parameter
@@ -5932,8 +5348,8 @@ def slurm_run(
         f"Runs per benchmark: {runs}",
         f"Size: {size}",
     ]
-    if counter_config:
-        panel_lines.append(f"Counter Config: {counter_config}")
+    if profile:
+        panel_lines.append(f"Profile: {profile}")
     if perf:
         panel_lines.append(f"Perf: enabled (interval={perf_interval}s)")
     console.print(Panel.fit("\n".join(panel_lines), title="CARTS Benchmarks"))
@@ -5991,15 +5407,15 @@ def slurm_run(
     console.print(f"Build directory: {build_dir} (shared)")
     console.print(f"Experiment directory: {experiment_dir}")
 
-    # Handle custom counter configuration (triggers ARTS rebuild)
-    if counter_config:
-        if not counter_config.exists():
-            console.print(f"[red]Error: Counter config not found: {counter_config}[/]")
+    # Handle custom counter profile (triggers ARTS rebuild)
+    if profile:
+        if not profile.exists():
+            console.print(f"[red]Error: Profile not found: {profile}[/]")
             raise typer.Exit(1)
 
-        console.print(f"[yellow]Rebuilding ARTS with counter config: {counter_config}[/]")
+        console.print(f"[yellow]Rebuilding ARTS with profile: {profile}[/]")
         result = subprocess.run(
-            ["carts", "build", "--arts", f"--counter-config={counter_config}"],
+            ["carts", "build", "--arts", f"--profile={profile}"],
             capture_output=True,
             text=True
         )
@@ -6117,9 +5533,12 @@ def slurm_run(
     #   results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/  <- experiment-specific
     #   ├── job_1.sbatch, job_2.sbatch, ...
     #   ├── arts_1.cfg, arts_2.cfg, ...        <- runtime config (different counterFolder)
-    #   ├── counters_1/, counters_2/, ...
-    #   ├── result_1.json, result_2.json, ...
-    #   └── slurm-*.out/err
+    #   └── run_1/                             <- per-run directory
+    #       ├── result.json
+    #       ├── counters/
+    #       ├── perf/                          <- if --perf
+    #       ├── slurm.out
+    #       └── slurm.err
     console.print("\n[bold]Phase 2: Generating job scripts...[/]")
 
     slurm_job_result_script = Path(__file__).parent / "slurm_job_result.py"
@@ -6179,7 +5598,7 @@ def slurm_run(
         "time_limit": time_limit,
         "arts_config": str(base_config),
         "dry_run": dry_run,
-        "counter_config": str(counter_config) if counter_config else None,
+        "profile": str(profile) if profile else None,
         "perf": perf,
         "perf_interval": perf_interval if perf else None,
     }
@@ -6210,6 +5629,13 @@ def slurm_run(
         experiment_dir, results, metadata
     )
 
+    # Write manifest.json (same schema as standard run)
+    total_duration = time.time() - slurm_start_time
+    slurm_command = "carts benchmarks " + " ".join(sys.argv[1:])
+    slurm_manifest = slurm_batch.write_slurm_manifest(
+        experiment_dir, results, metadata, slurm_command, total_duration
+    )
+
     # Summary
     successful = sum(1 for r in results if r.get("status") == "PASS")
     failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
@@ -6221,7 +5647,7 @@ def slurm_run(
         f"Successful: [green]{successful}[/]\n"
         f"Failed: [red]{failed}[/]\n\n"
         f"Results: {results_path}\n"
-        f"Manifest: {manifest_path}",
+        f"Manifest: {slurm_manifest}",
         title="Summary"
     ))
 

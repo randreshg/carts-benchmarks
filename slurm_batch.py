@@ -113,8 +113,8 @@ SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --time={time_limit}
 {partition_line}
 {account_line}
-#SBATCH --output={output_dir}/slurm-%j.out
-#SBATCH --error={output_dir}/slurm-%j.err
+#SBATCH --output={run_dir}/slurm.out
+#SBATCH --error={run_dir}/slurm.err
 
 # CARTS Benchmark SLURM Job
 # Benchmark: {benchmark_name}
@@ -123,8 +123,10 @@ SBATCH_TEMPLATE = """#!/bin/bash
 
 set -e
 
-# Create per-run counter directory
-COUNTER_DIR="{counter_dir}"
+# Create per-run directory and subdirectories
+RUN_DIR="{run_dir}"
+mkdir -p "$RUN_DIR"
+COUNTER_DIR="$RUN_DIR/counters"
 mkdir -p "$COUNTER_DIR"
 
 {perf_dir_section}
@@ -217,9 +219,12 @@ def generate_sbatch_script(
         results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/  <- experiment-specific
         ├── job_1.sbatch, job_2.sbatch, ...
         ├── arts_1.cfg, arts_2.cfg, ...           <- runtime config (counterFolder differs)
-        ├── counters_1/, counters_2/, ...
-        ├── result_1.json, result_2.json, ...
-        └── slurm-*.out/err
+        └── run_1/                                <- per-run directory
+            ├── result.json
+            ├── counters/
+            ├── perf/                             <- if --perf
+            ├── slurm.out
+            └── slurm.err
 
     Args:
         config: Job configuration
@@ -233,11 +238,12 @@ def generate_sbatch_script(
     # CRITICAL: Use absolute paths - jobs may run from different working directories
     output_dir_abs = config.output_dir.resolve()
 
-    # Per-run paths: counters_{run}, result_{run}.json, arts_{run}.cfg
-    counter_dir = output_dir_abs / f"counters_{config.run_number}"
-    result_json = output_dir_abs / f"result_{config.run_number}.json"
+    # Per-run paths: nested run_{N}/ directory
+    run_dir = output_dir_abs / f"run_{config.run_number}"
+    counter_dir = run_dir / "counters"
+    result_json = run_dir / "result.json"
     runtime_arts_cfg = output_dir_abs / f"arts_{config.run_number}.cfg"
-    perf_dir = output_dir_abs / f"perf_{config.run_number}" if config.perf else None
+    perf_dir = run_dir / "perf" if config.perf else None
 
     arts_config_abs = config.arts_config_path.resolve() if config.arts_config_path else None
     executable_arts_abs = config.executable_arts.resolve() if config.executable_arts else None
@@ -248,7 +254,7 @@ def generate_sbatch_script(
     if config.perf and perf_dir:
         perf_dir_section = (
             f'# Create per-run perf directory\n'
-            f'PERF_DIR="{perf_dir}"\n'
+            f'PERF_DIR="$RUN_DIR/perf"\n'
             f'mkdir -p "$PERF_DIR"'
         )
     else:
@@ -261,7 +267,7 @@ def generate_sbatch_script(
             interval_ms = int(config.perf_interval * 1000)
             omp_run_command = (
                 f"perf stat -e {events} -I {interval_ms} -x , "
-                f"-o {perf_dir}/omp.csv "
+                f"-o {run_dir}/perf/omp.csv "
                 f"-- {executable_omp_abs}"
             )
         else:
@@ -291,12 +297,12 @@ def generate_sbatch_script(
     elif config.perf and perf_dir:
         events = ",".join(PERF_CACHE_EVENTS)
         interval_ms = int(config.perf_interval * 1000)
-        # Single quotes: perf_dir is baked as absolute path at generation time,
+        # Single quotes: run_dir/perf is baked as absolute path at generation time,
         # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
         srun_command = (
             f"srun --exclusive bash -c "
             f"'perf stat -e {events} -I {interval_ms} -x , "
-            f"-o {perf_dir}/arts_node_${{SLURM_PROCID}}.csv "
+            f"-o {run_dir}/perf/arts_node_${{SLURM_PROCID}}.csv "
             f"-- {executable_arts_abs}'"
         )
     else:
@@ -308,13 +314,12 @@ def generate_sbatch_script(
         time_limit=config.time_limit,
         partition_line=partition_line,
         account_line=account_line,
-        output_dir=output_dir_abs,
+        run_dir=run_dir,
         benchmark_name=config.benchmark_name,
         run_number=config.run_number,
         timestamp=datetime.now().isoformat(),
         arts_config_path=arts_config_abs,
         runtime_arts_cfg=runtime_arts_cfg,
-        counter_dir=counter_dir,
         perf_dir_section=perf_dir_section,
         result_json=result_json,
         executable_arts=executable_arts_abs,
@@ -750,9 +755,12 @@ def collect_results(
 
     Directory structure (experiment-specific):
         results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/
-        ├── result_1.json, result_2.json, ...
-        ├── counters_1/, counters_2/, ...
-        └── slurm-*.out/err
+        └── run_{N}/
+            ├── result.json
+            ├── counters/
+            ├── perf/
+            ├── slurm.out
+            └── slurm.err
 
     Args:
         job_statuses: Final job statuses
@@ -769,11 +777,10 @@ def collect_results(
         if status.state == "DRY_RUN":
             continue
 
-        # Find result_{run_number}.json for this job
-        # Path: jobs/{benchmark}/nodes_{node_count}/result_{run_number}.json
+        # Find run_{run_number}/result.json for this job
         safe_name = status.benchmark_name.replace("/", "_")
         node_dir = jobs_dir / safe_name / f"nodes_{status.node_count}"
-        result_file = node_dir / f"result_{status.run_number}.json"
+        result_file = node_dir / f"run_{status.run_number}" / "result.json"
 
         if result_file.exists():
             try:
@@ -786,7 +793,6 @@ def collect_results(
                 result["slurm_nodes"] = status.node_list
                 results.append(result)
             except json.JSONDecodeError:
-                # Result file exists but is invalid
                 results.append({
                     "benchmark": status.benchmark_name,
                     "run_number": status.run_number,
@@ -795,14 +801,13 @@ def collect_results(
                     "error": "Failed to parse result.json",
                 })
         else:
-            # No result file - job likely failed before writing
             results.append({
                 "benchmark": status.benchmark_name,
                 "run_number": status.run_number,
                 "slurm_job_id": job_id,
                 "slurm_state": status.state,
                 "slurm_exit_code": status.exit_code,
-                "error": f"No result_{status.run_number}.json found in {node_dir}",
+                "error": f"No run_{status.run_number}/result.json found in {node_dir}",
             })
 
     return results
@@ -868,3 +873,51 @@ def write_aggregated_results(
         json.dump(output, f, indent=2, default=str)
 
     return results_path
+
+
+def write_slurm_manifest(
+    experiment_dir: Path,
+    results: List[Dict[str, Any]],
+    metadata: Dict[str, Any],
+    command: str,
+    total_duration: float,
+) -> Path:
+    """Write manifest.json with the same schema as the standard run manifest.
+
+    This gives both run and slurm-run the same entry point for analysis tools.
+    """
+    import math
+    import platform
+
+    passed = sum(1 for r in results if r.get("status") == "PASS")
+    failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
+
+    manifest = {
+        "version": 1,
+        "created": datetime.now().isoformat(),
+        "command": command,
+        "layout": {
+            "results_json": "aggregated_results.json",
+            "job_manifest": "job_manifest.json",
+        },
+        "summary": {
+            "total_jobs": len(results),
+            "passed": passed,
+            "failed": failed,
+            "total_duration_sec": round(total_duration, 1),
+        },
+        "reproducibility": {
+            "system": {
+                "os": platform.system(),
+                "os_version": platform.release(),
+            },
+            **{k: v for k, v in metadata.items()
+               if k in ("size", "node_counts", "threads", "runs_per_benchmark")},
+        },
+    }
+
+    manifest_path = experiment_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2, default=str)
+
+    return manifest_path

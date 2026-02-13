@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist convolution-2d.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> convolution-2d_seq.mlir
-      carts run convolution-2d_seq.mlir --collect-metadata &> convolution-2d_arts_metadata.mlir
+      carts compile convolution-2d_seq.mlir --collect-metadata &> convolution-2d_arts_metadata.mlir
       carts cgeist convolution-2d.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> convolution-2d.mlir
    ```
 
@@ -27,7 +27,7 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the concurrency pipeline
     ```bash
-      carts run convolution-2d.mlir --concurrency &> convolution-2d_concurrency.mlir
+      carts compile convolution-2d.mlir --concurrency &> convolution-2d_concurrency.mlir
     ```
 
     Check the output of the concurrency pipeline.
@@ -96,7 +96,7 @@ Walk through these steps and fix any problem that you find in the way
     ```
 4. **Concurrency-opt checkpoint:**
     ```bash
-      carts run convolution-2d.mlir --concurrency-opt &> convolution-2d_concurrency_opt.mlir
+      carts compile convolution-2d.mlir --concurrency-opt &> convolution-2d_concurrency_opt.mlir
     ```
     Check the output of the concurrency optimization pipeline.
     ```mlir
@@ -220,9 +220,9 @@ Walk through these steps and fix any problem that you find in the way
         }
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute convolution-2d.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile convolution-2d.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./convolution-2d_arts
 ```
 5. **Test with carts examples:**

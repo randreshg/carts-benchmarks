@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist poisson-task.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> poisson-task_seq.mlir
-      carts run poisson-task_seq.mlir --collect-metadata &> poisson-task_arts_metadata.mlir
+      carts compile poisson-task_seq.mlir --collect-metadata &> poisson-task_arts_metadata.mlir
       carts cgeist poisson-task.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> poisson-task.mlir
    ```
 
@@ -27,7 +27,7 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the create-dbs pipeline
     ```bash
-      carts run poisson-task.mlir --create-dbs &> poisson-task_create-dbs.mlir
+      carts compile poisson-task.mlir --create-dbs &> poisson-task_create-dbs.mlir
     ```
 
     Analyze the comments within the summarized output.
@@ -179,9 +179,9 @@ Walk through these steps and fix any problem that you find in the way
    }
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute poisson-task.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile poisson-task.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./poisson-task_arts
 ```
 
@@ -214,7 +214,7 @@ DbPartitioning consumes these hints and rewrites the DB-space fields.
 
 ```bash
 # Stage 7: CreateDbs - coarse allocations with partition hints
-carts run poisson-task.mlir --create-dbs | grep -E "partition_indices|partition_offsets"
+carts compile poisson-task.mlir --create-dbs | grep -E "partition_indices|partition_offsets"
 ```
 
 **Example output (CreateDbs):**
@@ -234,10 +234,10 @@ arts.db_acquire[<in>] ... partitioning(<fine_grained>, indices[%56, %arg1, %57])
 
 ```bash
 # Stage 10: ForLowering - refined partition hints
-carts run poisson-task.mlir --for-lowering | grep -E "partition_"
+carts compile poisson-task.mlir --for-lowering | grep -E "partition_"
 
 # Stage 11: DbPartitioning - fine-grained expansion
-carts run poisson-task.mlir --concurrency-opt | grep -E "partition_mode|indices\["
+carts compile poisson-task.mlir --concurrency-opt | grep -E "partition_mode|indices\["
 ```
 
 **Example output (DbPartitioning - after expansion):**
@@ -413,7 +413,7 @@ partitioning. ESD/stencil mode is unnecessary here.
 
 3. **Debug verification**:
    ```bash
-   carts run poisson-task.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "expand|entry|multi"
+   carts compile poisson-task.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "expand|entry|multi"
    ```
 
    **Example debug output:**
@@ -431,7 +431,7 @@ partitioning. ESD/stencil mode is unnecessary here.
 
 **Before (after CreateDbs, Stage 7):**
 
-Run: `carts run poisson-task.mlir --create-dbs | grep -A2 "indices\[%5"`
+Run: `carts compile poisson-task.mlir --create-dbs | grep -A2 "indices\[%5"`
 
 ```mlir
 /// Multi-entry acquire for u[i-1], u[i], u[i+1] with partition hints:
@@ -444,7 +444,7 @@ Run: `carts run poisson-task.mlir --create-dbs | grep -A2 "indices\[%5"`
 
 **After (after DbPartitioning, Stage 11):**
 
-Run: `carts run poisson-task.mlir --concurrency-opt | grep -E "db_acquire.*indices"`
+Run: `carts compile poisson-task.mlir --concurrency-opt | grep -E "db_acquire.*indices"`
 
 ```mlir
 /// Multi-entry acquire expanded into 3 separate fine-grained acquires:
@@ -576,13 +576,13 @@ If the ARTS checksum doesn't match OMP checksum:
 
 1. **Check multi-entry expansion**:
    ```bash
-   carts run poisson-task.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "expand|stencil"
+   carts compile poisson-task.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "expand|stencil"
    ```
    You should see expansion logs and **no** ESD skip messages.
 
 2. **Verify partition mode in IR**:
    ```bash
-   carts run poisson-task.mlir --concurrency-opt | grep "partition_mode"
+   carts compile poisson-task.mlir --concurrency-opt | grep "partition_mode"
    ```
    Should show `<fine_grained>` for u/unew/f acquires in the computation loop.
 
@@ -592,13 +592,13 @@ If the ARTS checksum doesn't match OMP checksum:
 
 4. **Check index localization in EDT**:
    ```bash
-   carts run poisson-task.mlir --concurrency-opt | grep "db_ref"
+   carts compile poisson-task.mlir --concurrency-opt | grep "db_ref"
    ```
    After expansion, db_ref indices should be `[%c0]` for single-element acquires.
 
 5. **Debug localization details**:
    ```bash
-   carts run poisson-task.mlir --concurrency-opt --debug-only=db_element_wise_indexer 2>&1 | head -50
+   carts compile poisson-task.mlir --concurrency-opt --debug-only=db_element_wise_indexer 2>&1 | head -50
    ```
 
 ### Expected Results

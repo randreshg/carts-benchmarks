@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist correlation.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> correlation_seq.mlir
-      carts run correlation_seq.mlir --collect-metadata &> correlation__arts_metadata.mlir
+      carts compile correlation_seq.mlir --collect-metadata &> correlation__arts_metadata.mlir
       carts cgeist correlation.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> correlation.mlir
    ```
 
@@ -27,15 +27,15 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the concurrency pipeline
     ```bash
-      carts run correlation.mlir --concurrency &> correlation_concurrency.mlir
+      carts compile correlation.mlir --concurrency &> correlation_concurrency.mlir
     ```
 4. **Concurrency-opt checkpoint:**
     ```bash
-      carts run correlation.mlir --concurrency-opt &> correlation_concurrency_opt.mlir
+      carts compile correlation.mlir --concurrency-opt &> correlation_concurrency_opt.mlir
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute correlation.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile correlation.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./correlation_arts
 ```

@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist activations.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> activations_seq.mlir
-      carts run activations_seq.mlir --collect-metadata &> activations_arts_metadata.mlir
+      carts compile activations_seq.mlir --collect-metadata &> activations_arts_metadata.mlir
       carts cgeist activations.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities > activations.mlir
    ```
 
@@ -27,7 +27,7 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the create-dbs pipeline
     ```bash
-      carts run activations.mlir --create-dbs &> activations_create-dbs.mlir
+      carts compile activations.mlir --create-dbs &> activations_create-dbs.mlir
     ```
 
     Analyze the comments within the summarized output.
@@ -181,12 +181,12 @@ Walk through these steps and fix any problem that you find in the way
 
 4. **Analyze the concurrency-opt output**
     ```bash
-      carts run activations.mlir --concurrency-opt &> activations_concurrency_opt.mlir
+      carts compile activations.mlir --concurrency-opt &> activations_concurrency_opt.mlir
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute activations.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile activations.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./activations_arts
 ```
 
@@ -295,10 +295,10 @@ With 16M elements and 16 workers:
 
 ```bash
 # Check allocation after concurrency-opt
-carts run activations.mlir --concurrency-opt 2>&1 | grep "db_alloc"
+carts compile activations.mlir --concurrency-opt 2>&1 | grep "db_alloc"
 # Should show: sizes[%c16] elementSizes[%c1048576]
 
 # Check index transformation
-carts run activations.mlir --concurrency-opt 2>&1 | grep -E "divui|remui.*1048576"
+carts compile activations.mlir --concurrency-opt 2>&1 | grep -E "divui|remui.*1048576"
 # Should show divui/remui operations for chunk indexing
 ```

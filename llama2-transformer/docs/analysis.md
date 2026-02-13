@@ -19,7 +19,7 @@ If there is no transformer.mlir run:
 
 ```bash
   carts cgeist transformer.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine &> transformer_seq.mlir
-  carts run transformer_seq.mlir --collect-metadata &> transformer_arts_metadata.mlir
+  carts compile transformer_seq.mlir --collect-metadata &> transformer_arts_metadata.mlir
   carts cgeist transformer.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine &> transformer.mlir
 ```
 
@@ -28,12 +28,12 @@ Run the pipeline and stop after any stage.
 
 For example, lets analyze the canonicalize-memrefs pass
 ```bash
-  carts run transformer.mlir --canonicalize-memrefs &> transformer_canonicalize.mlir
+  carts compile transformer.mlir --canonicalize-memrefs &> transformer_canonicalize.mlir
 ```
 
 Check that is failing... fix it. the canonicalize-memrefs should be able to canonicalize memrefs of N dimensions. Enable debug logging and check the logs.
 ```bash
-  carts run transformer.mlir --canonicalize-memrefs --debug-only=canonicalize-memrefs &> transformer_canonicalize.mlir
+  carts compile transformer.mlir --canonicalize-memrefs --debug-only=canonicalize-memrefs &> transformer_canonicalize.mlir
 ```
 In the final output look for memrefs like:
 ```
@@ -47,20 +47,20 @@ and check that the original memrefs and deallocations are not present in the out
 
 ### 3. Check the concurrency pass
 ```bash
-  carts run transformer.mlir --concurrency &> transformer_concurrency.mlir
+  carts compile transformer.mlir --concurrency &> transformer_concurrency.mlir
 ```
 Check how the for loops are lowered. Check that the for loops are lowered to arts.for operations.
 
 ### 4. Check the concurrency-opt pass
 ```bash
-  carts run transformer.mlir --concurrency-opt &> transformer_concurrency_opt.mlir
+  carts compile transformer.mlir --concurrency-opt &> transformer_concurrency_opt.mlir
 ```
 Check the output of the dbpass, specially the partition in the dbpass with "--debug-only=db"
 Make sure to check the second run of the dbpass, the one that is after the concurrency-opt pass.
 
-### 5. Run with carts execute
+### 5. Run with carts compile
 ```bash
-  carts execute transformer.c -O3 &> transformer_execute.txt
+  carts compile transformer.c -O3 &> transformer_execute.txt
 ```
 Check that the output is correct.
 

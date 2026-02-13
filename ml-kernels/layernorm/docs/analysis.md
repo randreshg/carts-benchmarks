@@ -52,7 +52,7 @@ Relative diff: ~70% (verification uses 1% tolerance)
 
    ```bash
       carts cgeist layernorm.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> layernorm_seq.mlir
-      carts run layernorm_seq.mlir --collect-metadata &> layernorm_arts_metadata.mlir
+      carts compile layernorm_seq.mlir --collect-metadata &> layernorm_arts_metadata.mlir
       carts cgeist layernorm.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities > layernorm.mlir
    ```
 
@@ -61,12 +61,12 @@ Relative diff: ~70% (verification uses 1% tolerance)
 
    For example, lets analyze the create-dbs pipeline
     ```bash
-      carts run layernorm.mlir --create-dbs &> layernorm_create-dbs.mlir
+      carts compile layernorm.mlir --create-dbs &> layernorm_create-dbs.mlir
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute layernorm.c -O3 
+    carts compile layernorm.c -O3 
    ./layernorm_arts
 ```
 

@@ -17,7 +17,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
    carts cgeist lulesh.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> lulesh_seq.mlir
-   carts run lulesh_seq.mlir --collect-metadata &> lulesh_arts_metadata.mlir
+   carts compile lulesh_seq.mlir --collect-metadata &> lulesh_arts_metadata.mlir
    carts cgeist lulesh.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> lulesh.mlir
    ```
 
@@ -26,7 +26,7 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, check canonicalize-memrefs:
    ```bash
-   carts run lulesh.mlir --canonicalize-memrefs &> lulesh_canonicalize_memrefs.mlir
+   carts compile lulesh.mlir --canonicalize-memrefs &> lulesh_canonicalize_memrefs.mlir
    ```
    Check that array-of-arrays are rewritten to explicit memref dimensions:
    ```mlir
@@ -36,7 +36,7 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, analyze the create-dbs pipeline:
    ```bash
-   carts run lulesh.mlir --create-dbs &> lulesh_create_dbs.mlir
+   carts compile lulesh.mlir --create-dbs &> lulesh_create_dbs.mlir
    ```
    Check that `arts.db_alloc` uses outer dims as `sizes[...]` and inner dims
    in `elementSizes[...]`, and that `arts.db_ref` indexes the outer dimension
@@ -50,7 +50,7 @@ Walk through these steps and fix any problem that you find in the way
 
 4. **Concurrency-opt checkpoint**
    ```bash
-   carts run lulesh.mlir --concurrency-opt &> lulesh_concurrency_opt.mlir
+   carts compile lulesh.mlir --concurrency-opt &> lulesh_concurrency_opt.mlir
    ```
    Check that arrays tied to the parallel loop are chunked only when the
    access is direct. For indirect gathers (e.g., `x/y/z` indexed by
@@ -58,14 +58,14 @@ Walk through these steps and fix any problem that you find in the way
    indirect accesses, it may still be blocked, with indirect read-only acquires
    marked full-range. To experiment with element-wise fallback:
    ```bash
-   carts run lulesh.mlir --concurrency-opt --partition-fallback=fine \
+   carts compile lulesh.mlir --concurrency-opt --partition-fallback=fine \
      &> lulesh_concurrency_opt_fine.mlir
    ```
 
-5. **Finally lets carts execute and check**
+5. **Finally lets carts compile and check**
 
    ```bash
-   carts execute lulesh.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+   carts compile lulesh.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    artsConfig=arts.cfg ./lulesh_arts -s 3 -i 5
    ```
 
@@ -91,7 +91,7 @@ Generate the current concurrency-opt IR and inspect allocations/acquires:
 
 ```bash
 cd /Users/randreshg/Documents/carts/external/carts-benchmarks/lulesh
-carts run lulesh.mlir --concurrency-opt > /Users/randreshg/Documents/carts/lulesh_concurrency_opt_current.mlir
+carts compile lulesh.mlir --concurrency-opt > /Users/randreshg/Documents/carts/lulesh_concurrency_opt_current.mlir
 ```
 
 Count coarse vs block allocations:

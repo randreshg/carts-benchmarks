@@ -18,7 +18,7 @@ If there is no jacobi2d.mlir, run:
 
 ```bash
 carts cgeist jacobi2d.c -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> jacobi2d_seq.mlir
-carts run jacobi2d_seq.mlir --collect-metadata &> jacobi2d_arts_metadata.mlir
+carts compile jacobi2d_seq.mlir --collect-metadata &> jacobi2d_arts_metadata.mlir
 carts cgeist jacobi2d.c -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> jacobi2d.mlir
 ```
 
@@ -27,7 +27,7 @@ carts cgeist jacobi2d.c -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine
 ### CanonicalizeMemrefs checkpoint
 
 ```bash
-carts run jacobi2d.mlir --canonicalize-memrefs --debug-only=canonicalize_memrefs 2>&1 | head -100
+carts compile jacobi2d.mlir --canonicalize-memrefs --debug-only=canonicalize_memrefs 2>&1 | head -100
 ```
 
 Expected output shows two separate allocations for A and B:
@@ -39,7 +39,7 @@ Expected output shows two separate allocations for A and B:
 ### Concurrency pipeline
 
 ```bash
-carts run jacobi2d.mlir --concurrency &> logs/concurrency.log
+carts compile jacobi2d.mlir --concurrency &> logs/concurrency.log
 ```
 
 Check the output shows two `arts.db_alloc` operations:
@@ -54,13 +54,13 @@ Check the output shows two `arts.db_alloc` operations:
 ### Concurrency-opt pipeline
 
 ```bash
-carts run jacobi2d.mlir --concurrency-opt &> logs/concurrency-opt.log
+carts compile jacobi2d.mlir --concurrency-opt &> logs/concurrency-opt.log
 ```
 
 ## 4. Execute and verify
 
 ```bash
-carts execute jacobi2d.c -O3 -I. -I../common -I../utilities
+carts compile jacobi2d.c -O3 -I. -I../common -I../utilities
 ./jacobi2d_arts
 ./jacobi2d_omp
 ```

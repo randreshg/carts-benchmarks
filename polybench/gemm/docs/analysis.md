@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist gemm.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> gemm_seq.mlir
-      carts run gemm_seq.mlir --collect-metadata &> gemm_seq_metadata.txt
+      carts compile gemm_seq.mlir --collect-metadata &> gemm_seq_metadata.txt
       carts cgeist gemm.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> gemm.mlir
    ```
 
@@ -27,7 +27,7 @@ Walk through these steps and fix any problem that you find in the way
 
    Check for example the canonicalize memrefs pass
    ```bash
-      carts run gemm.mlir --canonicalize-memrefs &> gemm_canonicalize_memrefs.mlir
+      carts compile gemm.mlir --canonicalize-memrefs &> gemm_canonicalize_memrefs.mlir
    ```
    Check that the array of pointers has been rewritten to a memref with explicit dimensions.
    ```mlir
@@ -87,7 +87,7 @@ Walk through these steps and fix any problem that you find in the way
 
 4. **Then check the create dbs output**
    ```bash
-      carts run gemm.mlir --create-dbs &> gemm_create_dbs.mlir
+      carts compile gemm.mlir --create-dbs &> gemm_create_dbs.mlir
    ```
    Check the inline comments that I left in the code.
    ```mlir
@@ -172,7 +172,7 @@ Walk through these steps and fix any problem that you find in the way
 
 4. **Then check the concurrency output**
    ```bash
-      carts run gemm.mlir --concurrency &> gemm_concurrency.mlir
+      carts compile gemm.mlir --concurrency &> gemm_concurrency.mlir
    ```
    Analyze the inline comments that I left in the code.
    I will provide a summarized version of the module after all finished. 
@@ -249,7 +249,7 @@ Walk through these steps and fix any problem that you find in the way
 
 4. **Then check the concurrency-opt output**
     ```bash
-      carts run gemm.mlir --concurrency-opt &> gemm_concurrency_opt.mlir
+      carts compile gemm.mlir --concurrency-opt &> gemm_concurrency_opt.mlir
     ```
     This is where the partitioning happens.
     ```mlir
@@ -330,8 +330,8 @@ Walk through these steps and fix any problem that you find in the way
     }
     ```
 
-5. **Finally lets carts execute and check**
+5. **Finally lets carts compile and check**
 ```bash
-    carts execute gemm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile gemm.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./gemm_arts
 ```

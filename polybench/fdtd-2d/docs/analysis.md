@@ -18,7 +18,7 @@ Walk through these steps and fix any problem that you find in the way
 
    ```bash
       carts cgeist fdtd-2d.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> fdtd-2d_seq.mlir
-      carts run fdtd-2d_seq.mlir --collect-metadata &> fdtd-2d_arts_metadata.mlir
+      carts compile fdtd-2d_seq.mlir --collect-metadata &> fdtd-2d_arts_metadata.mlir
       carts cgeist fdtd-2d.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> fdtd-2d.mlir
    ```
 
@@ -27,18 +27,18 @@ Walk through these steps and fix any problem that you find in the way
 
    For example, lets analyze the concurrency pipeline
     ```bash
-      carts run fdtd-2d.mlir --concurrency &> fdtd-2d_concurrency.mlir
+      carts compile fdtd-2d.mlir --concurrency &> fdtd-2d_concurrency.mlir
     ```
     Notice that it says that no arts.for operationn were found. This is an error...
     fix it. the arts.for might be in a nested region
    
 4. **Concurrency-opt checkpoint:**
     ```bash
-      carts run fdtd-2d.mlir --concurrency-opt &> fdtd-2d_concurrency_opt.mlir
+      carts compile fdtd-2d.mlir --concurrency-opt &> fdtd-2d_concurrency_opt.mlir
     ```
 
-4. **Finally lets carts execute and check**
+4. **Finally lets carts compile and check**
 ```bash
-    carts execute fdtd-2d.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+    carts compile fdtd-2d.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
    ./fdtd-2d_arts
 ```

@@ -29,7 +29,7 @@ Walk through these steps to understand how the ESD (Extended Stencil Dependency)
 
    ```bash
    carts cgeist jacobi-for.c -DMINI_DATASET -O0 --print-debug-info -S --raise-scf-to-affine -I. -I../common -I../utilities &> jacobi-for_seq.mlir
-   carts run jacobi-for_seq.mlir --collect-metadata &> jacobi-for_arts_metadata.mlir
+   carts compile jacobi-for_seq.mlir --collect-metadata &> jacobi-for_arts_metadata.mlir
    carts cgeist jacobi-for.c -DMINI_DATASET -O0 --print-debug-info -S -fopenmp --raise-scf-to-affine -I. -I../common -I../utilities &> jacobi-for.mlir
    ```
 
@@ -67,7 +67,7 @@ for (i = 0; i < nx; i++) {
 
 **Command:**
 ```bash
-carts run jacobi-for.mlir --create-dbs &> jacobi-for_create-dbs.mlir
+carts compile jacobi-for.mlir --create-dbs &> jacobi-for_create-dbs.mlir
 ```
 
 At this stage, all arrays start with `<coarse>` partition mode since there are no explicit partition hints:
@@ -111,7 +111,7 @@ arts.edt <parallel> <internode> route(%c0_i32) (%ptr_8, %ptr_10) ... {
 
 **Command:**
 ```bash
-carts run jacobi-for.mlir --concurrency-opt &> jacobi-for_concurrency-opt.mlir
+carts compile jacobi-for.mlir --concurrency-opt &> jacobi-for_concurrency-opt.mlir
 ```
 
 DbPartitioning analyzes memory access patterns and detects the implicit stencil:
@@ -219,7 +219,7 @@ For the stencil computation EDT, the `u` array acquires show the ESD infrastruct
 
 **Command:**
 ```bash
-carts run jacobi-for.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "(Decision|mode|halo|Partition|stencil|inconsistent|coarse|re-analyzing)"
+carts compile jacobi-for.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -E "(Decision|mode|halo|Partition|stencil|inconsistent|coarse|re-analyzing)"
 ```
 
 **Key debug lines explaining ESD detection:**
@@ -300,7 +300,7 @@ carts benchmarks run kastors-jacobi/jacobi-for --trace
 
 **Quick execution check:**
 ```bash
-carts execute jacobi-for.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
+carts compile jacobi-for.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
 ./jacobi-for_arts
 ```
 
@@ -310,23 +310,23 @@ carts execute jacobi-for.c -O3 -DMINI_DATASET -I. -I../common -I../utilities
 
 1. **Check stencil detection:**
    ```bash
-   carts run jacobi-for.mlir --concurrency-opt | grep "partition_mode"
+   carts compile jacobi-for.mlir --concurrency-opt | grep "partition_mode"
    ```
    Should show `<stencil>` for the `u` array.
 
 2. **Verify halo attributes:**
    ```bash
-   carts run jacobi-for.mlir --concurrency-opt | grep -E "left_halo|right_halo|element_offsets"
+   carts compile jacobi-for.mlir --concurrency-opt | grep -E "left_halo|right_halo|element_offsets"
    ```
    Should show halo index attributes on stencil acquires.
 
 3. **Check boundary handling:**
    ```bash
-   carts run jacobi-for.mlir --concurrency-opt | grep "bounds_valid"
+   carts compile jacobi-for.mlir --concurrency-opt | grep "bounds_valid"
    ```
    Halo acquires should have bounds checks to skip at array boundaries.
 
 4. **Debug halo generation:**
    ```bash
-   carts run jacobi-for.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -i halo
+   carts compile jacobi-for.mlir --concurrency-opt --debug-only=db_partitioning 2>&1 | grep -i halo
    ```
