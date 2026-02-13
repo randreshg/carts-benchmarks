@@ -5263,7 +5263,7 @@ def run(
     arts_config: Optional[Path] = typer.Option(
         None, "--arts-config", help="Custom arts.cfg file"),
     output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Export results to JSON file"),
+        None, "--output", "-o", help="Export results to JSON file (defaults to ./results/<timestamp>.json)"),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
     verbose: bool = typer.Option(
@@ -5637,12 +5637,15 @@ def run(
         console.print("[bold]Artifacts:[/]")
         console.print(f"  Results:  {json_output_path}")
         if experiment_dir:
-            # Find the first log directory to show as an example
+            # Thread sweep mode: logs are inside experiment dir
             log_dirs = sorted(experiment_dir.rglob("arts.log"))
             if log_dirs:
                 console.print(f"  Logs:     {log_dirs[0].parent}/")
             else:
                 console.print(f"  Logs:     {experiment_dir}/")
+        elif results and results[0].artifacts.arts_log:
+            # Standard mode: logs are in {benchmark}/logs/
+            console.print(f"  Logs:     {Path(results[0].artifacts.arts_log).parent}/")
         if counter_dir is not None:
             console.print(f"  Counters: {counter_dir}/")
 
