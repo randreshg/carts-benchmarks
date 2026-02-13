@@ -4769,8 +4769,6 @@ def run(
         False, "--no-clean", help="Skip cleaning before build (faster, but may use stale artifacts)"),
     arts_config: Optional[Path] = typer.Option(
         None, "--arts-config", help="Custom arts.cfg file"),
-    output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="[deprecated] Alias for --results-dir", hidden=True),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
     verbose: bool = typer.Option(
@@ -4799,8 +4797,6 @@ def run(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=verbose console output"),
     profile: Optional[Path] = typer.Option(
         None, "--profile", help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
-    counter_dir: Optional[Path] = typer.Option(
-        None, "--counter-dir", help="[deprecated] Counters auto-stored in run dir", hidden=True),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     report: bool = typer.Option(
@@ -4811,10 +4807,6 @@ def run(
         False, "--perf", help="Enable perf stat profiling for cache metrics"),
     perf_interval: float = typer.Option(
         0.1, "--perf-interval", help="Perf stat sampling interval in seconds"),
-    perft_deprecated: Optional[float] = typer.Option(
-        None, "--perft", hidden=True, help="[deprecated] Use --perf-interval"),
-    perf_dir: Optional[Path] = typer.Option(
-        None, "--perf-dir", help="[deprecated] Perf output auto-stored in run dir", hidden=True),
     results_dir: Optional[Path] = typer.Option(
         None, "--results-dir", help="Base directory for experiment output (default: carts-benchmarks/results/)"),
     exclude: Optional[List[str]] = typer.Option(
@@ -4826,22 +4818,6 @@ def run(
     clean = not no_clean
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Deprecation warnings
-    if output:
-        print_warning("--output/-o is deprecated. "
-                      "Results are now auto-organized under --results-dir.")
-        if not results_dir:
-            results_dir = output.parent
-    if counter_dir:
-        print_warning("--counter-dir is deprecated. "
-                      "Counters are now stored inside each run directory.")
-    if perf_dir:
-        print_warning("--perf-dir is deprecated. "
-                      "Perf output is now stored inside each run directory.")
-    if perft_deprecated is not None:
-        print_warning("--perft is deprecated. Use --perf-interval.")
-        perf_interval = perft_deprecated
 
     # Resolve results_dir — default to carts-benchmarks/results/
     if results_dir is None:
@@ -5014,7 +4990,7 @@ def run(
                 effective_threads,
                 arts_config,
                 cflags or "",
-                counter_dir,
+                None,  # counter_dir (auto-managed by ArtifactManager)
                 timeout,
                 omp_threads,
                 launcher,
@@ -5042,13 +5018,11 @@ def run(
                 nodes_override=nodes_int,
                 launcher_override=launcher,
                 omp_threads_override=omp_threads,
-                counter_dir=counter_dir,
                 arts_exec_args=arts_exec_args,
                 perf_enabled=perf,
                 perf_interval=perf_interval,
                 runs=runs,
                 run_timestamp=run_timestamp,
-                perf_dir=perf_dir,
             )
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
@@ -5249,9 +5223,6 @@ def slurm_run(
     output_dir: Path = typer.Option(
         Path("./results"), "--results-dir",
         help="Base directory for experiment output"),
-    output_dir_deprecated: Optional[Path] = typer.Option(
-        None, "--output", "-o", hidden=True,
-        help="[deprecated] Use --results-dir"),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
     dry_run: bool = typer.Option(
@@ -5276,9 +5247,6 @@ def slurm_run(
     perf_interval: float = typer.Option(
         0.1, "--perf-interval",
         help="Perf stat sampling interval in seconds"),
-    perft_deprecated: Optional[float] = typer.Option(
-        None, "--perft", hidden=True,
-        help="[deprecated] Use --perf-interval"),
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
@@ -5306,17 +5274,6 @@ def slurm_run(
     - Each job has isolated counter directory (no data collision)
     - Sweep across multiple node counts with --nodes=1-15
     """
-    # Handle deprecated flags
-    if output_dir_deprecated is not None:
-        print_warning("--output/-o is deprecated. Use --results-dir.")
-        output_dir = output_dir_deprecated
-    if perft_deprecated is not None:
-        print_warning("--perft is deprecated. Use --perf-interval.")
-        perf_interval = perft_deprecated
-
-    # Apply --exclude filter for benchmarks (handled after discovery below)
-    # exclude_nodes is passed directly to SLURM job configs
-
     # Initialize
     slurm_start_time = time.time()
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
