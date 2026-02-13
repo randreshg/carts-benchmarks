@@ -80,6 +80,45 @@ PERF_CACHE_EVENTS = [
     "L1-dcache-load-misses",
 ]
 
+BENCHMARK_CLEAN_DIR_NAMES = [
+    "build",
+    "logs",
+    "counters",
+    "counter",
+    "results",
+    "perfs",
+    "introspection",
+]
+
+BENCHMARK_CLEAN_DIR_GLOBS = [
+    "counters.prev.*",
+]
+
+BENCHMARK_CLEAN_FILE_GLOBS = [
+    "*.mlir",
+    "*.ll",
+    "*.o",
+    "*.bc",
+    "*.s",
+    "*.tmp",
+    "*.log",
+    "*.out",
+    "*.err",
+    "*-metadata.json",
+    ".carts-metadata.json",
+    ".artsPrintLock",
+    "core",
+    "core.*",
+    "vgcore.*",
+]
+
+BENCHMARK_SHARED_CLEAN_DIR_NAMES = [
+    "results",
+    "counters",
+    "perfs",
+    ".generated_configs",
+]
+
 
 def filter_benchmark_output(output: str) -> str:
     """Extract only CARTS benchmark output lines (init/e2e/kernel timing, parallel/task timing, checksum).
@@ -1467,6 +1506,9 @@ class BenchmarkRunner:
                         arts_perf_name = "arts_cache.csv"
                         omp_perf_name = "omp_cache.csv"
 
+                    # Clean up stale ARTS port before run
+                    self._cleanup_port()
+
                     # Run ARTS version
                     if build_arts.status == Status.PASS and build_arts.executable:
                         run_arts = self.run_benchmark(
@@ -2315,6 +2357,9 @@ class BenchmarkRunner:
                 effective_perf_dir.mkdir(parents=True, exist_ok=True)
                 perf_output_dir = effective_perf_dir
 
+        # Clean up stale ARTS port before run
+        self._cleanup_port()
+
         # Run ARTS version (config is embedded at compile time)
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
@@ -2776,6 +2821,16 @@ class BenchmarkRunner:
             size_params=None,
         )
 
+    def _cleanup_port(self, port: int = 34739) -> None:
+        """Kill any process holding the ARTS port."""
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True, timeout=5, check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
     def clean_benchmark(self, name: str) -> bool:
         """Clean build artifacts for a benchmark."""
         bench_path = self.benchmarks_dir / name
@@ -2785,20 +2840,25 @@ class BenchmarkRunner:
 
         cleaned = False
 
-        # Remove directories (legacy from make-based builds)
-        for dirname in ["build", "logs", "counters"]:
+        for dirname in BENCHMARK_CLEAN_DIR_NAMES:
             dirpath = bench_path / dirname
             if dirpath.exists():
                 shutil.rmtree(dirpath)
                 cleaned = True
 
-        # Remove files
-        for pattern in ["*.mlir", "*.ll", "*.o", "*-metadata.json", ".carts-metadata.json"]:
+        for pattern in BENCHMARK_CLEAN_DIR_GLOBS:
+            for dirpath in bench_path.glob(pattern):
+                if dirpath.is_dir():
+                    shutil.rmtree(dirpath)
+                    cleaned = True
+
+        for pattern in BENCHMARK_CLEAN_FILE_GLOBS:
             for f in bench_path.glob(pattern):
+                if not f.is_file():
+                    continue
                 f.unlink()
                 cleaned = True
 
-        # Remove executables
         for exe in bench_path.glob("*_arts"):
             if exe.is_file():
                 exe.unlink()
@@ -2809,6 +2869,25 @@ class BenchmarkRunner:
                 cleaned = True
 
         return cleaned
+
+    def clean_shared_artifacts(self) -> int:
+        """Clean benchmark-runner shared artifacts under external/carts-benchmarks."""
+        removed = 0
+
+        for dirname in BENCHMARK_SHARED_CLEAN_DIR_NAMES:
+            dirpath = self.benchmarks_dir / dirname
+            if dirpath.exists():
+                shutil.rmtree(dirpath)
+                removed += 1
+
+        for pattern in ["core", "core.*", "vgcore.*", "*.log", "*.tmp"]:
+            for f in self.benchmarks_dir.glob(pattern):
+                if not f.is_file():
+                    continue
+                f.unlink()
+                removed += 1
+
+        return removed
 
 
 # Worker function for parallel execution (must be at module level for pickling)
@@ -5227,6 +5306,11 @@ def clean(
         else:
             console.print(f"  [dim]\u25cb[/] {bench} (nothing to clean)")
 
+    # Clean shared artifacts
+    shared_removed = runner.clean_shared_artifacts()
+    if shared_removed:
+        console.print(f"  [green]\u2713[/] Shared artifacts ({shared_removed} items)")
+
     console.print(f"\n[bold green]Cleaned {cleaned} benchmarks![/]")
 
 
@@ -5287,9 +5371,9 @@ def slurm_run(
     perf_interval: float = typer.Option(
         0.1, "--perft",
         help="Perf stat sampling interval in seconds"),
-    exclude: Optional[List[str]] = typer.Option(
-        None, "--exclude", "-e",
-        help="Benchmarks to exclude (substring match, repeatable)"),
+    exclude: Optional[str] = typer.Option(
+        None, "--exclude", "-x",
+        help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -5352,6 +5436,8 @@ def slurm_run(
         panel_lines.append(f"Profile: {profile}")
     if perf:
         panel_lines.append(f"Perf: enabled (interval={perf_interval}s)")
+    if exclude:
+        panel_lines.append(f"Excluding SLURM nodes: {exclude}")
     console.print(Panel.fit("\n".join(panel_lines), title="CARTS Benchmarks"))
 
     # Discover benchmarks
@@ -5359,14 +5445,6 @@ def slurm_run(
         bench_list = benchmarks
     else:
         bench_list = runner.discover_benchmarks(suite)
-
-    # Apply --exclude filter
-    excluded_count = 0
-    if exclude:
-        before = len(bench_list)
-        bench_list = [b for b in bench_list
-                      if not any(ex in b for ex in exclude)]
-        excluded_count = before - len(bench_list)
 
     if not bench_list:
         console.print("[yellow]No benchmarks to run.[/]")
@@ -5390,8 +5468,6 @@ def slurm_run(
             total_jobs += valid_benchmarks * runs
 
     console.print(f"\n[bold]Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs[/]")
-    if excluded_count:
-        console.print(f"[dim]  ({excluded_count} benchmarks excluded via --exclude)[/]")
     if multinode_disabled and max(node_counts) > 1:
         console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
 
@@ -5569,6 +5645,7 @@ def slurm_run(
                 gdb=gdb,
                 perf=perf,
                 perf_interval=perf_interval,
+                exclude_nodes=exclude,
             )
 
             # Generate sbatch script in job directory

@@ -69,6 +69,7 @@ class SlurmJobConfig:
     gdb: bool = False  # Wrap executable with gdb for backtrace on crash
     perf: bool = False  # Enable perf stat profiling for cache metrics
     perf_interval: float = 0.1  # Perf sampling interval in seconds
+    exclude_nodes: Optional[str] = None  # SLURM nodes to exclude (e.g. "j006,j007")
 
 
 @dataclass
@@ -113,6 +114,7 @@ SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --time={time_limit}
 {partition_line}
 {account_line}
+{exclude_line}
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
 
@@ -234,6 +236,7 @@ def generate_sbatch_script(
     # Build partition and account lines (only if specified)
     partition_line = f"#SBATCH --partition={config.partition}" if config.partition else ""
     account_line = f"#SBATCH --account={config.account}" if config.account else ""
+    exclude_line = f"#SBATCH --exclude={config.exclude_nodes}" if config.exclude_nodes else ""
 
     # CRITICAL: Use absolute paths - jobs may run from different working directories
     output_dir_abs = config.output_dir.resolve()
@@ -314,6 +317,7 @@ def generate_sbatch_script(
         time_limit=config.time_limit,
         partition_line=partition_line,
         account_line=account_line,
+        exclude_line=exclude_line,
         run_dir=run_dir,
         benchmark_name=config.benchmark_name,
         run_number=config.run_number,

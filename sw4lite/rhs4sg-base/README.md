@@ -48,7 +48,7 @@ sw4lite_rhs4sg_base checksum=0.019759
 - `rhs4sg_base.c` - Main source file with OpenMP-parallelized RHS kernel
 - `arts.cfg` - ARTS runtime configuration
 - `Makefile` - Build configuration
-- `docs/analysis.md` - Debugging guide and CARTS limitations documentation
+- [CARTS pipeline guide](/opt/carts/docs/agents.md) - Debugging and pipeline reference
 
 ## Characteristics
 
@@ -128,7 +128,7 @@ if (!u || !mu || !lambda || !rhs) {
 // Modified: removed (assumes allocations succeed in benchmark context)
 ```
 
-See `docs/analysis.md` for detailed debugging steps.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps.
 
 ## See Also
 

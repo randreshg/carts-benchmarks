@@ -51,7 +51,7 @@ specfem3d_velocity checksum=-0.000000
 - `velocity_update.c` - Main source file with OpenMP-parallelized velocity update kernel
 - `arts.cfg` - ARTS runtime configuration (threads, ports, etc.)
 - `Makefile` - Build configuration using `../common/carts-example.mk`
-- `docs/analysis.md` - Debugging guide and CARTS limitations documentation
+- [CARTS pipeline guide](/opt/carts/docs/agents.md) - Debugging and pipeline reference
 
 ## Key Implementation Pattern
 
@@ -82,4 +82,4 @@ for (int k = 1; k < NZ - 1; ++k) {
 2. **No collapse clause** - Removed `collapse(2)` from OpenMP pragma
 3. **No early returns** - Removed allocation failure check
 
-See `docs/analysis.md` for detailed debugging steps and workarounds.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps and workarounds.

@@ -37,6 +37,7 @@ OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
 # Auto-detect arts.cfg
 ARTS_CFG ?= $(firstword $(wildcard arts.cfg))
 ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
+ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),artsConfig=$(ARTS_CFG),)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
@@ -52,7 +53,7 @@ OMP_FLAGS := -fopenmp -O3 $(INCLUDES) $(CFLAGS) -lm -lcartsbenchmarks
 all: | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
 	@$(CARTS) compile $(if $(LDFLAGS),--compile-args "$(LDFLAGS)") \
-		$(EXECUTE_ARGS) $(SRC) -O3 $(ARTS_CFG_ARG) $(EXECUTE_FLAGS) \
+		$(SRC) -O3 $(ARTS_CFG_ARG) $(EXECUTE_FLAGS) $(EXECUTE_ARGS) \
 		> $(LOG_DIR)/build.log 2>&1 || (cat $(LOG_DIR)/build.log >&2; exit 1)
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 
@@ -91,7 +92,7 @@ $(LOG_DIR):
 # Run ARTS executable
 run-arts: all
 	@echo "[$(EXAMPLE_NAME)] Running ARTS..."
-	./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
 
 # Run OpenMP executable with OMP_WAIT_POLICY=ACTIVE for fair comparison
 # (ACTIVE makes idle OMP threads spin-wait, matching ARTS worker behavior)
@@ -172,24 +173,24 @@ extralarge-openmp:
 # Build and run both variants with size
 run-small: small
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (SMALL)..."
-	./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (SMALL, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-medium: medium
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (MEDIUM)..."
-	./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (MEDIUM, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-large: large
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (LARGE)..."
-	./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (LARGE, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-extralarge: extralarge
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (EXTRALARGE)..."
-	./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (EXTRALARGE, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)

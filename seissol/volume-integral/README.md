@@ -49,7 +49,7 @@ seissol_volume_integral checksum=<value>
 - `volume_integral.c` - Main source file with OpenMP-parallelized volume integral
 - `arts.cfg` - ARTS runtime configuration (threads, ports, etc.)
 - `Makefile` - Build configuration using `../common/carts-example.mk`
-- `docs/analysis.md` - Debugging guide and bug analysis documentation
+- [CARTS pipeline guide](/opt/carts/docs/agents.md) - Debugging and pipeline reference
 
 ## Key Implementation Pattern
 
@@ -80,4 +80,4 @@ for (int elem = 0; elem < N_ELEMENTS; ++elem) {
 
 ## Debugging
 
-See `docs/analysis.md` for detailed debugging steps and pipeline analysis commands.
+See the [CARTS pipeline guide](/opt/carts/docs/agents.md) for detailed debugging steps and pipeline analysis commands.

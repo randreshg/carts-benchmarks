@@ -58,7 +58,7 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--size` | `-s` | Dataset size: `small`, `medium`, `large` (default: small) |
 | `--timeout` | `-t` | Execution timeout in seconds (default: 60) |
 | `--threads` | | Thread counts: `1,2,4,8` or `1:16:2` for sweep |
-| `--runs` | `-r` | Number of runs per configuration (default: 1) |
+| `--runs` | `-r` | Number of runs per configuration (default: 10) |
 | `--omp-threads` | | OpenMP thread count (default: same as ARTS threads) |
 | `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
 | `--nodes` | `-n` | Node counts: single (`2`), list (`1,2,4`), range (`1:8:2`) |
@@ -414,18 +414,68 @@ carts build --arts --counters=1  # Level 1: ArtsID metrics
 carts build --arts --counters=2  # Level 2: Deep captures
 ```
 
-## Log Files
+## Debugging a Benchmark
 
-stdout and stderr from every benchmark execution are automatically saved:
+### Log files
 
+Logs are always written to disk. For thread sweep mode, they go to the experiment
+directory. For standard (multi-benchmark) mode, they go to `{benchmark}/logs/`.
+
+Each log file contains:
+- The exact command that was executed
+- Execution duration and exit code
+- Full stdout and stderr
+
+### Debug levels
+
+```bash
+# Level 1: print commands being executed to the console
+carts benchmarks run polybench/gemm --size small --threads 2 --debug=1
+
+# Level 2: also print log file paths to the console
+carts benchmarks run polybench/gemm --size small --threads 2 --debug=2
 ```
-run_1/
-  arts.log     # ARTS runtime output (always captured)
-  omp.log      # OpenMP runtime output (always captured)
+
+### Inspecting MLIR stages
+
+To see the MLIR output at each compiler stage, use `--pipeline` to stop at a
+specific point:
+
+```bash
+# Stop after the concurrency pass (parallel MLIR)
+carts compile polybench/gemm/gemm.c --pipeline concurrency
+
+# Run carts-compile directly for clean MLIR output
+/opt/carts/.install/carts/bin/carts-compile gemm.mlir --O3 --arts-config arts.cfg --concurrency
 ```
 
-Use `--debug=1` to show executed commands in the console.
-Use `--debug=2` for verbose console output during execution.
+## Troubleshooting
+
+### Port conflicts
+
+ARTS uses TCP port 34739 by default. If a previous run left lingering processes,
+the next run may fail with a port-in-use error. The runner automatically kills
+processes on the ARTS port before each run. To manually clear:
+
+```bash
+fuser -k 34739/tcp
+```
+
+### Stale processes
+
+For SSH multi-node runs, the runner cleans up stale ARTS processes before launch.
+If you see issues, manually kill on all nodes:
+
+```bash
+pkill -f '_arts'
+```
+
+### Missing checksums
+
+If a benchmark reports no checksum, check:
+1. The benchmark prints a line matching `checksum: <value>` on stdout
+2. The run didn't crash (check the log file for stderr)
+3. The timeout wasn't exceeded (`--timeout` defaults to 60s)
 
 ## Exit Codes
 
