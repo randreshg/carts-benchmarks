@@ -6249,9 +6249,9 @@ def slurm_run(
     perf_interval: float = typer.Option(
         0.1, "--perft",
         help="Perf stat sampling interval in seconds"),
-    exclude: Optional[List[str]] = typer.Option(
-        None, "--exclude", "-e",
-        help="Benchmarks to exclude (substring match, repeatable)"),
+    exclude: Optional[str] = typer.Option(
+        None, "--exclude", "-x",
+        help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -6321,14 +6321,6 @@ def slurm_run(
     else:
         bench_list = runner.discover_benchmarks(suite)
 
-    # Apply --exclude filter
-    excluded_count = 0
-    if exclude:
-        before = len(bench_list)
-        bench_list = [b for b in bench_list
-                      if not any(ex in b for ex in exclude)]
-        excluded_count = before - len(bench_list)
-
     if not bench_list:
         console.print("[yellow]No benchmarks to run.[/]")
         raise typer.Exit(0)
@@ -6351,8 +6343,8 @@ def slurm_run(
             total_jobs += valid_benchmarks * runs
 
     console.print(f"\n[bold]Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs[/]")
-    if excluded_count:
-        console.print(f"[dim]  ({excluded_count} benchmarks excluded via --exclude)[/]")
+    if exclude:
+        console.print(f"[dim]  (excluding SLURM nodes: {exclude})[/]")
     if multinode_disabled and max(node_counts) > 1:
         console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
 
@@ -6503,7 +6495,7 @@ def slurm_run(
 
     job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
 
-    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
+    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in sorted(build_results.items()):
         # Create job directory: jobs/{benchmark}/nodes_{N}/ (experiment-specific)
         safe_name = bench.replace("/", "_")
         job_node_dir = jobs_dir / safe_name / f"nodes_{node_count}"
@@ -6527,6 +6519,7 @@ def slurm_run(
                 gdb=gdb,
                 perf=perf,
                 perf_interval=perf_interval,
+                exclude_nodes=exclude,
             )
 
             # Generate sbatch script in job directory
