@@ -24,25 +24,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from carts_styles import (
+    console as _shared_console,
+    Colors, Symbols,
+    print_header, print_footer, print_step, print_success, print_error,
+    print_warning, print_info,
+)
+
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-
-# ============================================================================
-# Constants
-# ============================================================================
-
-# Perf cache events for hardware counter profiling
-# (duplicated from benchmark_runner.py to avoid circular import)
-PERF_CACHE_EVENTS = [
-    "cache-references",
-    "cache-misses",
-    "L1-dcache-loads",
-    "L1-dcache-load-misses",
-]
+from benchmark_common import PERF_CACHE_EVENTS
 
 
 # ============================================================================
@@ -153,11 +148,11 @@ echo "=========================================="
 # Run ARTS benchmark
 echo ""
 echo "[ARTS] Running benchmark..."
-ARTS_START=$(date +%s.%N)
+ARTS_START=$(date +%s)
 {srun_command}
 ARTS_EXIT=$?
-ARTS_END=$(date +%s.%N)
-ARTS_DURATION=$(echo "$ARTS_END - $ARTS_START" | bc)
+ARTS_END=$(date +%s)
+ARTS_DURATION=$((ARTS_END - ARTS_START))
 echo "[ARTS] Exit code: $ARTS_EXIT"
 echo "[ARTS] Duration: $ARTS_DURATION seconds"
 
@@ -194,11 +189,11 @@ if [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
     echo "[OpenMP] Running benchmark..."
     export OMP_NUM_THREADS={threads}
     export OMP_WAIT_POLICY=ACTIVE
-    OMP_START=$(date +%s.%N)
+    OMP_START=$(date +%s)
     {omp_run_command}
     OMP_EXIT=$?
-    OMP_END=$(date +%s.%N)
-    OMP_DURATION=$(echo "$OMP_END - $OMP_START" | bc)
+    OMP_END=$(date +%s)
+    OMP_DURATION=$((OMP_END - OMP_START))
     echo "[OpenMP] Exit code: $OMP_EXIT"
     echo "[OpenMP] Duration: $OMP_DURATION seconds"
 else
@@ -335,8 +330,12 @@ def generate_sbatch_script(
         threads=config.threads,
     )
 
-    # Create output directory
+    # Create output directory and run directory
+    # CRITICAL: run_dir must exist before sbatch submission because
+    # Slurm opens --output/--error files before executing the script body.
+    # Slurm 21.08+ does not auto-create parent directories for output paths.
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     # Write script
     script_path.write_text(script_content)
@@ -486,7 +485,7 @@ def submit_all_jobs(
     job_statuses: Dict[str, SlurmJobStatus] = {}
 
     if dry_run:
-        console.print("[yellow]Dry run mode - scripts generated but not submitted[/]")
+        console.print(f"[{Colors.WARNING}]Dry run mode - scripts generated but not submitted[/{Colors.WARNING}]")
         for config, script_path in job_configs:
             # Use fake job ID for dry run
             fake_id = f"DRY_{config.benchmark_name}_{config.run_number}"
@@ -499,7 +498,7 @@ def submit_all_jobs(
             )
         return job_statuses
 
-    console.print(f"[bold]Submitting {len(job_configs)} jobs to SLURM...[/]")
+    print_step(f"Submitting {len(job_configs)} jobs to SLURM...")
 
     submitted = 0
     failed = 0
@@ -516,14 +515,12 @@ def submit_all_jobs(
             )
             submitted += 1
         except subprocess.CalledProcessError as e:
-            console.print(f"[red]Failed to submit {config.benchmark_name} run {config.run_number}: {e.stderr}[/]")
+            print_error(f"Failed to submit {config.benchmark_name} run {config.run_number}: {e.stderr}")
             failed += 1
 
-    console.print(f"[green]Submitted {submitted} jobs[/]", end="")
+    print_success(f"Submitted {submitted} jobs")
     if failed > 0:
-        console.print(f" [red]({failed} failed)[/]")
-    else:
-        console.print()
+        print_error(f"{failed} submissions failed")
 
     return job_statuses
 
@@ -531,6 +528,21 @@ def submit_all_jobs(
 # ============================================================================
 # Job Monitoring
 # ============================================================================
+
+
+def _get_scontrol_state(job_id: str) -> str:
+    """Get job state from scontrol (works when sacct is disabled)."""
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "job", job_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.split():
+            if line.startswith("JobState="):
+                return line.split("=", 1)[1]
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+    return "UNKNOWN"
 
 
 def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
@@ -566,10 +578,10 @@ def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
                     job_id, state = parts[0], parts[1]
                     states[job_id] = state
 
-        # Jobs not in squeue are either completed or failed
+        # Jobs not in squeue are finished — use scontrol to get real state
         for job_id in job_ids:
             if job_id not in states:
-                states[job_id] = "COMPLETED"  # Will be verified with sacct
+                states[job_id] = _get_scontrol_state(job_id)
 
         return states
 
@@ -623,16 +635,12 @@ def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
                 job_name = parts[1]
                 node_count = 1
                 run_number = 0
-                # Extract node_count and run_number from job name
-                if "_n" in job_name and "_r" in job_name:
-                    try:
-                        n_idx = job_name.rfind("_n")
-                        r_idx = job_name.rfind("_r")
-                        node_count = int(job_name[n_idx+2:r_idx])
-                        run_number = int(job_name[r_idx+2:])
-                        job_name = job_name[:n_idx]  # Remove _n{}_r{} suffix
-                    except (ValueError, IndexError):
-                        pass
+                # Use anchored regex to avoid breaking on benchmarks with _n in name
+                m = re.match(r'^(.+)_n(\d+)_r(\d+)$', job_name)
+                if m:
+                    job_name = m.group(1)
+                    node_count = int(m.group(2))
+                    run_number = int(m.group(3))
 
                 statuses[job_id] = SlurmJobStatus(
                     job_id=job_id,
@@ -650,7 +658,36 @@ def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
         return statuses
 
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        return {}
+        pass
+
+    # Fallback: use scontrol for any jobs sacct didn't cover
+    for job_id in job_ids:
+        if job_id not in statuses:
+            state = _get_scontrol_state(job_id)
+            # Parse exit code from scontrol
+            exit_code = None
+            try:
+                result = subprocess.run(
+                    ["scontrol", "show", "job", job_id],
+                    capture_output=True, text=True, timeout=10,
+                )
+                for token in result.stdout.split():
+                    if token.startswith("ExitCode="):
+                        exit_parts = token.split("=", 1)[1].split(":")
+                        exit_code = int(exit_parts[0]) if exit_parts[0].isdigit() else None
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass
+
+            statuses[job_id] = SlurmJobStatus(
+                job_id=job_id,
+                benchmark_name="",
+                run_number=0,
+                node_count=1,
+                state=state,
+                exit_code=exit_code,
+            )
+
+    return statuses
 
 
 def wait_for_jobs_completion(
@@ -673,7 +710,7 @@ def wait_for_jobs_completion(
     if not job_ids:
         return job_statuses
 
-    terminal_states = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"}
+    terminal_states = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "UNKNOWN"}
 
     def create_status_table() -> Table:
         """Create a status table for live display."""
@@ -689,17 +726,18 @@ def wait_for_jobs_completion(
 
         # Add rows with colors
         state_colors = {
-            "PENDING": "yellow",
-            "RUNNING": "blue",
-            "COMPLETED": "green",
-            "FAILED": "red",
-            "TIMEOUT": "red",
-            "CANCELLED": "yellow",
+            "PENDING": Colors.SKIP,
+            "RUNNING": Colors.RUNNING,
+            "COMPLETED": Colors.PASS,
+            "FAILED": Colors.FAIL,
+            "TIMEOUT": Colors.FAIL,
+            "CANCELLED": Colors.SKIP,
+            "UNKNOWN": Colors.DIM,
         }
 
         for state, count in sorted(state_counts.items()):
-            color = state_colors.get(state, "white")
-            table.add_row(f"[{color}]{state}[/]", str(count))
+            color = state_colors.get(state, Colors.DIM)
+            table.add_row(f"[{color}]{state}[/{color}]", str(count))
 
         return table
 
@@ -732,8 +770,8 @@ def wait_for_jobs_completion(
                 time.sleep(poll_interval)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Monitoring stopped. Jobs will continue running.[/]")
-        console.print("[dim]Use 'squeue -u $USER' to check status or 'scancel' to cancel jobs.[/]")
+        print_warning("Monitoring stopped. Jobs will continue running.")
+        print_info("Use 'squeue -u $USER' to check status or 'scancel' to cancel jobs.")
 
     # Get final status from sacct
     final_statuses = get_final_job_status(job_ids)
@@ -791,27 +829,35 @@ def collect_results(
             try:
                 with open(result_file) as f:
                     result = json.load(f)
-                result["slurm_job_id"] = job_id
-                result["slurm_state"] = status.state
-                result["slurm_exit_code"] = status.exit_code
-                result["slurm_elapsed"] = status.elapsed
-                result["slurm_nodes"] = status.node_list
+                # Merge SLURM status info into existing slurm.* namespace
+                result.setdefault("slurm", {}).update({
+                    "state": status.state,
+                    "exit_code": status.exit_code,
+                    "elapsed": status.elapsed,
+                    "nodelist": status.node_list,
+                })
                 results.append(result)
             except json.JSONDecodeError:
                 results.append({
                     "benchmark": status.benchmark_name,
                     "run_number": status.run_number,
-                    "slurm_job_id": job_id,
-                    "slurm_state": status.state,
+                    "status": "FAIL",
+                    "slurm": {
+                        "job_id": job_id,
+                        "state": status.state,
+                    },
                     "error": "Failed to parse result.json",
                 })
         else:
             results.append({
                 "benchmark": status.benchmark_name,
                 "run_number": status.run_number,
-                "slurm_job_id": job_id,
-                "slurm_state": status.state,
-                "slurm_exit_code": status.exit_code,
+                "status": "FAIL",
+                "slurm": {
+                    "job_id": job_id,
+                    "state": status.state,
+                    "exit_code": status.exit_code,
+                },
                 "error": f"No run_{status.run_number}/result.json found in {node_dir}",
             })
 
@@ -867,8 +913,8 @@ def write_aggregated_results(
         "metadata": metadata,
         "summary": {
             "total_jobs": len(results),
-            "successful": sum(1 for r in results if r.get("slurm_state") == "COMPLETED"),
-            "failed": sum(1 for r in results if r.get("slurm_state") in ("FAILED", "TIMEOUT", "CANCELLED")),
+            "successful": sum(1 for r in results if r.get("status") == "PASS"),
+            "failed": sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT")),
         },
         "results": results,
     }
@@ -886,14 +932,12 @@ def write_slurm_manifest(
     metadata: Dict[str, Any],
     command: str,
     total_duration: float,
+    reproducibility: Dict[str, Any],
 ) -> Path:
     """Write manifest.json with the same schema as the standard run manifest.
 
     This gives both run and slurm-run the same entry point for analysis tools.
     """
-    import math
-    import platform
-
     passed = sum(1 for r in results if r.get("status") == "PASS")
     failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
 
@@ -911,14 +955,7 @@ def write_slurm_manifest(
             "failed": failed,
             "total_duration_sec": round(total_duration, 1),
         },
-        "reproducibility": {
-            "system": {
-                "os": platform.system(),
-                "os_version": platform.release(),
-            },
-            **{k: v for k, v in metadata.items()
-               if k in ("size", "node_counts", "threads", "runs_per_benchmark")},
-        },
+        "reproducibility": reproducibility,
     }
 
     manifest_path = experiment_dir / "manifest.json"

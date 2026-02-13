@@ -30,131 +30,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Ensure benchmark_common is importable (script may run from arbitrary CWD in SLURM)
+sys.path.insert(0, str(Path(__file__).parent))
 
-# ============================================================================
-# Checksum and Timing Patterns
-# ============================================================================
-
-CHECKSUM_PATTERNS = [
-    r"checksum[:\s]*=?\s*([0-9.eE+-]+)",
-    r"result[:\s]*=?\s*([0-9.eE+-]+)",
-    r"sum[:\s]*=?\s*([0-9.eE+-]+)",
-    r"total[:\s]*=?\s*([0-9.eE+-]+)",
-    r"RMS error[:\s]*\(?\s*([0-9.eE+-]+)",
-    r"^([0-9.eE+-]+)\s*$",
-]
-
-KERNEL_TIME_PATTERN = r"^\s*kernel\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
-E2E_TIME_PATTERN = r"^\s*e2e\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
-INIT_TIME_PATTERN = r"^\s*init\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
-
-
-# ============================================================================
-# Parsing Functions
-# ============================================================================
-
-
-def parse_checksum(output: str) -> Optional[str]:
-    """Extract checksum from benchmark output.
-
-    Args:
-        output: Benchmark stdout
-
-    Returns:
-        Checksum string or None if not found
-    """
-    for pattern in CHECKSUM_PATTERNS:
-        match = re.search(pattern, output, re.IGNORECASE | re.MULTILINE)
-        if match:
-            return match.group(1)
-    return None
-
-
-def parse_kernel_timings(output: str) -> Dict[str, float]:
-    """Extract kernel timing values from output.
-
-    Args:
-        output: Benchmark stdout
-
-    Returns:
-        Dict mapping kernel name -> time in seconds
-    """
-    timings = {}
-    for match in re.finditer(KERNEL_TIME_PATTERN, output, re.MULTILINE):
-        name, value = match.groups()
-        try:
-            timings[name] = float(value)
-        except ValueError:
-            pass
-    return timings
-
-
-def parse_e2e_timings(output: str) -> Dict[str, float]:
-    """Extract end-to-end timing values from output.
-
-    Args:
-        output: Benchmark stdout
-
-    Returns:
-        Dict mapping name -> time in seconds
-    """
-    timings = {}
-    for match in re.finditer(E2E_TIME_PATTERN, output, re.MULTILINE):
-        name, value = match.groups()
-        try:
-            timings[name] = float(value)
-        except ValueError:
-            pass
-    return timings
-
-
-def parse_init_timings(output: str) -> Dict[str, float]:
-    """Extract initialization timing values from output.
-
-    Args:
-        output: Benchmark stdout
-
-    Returns:
-        Dict mapping name -> time in seconds
-    """
-    timings = {}
-    for match in re.finditer(INIT_TIME_PATTERN, output, re.MULTILINE):
-        name, value = match.groups()
-        try:
-            timings[name] = float(value)
-        except ValueError:
-            pass
-    return timings
-
-
-def parse_counter_json(counter_dir: Path) -> Tuple[Optional[float], Optional[float]]:
-    """Parse cluster.json to extract initializationTime and endToEndTime in seconds.
-
-    Args:
-        counter_dir: Directory containing counter JSON files.
-
-    Returns:
-        Tuple of (init_sec, e2e_sec), either may be None if not found.
-    """
-    cluster_file = counter_dir / "cluster.json"
-    if not cluster_file.exists():
-        return None, None
-
-    try:
-        with open(cluster_file) as f:
-            data = json.load(f)
-        counters = data.get("counters", {})
-        init_ms = counters.get("initializationTime", {}).get("value_ms")
-        e2e_ms = counters.get("endToEndTime", {}).get("value_ms")
-        init_sec = init_ms / 1000.0 if init_ms is not None else None
-        e2e_sec = e2e_ms / 1000.0 if e2e_ms is not None else None
-        return init_sec, e2e_sec
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None, None
+from benchmark_common import (
+    parse_checksum,
+    parse_kernel_timings,
+    parse_e2e_timings,
+    parse_init_timings,
+    parse_counter_json,
+)
 
 
 def read_slurm_output(output_dir: Path, job_id: str) -> Tuple[str, str]:
     """Read SLURM stdout and stderr files.
+
+    Looks for slurm.out/slurm.err first (matching sbatch template), then
+    falls back to slurm-{job_id}.out/slurm-{job_id}.err for backward compat.
 
     Args:
         output_dir: Directory containing SLURM output files
@@ -163,23 +55,26 @@ def read_slurm_output(output_dir: Path, job_id: str) -> Tuple[str, str]:
     Returns:
         Tuple of (stdout, stderr) contents
     """
-    stdout_file = output_dir / f"slurm-{job_id}.out"
-    stderr_file = output_dir / f"slurm-{job_id}.err"
+    stdout_candidates = [output_dir / "slurm.out", output_dir / f"slurm-{job_id}.out"]
+    stderr_candidates = [output_dir / "slurm.err", output_dir / f"slurm-{job_id}.err"]
 
     stdout = ""
+    for candidate in stdout_candidates:
+        if candidate.exists():
+            try:
+                stdout = candidate.read_text()
+            except Exception:
+                pass
+            break
+
     stderr = ""
-
-    if stdout_file.exists():
-        try:
-            stdout = stdout_file.read_text()
-        except Exception:
-            pass
-
-    if stderr_file.exists():
-        try:
-            stderr = stderr_file.read_text()
-        except Exception:
-            pass
+    for candidate in stderr_candidates:
+        if candidate.exists():
+            try:
+                stderr = candidate.read_text()
+            except Exception:
+                pass
+            break
 
     return stdout, stderr
 
@@ -281,9 +176,11 @@ def generate_result(
         arts_section = parts[0]
         omp_section = parts[1] if len(parts) > 1 else ""
 
-    # Parse ARTS output (only from ARTS section)
-    # Note: For ARTS, only use counter data for timing (stdout timing is inaccurate)
+    # Parse ARTS output (from ARTS section)
     arts_checksum = parse_checksum(arts_section)
+    arts_kernel = parse_kernel_timings(arts_section)
+    arts_e2e = parse_e2e_timings(arts_section)
+    arts_init = parse_init_timings(arts_section)
 
     # Parse counter data if available
     counter_init_sec = None
@@ -325,6 +222,9 @@ def generate_result(
             "checksum": arts_checksum,
             "init_sec": counter_init_sec,
             "e2e_sec": counter_e2e_sec,
+            "kernel_timings": arts_kernel,
+            "e2e_timings": arts_e2e,
+            "init_timings": arts_init,
         },
         "omp": {
             "exit_code": omp_exit,

@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -26,6 +27,8 @@ import sys
 import tempfile
 import time
 import threading
+
+logger = logging.getLogger(__name__)
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -34,6 +37,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import typer
+
+from carts_styles import (
+    console as _shared_console,
+    Colors, Symbols,
+    print_header, print_footer, print_step, print_success, print_error,
+    print_warning, print_info, print_debug as _print_debug,
+    create_progress as _create_progress, create_results_table,
+    create_summary_panel as _create_summary_panel_styles,
+    format_summary_line, format_passed, format_failed, format_skipped,
+    status_symbol as _status_symbol_str,
+)
+
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
@@ -51,112 +66,35 @@ from rich.text import Text
 # SLURM batch support
 import slurm_batch
 
+# Shared constants and parsing
+from benchmark_common import (
+    CHECKSUM_PATTERNS,
+    PERF_CACHE_EVENTS,
+    SKIP_DIRS,
+    BENCHMARK_CLEAN_DIR_NAMES,
+    BENCHMARK_CLEAN_DIR_GLOBS,
+    BENCHMARK_CLEAN_FILE_GLOBS,
+    BENCHMARK_SHARED_CLEAN_DIR_NAMES,
+    DEFAULT_TIMEOUT,
+    DEFAULT_SIZE,
+    DEFAULT_TOLERANCE,
+    DEFAULT_ARTS_PORT,
+    KERNEL_TIME_PATTERN,
+    E2E_TIME_PATTERN,
+    INIT_TIME_PATTERN,
+    parse_checksum,
+    parse_kernel_timings,
+    parse_e2e_timings,
+    parse_init_timings,
+    parse_counter_json,
+    filter_benchmark_output,
+)
+
 # ============================================================================
-# Constants
+# Constants (local-only — shared constants imported from benchmark_common)
 # ============================================================================
 
-DEFAULT_TIMEOUT = 60
-DEFAULT_SIZE = "small"
-DEFAULT_TOLERANCE = 1e-2  # 1% tolerance for FP operation ordering differences
 DEFAULT_ARTS_CONFIG = Path(__file__).parent / "arts.cfg"
-
-CHECKSUM_PATTERNS = [
-    r"checksum[:\s]*=?\s*([0-9.eE+-]+)",
-    r"result[:\s]*=?\s*([0-9.eE+-]+)",
-    r"sum[:\s]*=?\s*([0-9.eE+-]+)",
-    r"total[:\s]*=?\s*([0-9.eE+-]+)",
-    r"RMS error[:\s]*\(?\s*([0-9.eE+-]+)",
-    r"^([0-9.eE+-]+)\s*$",
-]
-
-SKIP_DIRS = {"common", "include", "src", "utilities",
-             ".git", ".svn", ".hg", "build", "logs"}
-
-# Perf cache events for hardware counter profiling
-PERF_CACHE_EVENTS = [
-    "cache-references",
-    "cache-misses",
-    "L1-dcache-loads",
-    "L1-dcache-load-misses",
-]
-
-BENCHMARK_CLEAN_DIR_NAMES = [
-    "build",
-    "logs",
-    "counters",
-    "counter",
-    "results",
-    "perfs",
-    "introspection",
-]
-
-BENCHMARK_CLEAN_DIR_GLOBS = [
-    "counters.prev.*",
-]
-
-BENCHMARK_CLEAN_FILE_GLOBS = [
-    "*.mlir",
-    "*.ll",
-    "*.o",
-    "*.bc",
-    "*.s",
-    "*.tmp",
-    "*.log",
-    "*.out",
-    "*.err",
-    "*-metadata.json",
-    ".carts-metadata.json",
-    ".artsPrintLock",
-    "core",
-    "core.*",
-    "vgcore.*",
-]
-
-BENCHMARK_SHARED_CLEAN_DIR_NAMES = [
-    "results",
-    "counters",
-    "perfs",
-    ".generated_configs",
-]
-
-
-def filter_benchmark_output(output: str) -> str:
-    """Extract only CARTS benchmark output lines (init/e2e/kernel timing, parallel/task timing, checksum).
-
-    Filters out verbose ARTS runtime debug logs and keeps only benchmark-relevant output.
-    """
-    if not output:
-        return ""
-    prefixes = ("kernel.", "e2e.", "init.", "parallel.", "task.", "checksum:", "tmp_checksum:")
-    return "\n".join(
-        line for line in output.splitlines()
-        if line.startswith(prefixes) or "checksum:" in line.lower()
-    )
-
-
-def parse_counter_json(counter_dir: Path) -> Tuple[Optional[float], Optional[float]]:
-    """Parse cluster.json to extract initializationTime and endToEndTime in seconds.
-
-    Args:
-        counter_dir: Directory containing counter JSON files.
-
-    Returns:
-        Tuple of (init_sec, e2e_sec), either may be None if not found.
-    """
-    cluster_file = counter_dir / "cluster.json"
-    if not cluster_file.exists():
-        return None, None
-    try:
-        with open(cluster_file) as f:
-            data = json.load(f)
-        counters = data.get("counters", {})
-        init_ms = counters.get("initializationTime", {}).get("value_ms")
-        e2e_ms = counters.get("endToEndTime", {}).get("value_ms")
-        init_sec = init_ms / 1000.0 if init_ms is not None else None
-        e2e_sec = e2e_ms / 1000.0 if e2e_ms is not None else None
-        return init_sec, e2e_sec
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None, None
 
 
 # ============================================================================
@@ -385,7 +323,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
-console = Console()
+console = _shared_console
 
 
 def get_carts_dir() -> Path:
@@ -707,6 +645,7 @@ def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
             if key:
                 values[key] = value
     except Exception:
+        logger.debug("Failed to parse arts.cfg: %s", path, exc_info=True)
         return {}
     return values
 
@@ -718,6 +657,7 @@ def get_arts_cfg_int(path: Optional[Path], key: str) -> Optional[int]:
     try:
         return int(vals[key])
     except Exception:
+        logger.debug("Failed to convert arts.cfg key '%s' to int", key, exc_info=True)
         return None
 
 
@@ -1825,63 +1765,21 @@ class BenchmarkRunner:
     def extract_checksum(self, output: str) -> Optional[str]:
         """Extract checksum/result from benchmark output.
 
-        Uses the LAST checksum found in output to support benchmarks that
-        print multiple intermediate checksums followed by a final combined one.
+        Delegates to shared parse_checksum() which uses the LAST match.
         """
-        # Find all checksums and use the last one
-        # This handles benchmarks with multiple kernels that print individual
-        # checksums followed by a final combined checksum for verification
-        for pattern in CHECKSUM_PATTERNS:
-            matches = re.findall(pattern, output, re.MULTILINE | re.IGNORECASE)
-            if matches:
-                return matches[-1]  # Return the LAST match
-
-        # Fallback: last non-empty line that looks numeric
-        for line in reversed(output.strip().splitlines()):
-            line = line.strip()
-            if re.match(r"^-?[0-9.]+(?:[eE][+-]?[0-9]+)?$", line):
-                return line
-
-        return None
+        return parse_checksum(output)
 
     def extract_kernel_timings(self, output: str) -> Dict[str, float]:
-        """Extract kernel timing info from benchmark output.
-
-        Parses lines like 'kernel.relu: 0.001234s' into a dict.
-        """
-        timings = {}
-        pattern = r"^\s*kernel\.([^:]+):\s*([0-9.]+)s\s*$"
-        for match in re.finditer(pattern, output, re.MULTILINE):
-            kernel_name = match.group(1).strip()
-            kernel_time = float(match.group(2))
-            timings[kernel_name] = kernel_time
-        return timings
+        """Extract kernel timing info from benchmark output."""
+        return parse_kernel_timings(output)
 
     def extract_e2e_timings(self, output: str) -> Dict[str, float]:
-        """Extract end-to-end timing info from benchmark output.
-
-        Parses lines like 'e2e.gemm: 0.001234567s' into a dict.
-        """
-        timings = {}
-        pattern = r"^\s*e2e\.([^:]+):\s*([0-9.]+)s\s*$"
-        for match in re.finditer(pattern, output, re.MULTILINE):
-            name = match.group(1).strip()
-            time_sec = float(match.group(2))
-            timings[name] = time_sec
-        return timings
+        """Extract end-to-end timing info from benchmark output."""
+        return parse_e2e_timings(output)
 
     def extract_init_timings(self, output: str) -> Dict[str, float]:
-        """Extract runtime initialization timing info from benchmark output.
-
-        Parses lines like 'init.omp: 0.000123456s' or 'init.arts: 0.123456789s'.
-        """
-        timings = {}
-        pattern = r"^\s*init\.([^:]+):\s*([0-9.]+)s\s*$"
-        for match in re.finditer(pattern, output, re.MULTILINE):
-            name = match.group(1).strip()
-            time_sec = float(match.group(2))
-            timings[name] = time_sec
-        return timings
+        """Extract runtime initialization timing info from benchmark output."""
+        return parse_init_timings(output)
 
     def extract_parallel_task_timings(self, output: str) -> Optional[ParallelTaskTiming]:
         """Extract parallel region and task timing info from benchmark output.
@@ -2823,7 +2721,7 @@ class BenchmarkRunner:
             size_params=None,
         )
 
-    def _cleanup_port(self, port: int = 34739) -> None:
+    def _cleanup_port(self, port: int = DEFAULT_ARTS_PORT) -> None:
         """Kill any process holding the ARTS port."""
         try:
             subprocess.run(
@@ -4331,7 +4229,7 @@ def get_git_hash(repo_path: Path) -> Optional[str]:
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
-        pass
+        logger.debug("Failed to get git hash for %s", repo_path, exc_info=True)
     return None
 
 
@@ -4363,6 +4261,7 @@ def get_compiler_version() -> Dict[str, Optional[str]]:
                     compilers["clang_path"] = clang_path
                 break
         except Exception:
+            logger.debug("Failed to get clang version from %s", clang_path, exc_info=True)
             continue
 
     # Try gcc
@@ -4376,7 +4275,7 @@ def get_compiler_version() -> Dict[str, Optional[str]]:
             first_line = result.stdout.split('\n')[0]
             compilers["gcc"] = first_line
     except Exception:
-        pass
+        logger.debug("Failed to get gcc version", exc_info=True)
 
     return compilers
 
@@ -4414,7 +4313,7 @@ def get_cpu_info() -> Dict[str, Any]:
             if result.returncode == 0:
                 cpu_info["physical_cores"] = int(result.stdout.strip())
         except Exception:
-            pass
+            logger.debug("Failed to get macOS CPU info", exc_info=True)
     elif system == "linux":
         # Linux: parse /proc/cpuinfo
         try:
@@ -4429,7 +4328,7 @@ def get_cpu_info() -> Dict[str, Any]:
             if result.returncode == 0:
                 cpu_info["cores"] = int(result.stdout.strip())
         except Exception:
-            pass
+            logger.debug("Failed to get Linux CPU info", exc_info=True)
 
     return cpu_info
 
@@ -4911,7 +4810,9 @@ def run(
     perf: bool = typer.Option(
         False, "--perf", help="Enable perf stat profiling for cache metrics"),
     perf_interval: float = typer.Option(
-        0.1, "--perft", help="Perf stat sampling interval in seconds"),
+        0.1, "--perf-interval", help="Perf stat sampling interval in seconds"),
+    perft_deprecated: Optional[float] = typer.Option(
+        None, "--perft", hidden=True, help="[deprecated] Use --perf-interval"),
     perf_dir: Optional[Path] = typer.Option(
         None, "--perf-dir", help="[deprecated] Perf output auto-stored in run dir", hidden=True),
     results_dir: Optional[Path] = typer.Option(
@@ -4928,16 +4829,19 @@ def run(
 
     # Deprecation warnings
     if output:
-        console.print("[yellow]Warning: --output/-o is deprecated. "
-                       "Results are now auto-organized under --results-dir.[/]")
+        print_warning("--output/-o is deprecated. "
+                      "Results are now auto-organized under --results-dir.")
         if not results_dir:
             results_dir = output.parent
     if counter_dir:
-        console.print("[yellow]Warning: --counter-dir is deprecated. "
-                       "Counters are now stored inside each run directory.[/]")
+        print_warning("--counter-dir is deprecated. "
+                      "Counters are now stored inside each run directory.")
     if perf_dir:
-        console.print("[yellow]Warning: --perf-dir is deprecated. "
-                       "Perf output is now stored inside each run directory.[/]")
+        print_warning("--perf-dir is deprecated. "
+                      "Perf output is now stored inside each run directory.")
+    if perft_deprecated is not None:
+        print_warning("--perft is deprecated. Use --perf-interval.")
+        perf_interval = perft_deprecated
 
     # Resolve results_dir — default to carts-benchmarks/results/
     if results_dir is None:
@@ -5002,10 +4906,6 @@ def run(
 
     # Print header
     if not quiet:
-        console.print(f"\n[bold]CARTS Benchmark Runner[/]")
-        console.print("\u2501" * 30)
-
-        # Show benchmark runner config
         config_items = [f"size={size}", f"timeout={timeout}s",
                         f"verify={verify}", f"clean={clean}"]
         if threads_list:
@@ -5026,7 +4926,8 @@ def run(
             config_items.append(f"profile={profile.name}")
         if perf:
             config_items.append("perf=on")
-        console.print(f"Config: {', '.join(config_items)}")
+        subtitle = f"Config: {', '.join(config_items)}"
+        print_header("CARTS Benchmark Runner", subtitle)
 
         # Show effective ARTS configuration
         if bench_list:
@@ -5246,8 +5147,7 @@ def build(
     else:
         variants = ["arts", "openmp"]
 
-    console.print(
-        f"\n[bold]Building {len(bench_list)} benchmarks[/] (size={size})\n")
+    print_header("Build Benchmarks", f"{len(bench_list)} benchmarks, size={size}")
 
     with Progress(
         SpinnerColumn(),
@@ -5272,7 +5172,7 @@ def build(
                         f"  {status} {bench} ({variant}): {result.status.value}")
                 progress.advance(task)
 
-    console.print("\n[bold green]Build complete![/]")
+    print_success("Build complete!")
 
 
 @app.command()
@@ -5298,22 +5198,22 @@ def clean(
         console.print("[yellow]No benchmarks found.[/]")
         raise typer.Exit(1)
 
-    console.print(f"\n[bold]Cleaning {len(bench_list)} benchmarks[/]\n")
+    print_header("Clean Benchmarks", f"{len(bench_list)} benchmarks")
 
     cleaned = 0
     for bench in bench_list:
         if runner.clean_benchmark(bench):
-            console.print(f"  [green]\u2713[/] {bench}")
+            console.print(f"  [{Colors.PASS}]{Symbols.PASS}[/{Colors.PASS}] {bench}")
             cleaned += 1
         else:
-            console.print(f"  [dim]\u25cb[/] {bench} (nothing to clean)")
+            console.print(f"  [{Colors.DIM}]{Symbols.SKIP}[/{Colors.DIM}] {bench} (nothing to clean)")
 
     # Clean shared artifacts
     shared_removed = runner.clean_shared_artifacts()
     if shared_removed:
-        console.print(f"  [green]\u2713[/] Shared artifacts ({shared_removed} items)")
+        console.print(f"  [{Colors.PASS}]{Symbols.PASS}[/{Colors.PASS}] Shared artifacts ({shared_removed} items)")
 
-    console.print(f"\n[bold green]Cleaned {cleaned} benchmarks![/]")
+    print_success(f"Cleaned {cleaned} benchmarks!")
 
 
 # ============================================================================
@@ -5347,8 +5247,11 @@ def slurm_run(
         None, "--threads",
         help="Thread count for OpenMP comparison (default: from arts.cfg or 8)"),
     output_dir: Path = typer.Option(
-        Path("./results"), "--output", "-o",
-        help="Output directory for results"),
+        Path("./results"), "--results-dir",
+        help="Base directory for experiment output"),
+    output_dir_deprecated: Optional[Path] = typer.Option(
+        None, "--output", "-o", hidden=True,
+        help="[deprecated] Use --results-dir"),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
     dry_run: bool = typer.Option(
@@ -5371,11 +5274,17 @@ def slurm_run(
         False, "--perf",
         help="Enable perf stat profiling for cache metrics"),
     perf_interval: float = typer.Option(
-        0.1, "--perft",
+        0.1, "--perf-interval",
         help="Perf stat sampling interval in seconds"),
-    exclude: Optional[str] = typer.Option(
-        None, "--exclude", "-x",
+    perft_deprecated: Optional[float] = typer.Option(
+        None, "--perft", hidden=True,
+        help="[deprecated] Use --perf-interval"),
+    exclude_nodes: Optional[str] = typer.Option(
+        None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
+    exclude: Optional[List[str]] = typer.Option(
+        None, "--exclude", "-e",
+        help="Benchmarks to exclude (substring match, repeatable)"),
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -5397,6 +5306,17 @@ def slurm_run(
     - Each job has isolated counter directory (no data collision)
     - Sweep across multiple node counts with --nodes=1-15
     """
+    # Handle deprecated flags
+    if output_dir_deprecated is not None:
+        print_warning("--output/-o is deprecated. Use --results-dir.")
+        output_dir = output_dir_deprecated
+    if perft_deprecated is not None:
+        print_warning("--perft is deprecated. Use --perf-interval.")
+        perf_interval = perft_deprecated
+
+    # Apply --exclude filter for benchmarks (handled after discovery below)
+    # exclude_nodes is passed directly to SLURM job configs
+
     # Initialize
     slurm_start_time = time.time()
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
@@ -5427,20 +5347,20 @@ def slurm_run(
     else:
         nodes_display = f"{node_counts[0]}-{node_counts[-1]} ({len(node_counts)} values)"
 
-    panel_lines = [
-        f"[bold]SLURM Batch Submission[/]",
+    subtitle_parts = [
         f"Config: {base_config}",
         f"Nodes: {nodes_display}, Threads: {threads}",
-        f"Runs per benchmark: {runs}",
-        f"Size: {size}",
+        f"Runs per benchmark: {runs}, Size: {size}",
     ]
     if profile:
-        panel_lines.append(f"Profile: {profile}")
+        subtitle_parts.append(f"Profile: {profile}")
     if perf:
-        panel_lines.append(f"Perf: enabled (interval={perf_interval}s)")
+        subtitle_parts.append(f"Perf: enabled (interval={perf_interval}s)")
+    if exclude_nodes:
+        subtitle_parts.append(f"Excluding SLURM nodes: {exclude_nodes}")
     if exclude:
-        panel_lines.append(f"Excluding SLURM nodes: {exclude}")
-    console.print(Panel.fit("\n".join(panel_lines), title="CARTS Benchmarks"))
+        subtitle_parts.append(f"Excluding benchmarks: {', '.join(exclude)}")
+    print_header("SLURM Batch Submission", "\n".join(subtitle_parts))
 
     # Discover benchmarks
     if benchmarks:
@@ -5448,8 +5368,17 @@ def slurm_run(
     else:
         bench_list = runner.discover_benchmarks(suite)
 
+    # Apply --exclude filter for benchmarks
+    if exclude:
+        before = len(bench_list)
+        bench_list = [b for b in bench_list
+                      if not any(ex in b for ex in exclude)]
+        excluded_count = before - len(bench_list)
+        if excluded_count:
+            console.print(f"[{Colors.DIM}]  ({excluded_count} benchmarks excluded via --exclude)[/{Colors.DIM}]")
+
     if not bench_list:
-        console.print("[yellow]No benchmarks to run.[/]")
+        print_warning("No benchmarks to run.")
         raise typer.Exit(0)
 
     # Check which benchmarks support multinode
@@ -5647,7 +5576,7 @@ def slurm_run(
                 gdb=gdb,
                 perf=perf,
                 perf_interval=perf_interval,
-                exclude_nodes=exclude,
+                exclude_nodes=exclude_nodes,
             )
 
             # Generate sbatch script in job directory
@@ -5699,6 +5628,9 @@ def slurm_run(
         job_statuses, console, poll_interval=10
     )
 
+    # Update manifest with final job states
+    slurm_batch.write_job_manifest(experiment_dir, job_statuses, metadata)
+
     # Phase 5: Collect results
     console.print("\n[bold]Phase 5: Collecting results...[/]")
 
@@ -5711,25 +5643,29 @@ def slurm_run(
     # Write manifest.json (same schema as standard run)
     total_duration = time.time() - slurm_start_time
     slurm_command = "carts benchmarks " + " ".join(sys.argv[1:])
+    carts_dir = get_carts_dir()
+    benchmarks_dir = get_benchmarks_dir()
+    repro = get_reproducibility_metadata(carts_dir, benchmarks_dir)
     slurm_manifest = slurm_batch.write_slurm_manifest(
-        experiment_dir, results, metadata, slurm_command, total_duration
+        experiment_dir, results, metadata, slurm_command, total_duration, repro
     )
 
     # Summary
     successful = sum(1 for r in results if r.get("status") == "PASS")
     failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
 
-    console.print("\n" + "=" * 60)
-    console.print(Panel.fit(
-        f"[bold]Experiment Complete[/]\n\n"
+    summary_content = (
+        f"{format_summary_line(successful, failed, len(results) - successful - failed)}\n\n"
         f"Total jobs: {len(results)}\n"
-        f"Successful: [green]{successful}[/]\n"
-        f"Failed: [red]{failed}[/]\n\n"
         f"Results: {results_path}\n"
-        f"Manifest: {slurm_manifest}",
-        title="Summary"
-    ))
+        f"Manifest: {slurm_manifest}"
+    )
+    style = "green" if failed == 0 else "red"
+    print_footer(f"Experiment Complete — {summary_content}", style=style)
 
 
 if __name__ == "__main__":
+    # Enable debug logging when --verbose/-v is in args
+    if "--verbose" in sys.argv or "-v" in sys.argv:
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
     app()
