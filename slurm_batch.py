@@ -137,6 +137,7 @@ mkdir -p "$COUNTER_DIR"
 # (base arts.cfg has placeholder, we override counterFolder for this run)
 sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
 export artsConfig="{runtime_arts_cfg}"
+export counterFolder="$COUNTER_DIR"
 export CARTS_BENCHMARKS_REPORT_INIT=1
 
 echo "=========================================="

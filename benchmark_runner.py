@@ -1479,19 +1479,13 @@ class BenchmarkRunner:
                 for run_num in range(1, runs + 1):
                     arts_log: Optional[Path] = None
                     omp_log: Optional[Path] = None
+                    run_counter_dir: Optional[Path] = None
 
                     if am:
+                        run_counter_dir = am.get_counter_dir(name, config, run_num)
                         run_dir = am.get_run_dir(name, config, run_num)
                         arts_log = run_dir / "arts.log"
                         omp_log = run_dir / "omp.log"
-                        # Update counter dir for this specific run
-                        if run_num > 1:
-                            run_counter_dir = am.get_counter_dir(name, config, run_num)
-                            # Regenerate arts.cfg with updated counterFolder
-                            arts_cfg = generate_arts_config(
-                                effective_config, threads, run_counter_dir,
-                                desired_launcher, desired_nodes
-                            )
                     elif self.debug >= 2:
                         logs_dir = bench_path / "logs"
                         run_suffix = f"_r{run_num}" if runs > 1 else ""
@@ -1524,6 +1518,7 @@ class BenchmarkRunner:
                             perf_interval=perf_interval,
                             perf_output_name=arts_perf_name or "perf_cache_arts.csv",
                             perf_output_dir=perf_output_dir,
+                            counter_dir=run_counter_dir,
                         )
                     else:
                         run_arts = RunResult(
@@ -1632,6 +1627,7 @@ class BenchmarkRunner:
         perf_interval: float = 0.1,
         perf_output_name: str = "perf_cache.csv",
         perf_output_dir: Optional[Path] = None,
+        counter_dir: Optional[Path] = None,
     ) -> RunResult:
         """Execute a benchmark and capture output.
 
@@ -1648,6 +1644,8 @@ class BenchmarkRunner:
             perf_interval: Interval in seconds for perf stat sampling (default: 0.1).
             perf_output_name: Filename for perf CSV output (default: perf_cache.csv).
             perf_output_dir: Directory for perf CSV output (default: executable's parent).
+            counter_dir: Optional path to override the embedded counterFolder config value
+                via the ARTS per-variable env var mechanism.
         """
         if not executable or not os.path.exists(executable):
             return RunResult(
@@ -1662,6 +1660,8 @@ class BenchmarkRunner:
         run_env = os.environ.copy()
         if env:
             run_env.update(env)
+        if counter_dir:
+            run_env["counterFolder"] = str(counter_dir)
 
         # Build command based on launcher
         if launcher == "slurm" and node_count > 1:
@@ -2360,7 +2360,8 @@ class BenchmarkRunner:
         # Clean up stale ARTS port before run
         self._cleanup_port()
 
-        # Run ARTS version (config is embedded at compile time)
+        # Run ARTS version (config is embedded at compile time;
+        # counter_dir overrides embedded counterFolder via env var)
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
         if build_arts.status == Status.PASS and build_arts.executable:
@@ -2377,6 +2378,7 @@ class BenchmarkRunner:
                 perf_interval=perf_interval,
                 perf_output_name=arts_perf_name or "perf_cache_arts.csv",
                 perf_output_dir=perf_output_dir,
+                counter_dir=run_counter_dir,
             )
             # Append temp perf data to main CSV (legacy path, not used with artifact_manager)
             if perf_enabled and arts_perf_temp and arts_perf_main:
