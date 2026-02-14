@@ -1,8 +1,9 @@
 """
 Shared constants and parsing functions for CARTS benchmarks.
 
-Used by benchmark_runner.py, slurm_batch.py, and slurm_job_result.py.
-Stdlib-only — no dependencies on the three scripts.
+Used by benchmark_runner.py, benchmark_analyze.py, slurm/batch.py,
+and slurm/job_result.py.
+Stdlib-only — no external dependencies.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ============================================================================
@@ -217,3 +218,102 @@ def filter_benchmark_output(output: str) -> str:
         line for line in output.splitlines()
         if line.startswith(prefixes) or "checksum:" in line.lower()
     )
+
+
+# ============================================================================
+# Experiment Loading (for benchmark_analyze.py)
+# ============================================================================
+
+
+def load_experiment(results_dir: Path) -> Dict[str, Any]:
+    """Load experiment results from a directory.
+
+    Detects results.json (from ``run``) or aggregated_results.json (from ``slurm-run``).
+
+    Returns:
+        {"source": "run"|"slurm-run", "metadata": {...}, "summary": {...}, "results": [...]}
+
+    Raises:
+        FileNotFoundError: if no results file found.
+    """
+    run_path = results_dir / "results.json"
+    slurm_path = results_dir / "aggregated_results.json"
+
+    if run_path.exists():
+        with open(run_path) as f:
+            data = json.load(f)
+        data["source"] = "run"
+        return data
+    elif slurm_path.exists():
+        with open(slurm_path) as f:
+            data = json.load(f)
+        data["source"] = "slurm-run"
+        return data
+    else:
+        raise FileNotFoundError(
+            f"No results.json or aggregated_results.json in {results_dir}"
+        )
+
+
+def get_result_timing(result: Dict[str, Any], source: str, field: str) -> Optional[float]:
+    """Extract a timing field from either schema.
+
+    Args:
+        result: Single result dict from the results list.
+        source: "run" or "slurm-run".
+        field: One of 'arts_e2e', 'omp_e2e', 'arts_kernel', 'omp_kernel',
+               'arts_init', 'omp_init', 'speedup'.
+    """
+    if field == "speedup":
+        if source == "run":
+            return result.get("timing", {}).get("speedup")
+        else:
+            return result.get("speedup")
+
+    # Map field -> (schema key for run, runtime/timing_type for slurm)
+    field_map = {
+        "arts_e2e":    ("arts_e2e_sec",    "arts", "e2e_timings"),
+        "omp_e2e":     ("omp_e2e_sec",     "omp",  "e2e_timings"),
+        "arts_kernel": ("arts_kernel_sec",  "arts", "kernel_timings"),
+        "omp_kernel":  ("omp_kernel_sec",   "omp",  "kernel_timings"),
+        "arts_init":   ("arts_init_sec",    "arts", "init_timings"),
+        "omp_init":    ("omp_init_sec",     "omp",  "init_timings"),
+    }
+    if field not in field_map:
+        return None
+
+    if source == "run":
+        return result.get("timing", {}).get(field_map[field][0])
+    else:
+        runtime, timing_type = field_map[field][1], field_map[field][2]
+        timings = result.get(runtime, {}).get(timing_type, {})
+        if timings:
+            return sum(timings.values())
+        return None
+
+
+def get_result_config(
+    result: Dict[str, Any], source: str, metadata: Dict[str, Any]
+) -> Tuple[str, int, int]:
+    """Extract (benchmark_name, threads, nodes) from either schema."""
+    if source == "run":
+        name = result.get("name", "unknown")
+        cfg = result.get("config", {})
+        threads = cfg.get("arts_threads", 1)
+        nodes = cfg.get("arts_nodes", 1)
+    else:
+        name = result.get("benchmark", "unknown")
+        threads = metadata.get("threads", 1)
+        nodes = metadata.get("node_counts", [1])
+        if isinstance(nodes, list):
+            nodes = nodes[0] if nodes else 1
+    return name, int(threads), int(nodes)
+
+
+def get_result_status(result: Dict[str, Any], source: str) -> str:
+    """Extract PASS/FAIL status from either schema."""
+    if source == "run":
+        arts_status = result.get("run_arts", {}).get("status", "unknown")
+        return arts_status.upper() if isinstance(arts_status, str) else "UNKNOWN"
+    else:
+        return (result.get("status") or "UNKNOWN").upper()

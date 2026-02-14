@@ -30,8 +30,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Ensure benchmark_common is importable (script may run from arbitrary CWD in SLURM)
-sys.path.insert(0, str(Path(__file__).parent))
+# Ensure benchmark_common is importable (script may run from arbitrary CWD in SLURM).
+# benchmark_common.py lives in the parent scripts/ directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmark_common import (
     parse_checksum,

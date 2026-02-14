@@ -227,7 +227,7 @@ def generate_sbatch_script(
     Args:
         config: Job configuration
         script_path: Path to write the sbatch script
-        slurm_job_result_script: Path to the slurm_job_result.py script
+        slurm_job_result_script: Path to the slurm/job_result.py script
     """
     # Build partition and account lines (only if specified)
     partition_line = f"#SBATCH --partition={config.partition}" if config.partition else ""

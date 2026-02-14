@@ -2,7 +2,7 @@
 """
 CARTS Unified Benchmark Runner
 
-A powerful CLI tool for building, running, verifying, and reporting on CARTS benchmarks.
+A powerful CLI tool for building, running, and verifying CARTS benchmarks.
 Provides rich terminal output, correctness verification, performance timing, and JSON export.
 
 Usage:
@@ -10,7 +10,6 @@ Usage:
     carts benchmarks run [BENCHMARKS...] [OPTIONS]
     carts benchmarks build [BENCHMARKS...] [--size SIZE]
     carts benchmarks clean [BENCHMARKS...] [--all]
-    carts benchmarks report [--format FORMAT] [--output FILE]
 """
 
 from __future__ import annotations
@@ -30,9 +29,8 @@ import threading
 
 logger = logging.getLogger(__name__)
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -64,7 +62,7 @@ from rich.table import Table
 from rich.text import Text
 
 # SLURM batch support
-import slurm_batch
+from slurm import batch as slurm_batch
 
 # Shared constants and parsing
 from benchmark_common import (
@@ -94,223 +92,25 @@ from benchmark_common import (
 # Constants (local-only — shared constants imported from benchmark_common)
 # ============================================================================
 
-DEFAULT_ARTS_CONFIG = Path(__file__).parent / "arts.cfg"
+DEFAULT_ARTS_CONFIG = Path(__file__).parent.parent.parent / "configs" / "arts.cfg"
 
 
-# ============================================================================
-# Data Classes
-# ============================================================================
+# Data models (enums + dataclasses)
+from benchmark_models import (
+    Status, Phase,
+    BuildResult, WorkerTiming, ParallelTaskTiming, PerfCacheMetrics,
+    RunResult, TimingResult, VerificationResult,
+    Artifacts, BenchmarkConfig, BenchmarkResult,
+)
 
+# Artifact management
+from benchmark_artifacts import ArtifactManager
 
-class Status(str, Enum):
-    """Status of a build or run operation."""
-    PENDING = "pending"
-    BUILDING = "building"
-    RUNNING = "running"
-    PASS = "pass"
-    FAIL = "fail"
-    CRASH = "crash"
-    TIMEOUT = "timeout"
-    SKIP = "skip"
-
-
-class Phase(str, Enum):
-    """Current phase of benchmark execution."""
-    PENDING = "pending"
-    BUILD_ARTS = "build_arts"
-    BUILD_OMP = "build_omp"
-    RUN_ARTS = "run_arts"
-    RUN_OMP = "run_omp"
-    DONE = "done"
-
-
-@dataclass
-class BuildResult:
-    """Result of building a benchmark."""
-    status: Status
-    duration_sec: float
-    output: str
-    executable: Optional[str] = None
-
-
-@dataclass
-class WorkerTiming:
-    """Timing data for a single worker."""
-    worker_id: int
-    time_sec: float
-
-
-@dataclass
-class ParallelTaskTiming:
-    """Parallel region and task timing data for analyzing delayed optimization impact.
-
-    See docs/hypothesis.md for the experimental design this supports.
-    """
-    # Parallel region timings per worker
-    parallel_timings: Dict[str, List[WorkerTiming]
-                           ] = field(default_factory=dict)
-    # Task (kernel) timings per worker
-    task_timings: Dict[str, List[WorkerTiming]] = field(default_factory=dict)
-
-    def get_parallel_stats(self, name: str) -> Dict[str, float]:
-        """Get statistics for a parallel region."""
-        return self._compute_stats(self.parallel_timings.get(name, []))
-
-    def get_task_stats(self, name: str) -> Dict[str, float]:
-        """Get statistics for a task."""
-        return self._compute_stats(self.task_timings.get(name, []))
-
-    def _compute_stats(self, timings: List[WorkerTiming]) -> Dict[str, float]:
-        """Compute mean, min, max, stddev for a list of timings."""
-        if not timings:
-            return {"mean": 0.0, "min": 0.0, "max": 0.0, "stddev": 0.0, "count": 0}
-
-        times = [t.time_sec for t in timings]
-        n = len(times)
-        mean = sum(times) / n
-        variance = sum((t - mean) ** 2 for t in times) / n if n > 1 else 0.0
-
-        return {
-            "mean": mean,
-            "min": min(times),
-            "max": max(times),
-            "stddev": variance ** 0.5,
-            "count": n,
-        }
-
-    def compute_overhead(self, parallel_name: str, task_name: str) -> Dict[str, float]:
-        """Compute overhead = parallel_time - task_time per worker."""
-        parallel = {t.worker_id: t.time_sec for t in self.parallel_timings.get(
-            parallel_name, [])}
-        task = {t.worker_id: t.time_sec for t in self.task_timings.get(
-            task_name, [])}
-
-        overheads = []
-        for worker_id in parallel:
-            if worker_id in task:
-                overheads.append(parallel[worker_id] - task[worker_id])
-
-        if not overheads:
-            return {"mean": 0.0, "min": 0.0, "max": 0.0}
-
-        return {
-            "mean": sum(overheads) / len(overheads),
-            "min": min(overheads),
-            "max": max(overheads),
-        }
-
-
-@dataclass
-class PerfCacheMetrics:
-    """Cache metrics from perf stat profiling."""
-    cache_references: int = 0
-    cache_misses: int = 0
-    l1d_loads: int = 0
-    l1d_load_misses: int = 0
-    cache_miss_rate: float = 0.0
-    l1d_load_miss_rate: float = 0.0
-
-
-@dataclass
-class RunResult:
-    """Result of running a benchmark."""
-    status: Status
-    duration_sec: float
-    exit_code: int
-    stdout: str
-    stderr: str
-    checksum: Optional[str] = None
-    kernel_timings: Dict[str, float] = field(default_factory=dict)
-    e2e_timings: Dict[str, float] = field(default_factory=dict)
-    init_timings: Dict[str, float] = field(default_factory=dict)
-    parallel_task_timing: Optional[ParallelTaskTiming] = None
-    # Counter-based timing from ARTS introspection JSON (cluster.json)
-    counter_init_sec: Optional[float] = None
-    counter_e2e_sec: Optional[float] = None
-    # Perf cache metrics
-    perf_metrics: Optional[PerfCacheMetrics] = None
-    perf_csv_path: Optional[str] = None
-
-
-@dataclass
-class TimingResult:
-    """Timing comparison between ARTS and OpenMP."""
-    arts_time_sec: float  # Basis used for speedup (e2e if available, else kernel, else total)
-    omp_time_sec: float
-    speedup: float  # omp_time / arts_time (>1 = ARTS faster)
-    note: str
-    # Additional context
-    arts_kernel_sec: Optional[float] = None
-    omp_kernel_sec: Optional[float] = None
-    arts_e2e_sec: Optional[float] = None
-    omp_e2e_sec: Optional[float] = None
-    arts_init_sec: Optional[float] = None
-    omp_init_sec: Optional[float] = None
-    arts_total_sec: float = 0.0
-    omp_total_sec: float = 0.0
-    speedup_basis: str = "total"  # "e2e", "kernel", or "total"
-
-
-@dataclass
-class VerificationResult:
-    """Result of correctness verification."""
-    correct: bool
-    arts_checksum: Optional[str]
-    omp_checksum: Optional[str]
-    tolerance_used: float
-    note: str
-
-
-@dataclass
-class Artifacts:
-    """Paths to generated artifacts."""
-    # Source location
-    benchmark_dir: str
-
-    # Per-config build artifacts (in results/{experiment}/{benchmark}/build/{config}/)
-    build_dir: Optional[str] = None
-    carts_metadata: Optional[str] = None       # .carts-metadata.json
-    arts_metadata_mlir: Optional[str] = None   # *_arts_metadata.mlir
-    executable_arts: Optional[str] = None
-    executable_omp: Optional[str] = None
-    arts_config: Optional[str] = None          # arts.cfg
-
-    # Per-run artifacts (in results/{experiment}/{benchmark}/build/{config}/runs/{N}/)
-    run_dir: Optional[str] = None
-    arts_log: Optional[str] = None
-    omp_log: Optional[str] = None
-    counters_dir: Optional[str] = None
-    counter_files: List[str] = field(default_factory=list)
-
-
-@dataclass
-class BenchmarkConfig:
-    """Configuration for a benchmark run."""
-    arts_threads: int
-    arts_nodes: int
-    omp_threads: int
-    launcher: str
-
-
-@dataclass
-class BenchmarkResult:
-    """Complete result for a single benchmark."""
-    name: str
-    suite: str
-    size: str
-    config: BenchmarkConfig
-    run_number: int
-    build_arts: BuildResult
-    build_omp: BuildResult
-    run_arts: RunResult
-    run_omp: RunResult
-    timing: TimingResult
-    verification: VerificationResult
-    artifacts: Artifacts
-    timestamp: str
-    total_duration_sec: float
-    # Actual CFLAGS used for this size (e.g., "-DNI=2000 -DNJ=2000")
-    size_params: Optional[str] = None
+# Reproducibility metadata
+from benchmark_metadata import (
+    get_git_hash, get_compiler_version, get_cpu_info,
+    get_reproducibility_metadata, _serialize_parallel_task_timing,
+)
 
 
 # ============================================================================
@@ -319,7 +119,7 @@ class BenchmarkResult:
 
 app = typer.Typer(
     name="carts-bench",
-    help="CARTS Benchmark Runner - Build, run, verify, and report on benchmarks.",
+    help="CARTS Benchmark Runner - Build, run, and verify benchmarks.",
     add_completion=False,
     no_args_is_help=True,
 )
@@ -329,8 +129,8 @@ console = _shared_console
 def get_carts_dir() -> Path:
     """Get the CARTS root directory."""
     script_dir = Path(__file__).parent.resolve()
-    # Navigate up from external/carts-benchmarks to carts root
-    carts_dir = script_dir.parent.parent
+    # Navigate up from external/carts-benchmarks/scripts to carts root
+    carts_dir = script_dir.parent.parent.parent
     if not (carts_dir / "tools" / "carts").exists():
         # Fallback: try CARTS_DIR environment variable
         env_dir = os.environ.get("CARTS_DIR")
@@ -341,7 +141,7 @@ def get_carts_dir() -> Path:
 
 def get_benchmarks_dir() -> Path:
     """Get the benchmarks directory."""
-    return Path(__file__).parent.resolve()
+    return Path(__file__).parent.parent.resolve()
 
 
 # ============================================================================
@@ -722,224 +522,6 @@ def get_arts_cfg_nodes(path: Optional[Path]) -> List[str]:
     return [n.strip() for n in nodes_str.split(",") if n.strip()]
 
 
-
-
-
-
-# ============================================================================
-# Artifact Manager
-# ============================================================================
-
-
-class ArtifactManager:
-    """Manages a self-contained artifact directory for a benchmark experiment.
-
-    Every execution produces a single timestamped directory with all artifacts,
-    logs, and a manifest.  Both ``run`` and ``slurm-run`` share the same
-    canonical layout:
-
-        {base_results_dir}/{timestamp}/
-          manifest.json
-          results.json
-          {benchmark_name}/
-            {threads}t_{nodes}n/
-              artifacts/          # build outputs (shared across runs)
-              run_1/              # per-run outputs
-                arts.log
-                omp.log
-                counters/         # if counters enabled
-                perf/             # if perf enabled
-              run_2/
-    """
-
-    def __init__(self, base_results_dir: Path, timestamp: str):
-        self.experiment_dir = base_results_dir / timestamp
-        self.experiment_dir.mkdir(parents=True, exist_ok=True)
-        self.results_json_path = self.experiment_dir / "results.json"
-        self.manifest_path = self.experiment_dir / "manifest.json"
-        self._manifest_benchmarks: Dict[str, Dict] = {}
-
-    # -- directory getters (create on first access) --------------------------
-
-    def get_config_dir(self, benchmark_name: str, config: BenchmarkConfig) -> Path:
-        config_label = f"{config.arts_threads}t_{config.arts_nodes}n"
-        d = self.experiment_dir / benchmark_name / config_label
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    def get_artifacts_dir(self, benchmark_name: str, config: BenchmarkConfig) -> Path:
-        d = self.get_config_dir(benchmark_name, config) / "artifacts"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    def get_run_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
-        d = self.get_config_dir(benchmark_name, config) / f"run_{run_number}"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    def get_counter_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
-        d = self.get_run_dir(benchmark_name, config, run_number) / "counters"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    def get_perf_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
-        d = self.get_run_dir(benchmark_name, config, run_number) / "perf"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    # -- artifact operations -------------------------------------------------
-
-    def copy_build_artifacts(
-        self,
-        bench_path: Path,
-        benchmark_name: str,
-        config: BenchmarkConfig,
-        arts_cfg_used: Optional[Path] = None,
-    ) -> Dict[str, Optional[str]]:
-        """Copy build artifacts into the experiment's ``artifacts/`` directory."""
-        artifacts_dir = self.get_artifacts_dir(benchmark_name, config)
-        paths: Dict[str, Optional[str]] = {}
-
-        # arts.cfg (build INPUT)
-        cfg_src = (
-            arts_cfg_used if arts_cfg_used and arts_cfg_used.exists()
-            else (bench_path / "arts.cfg")
-        )
-        if cfg_src.exists():
-            dest = artifacts_dir / "arts.cfg"
-            shutil.copy2(cfg_src, dest)
-            paths["arts_config"] = str(dest)
-
-        # .carts-metadata.json (compiler metadata)
-        metadata = bench_path / ".carts-metadata.json"
-        if metadata.exists():
-            dest = artifacts_dir / ".carts-metadata.json"
-            shutil.copy2(metadata, dest)
-            paths["carts_metadata"] = str(dest)
-
-        # *_arts_metadata.mlir
-        for mlir in bench_path.glob("*_arts_metadata.mlir"):
-            dest = artifacts_dir / mlir.name
-            shutil.copy2(mlir, dest)
-            paths["arts_metadata_mlir"] = str(dest)
-
-        # Other MLIR files
-        for mlir in bench_path.glob("*.mlir"):
-            if "_metadata" not in mlir.name:
-                shutil.copy2(mlir, artifacts_dir / mlir.name)
-
-        # LLVM IR
-        for ll in bench_path.glob("*-arts.ll"):
-            shutil.copy2(ll, artifacts_dir / ll.name)
-
-        # Executables
-        for exe in bench_path.glob("*_arts"):
-            if exe.is_file():
-                dest = artifacts_dir / exe.name
-                shutil.copy2(exe, dest)
-                paths["executable_arts"] = str(dest)
-        for exe in list(bench_path.glob("*_omp")) + list(
-            (bench_path / "build").glob("*_omp")
-        ):
-            if exe.is_file():
-                dest = artifacts_dir / exe.name
-                shutil.copy2(exe, dest)
-                paths["executable_omp"] = str(dest)
-
-        # Build logs
-        logs_dir = bench_path / "logs"
-        if logs_dir.exists():
-            for log in ["build_arts.log", "build_openmp.log"]:
-                log_file = logs_dir / log
-                if log_file.exists():
-                    shutil.copy2(log_file, artifacts_dir / log)
-
-        return paths
-
-    def record_run(
-        self,
-        benchmark_name: str,
-        config: BenchmarkConfig,
-        run_number: int,
-        has_counters: bool = False,
-        has_perf: bool = False,
-    ):
-        """Track a completed run for the manifest."""
-        config_label = f"{config.arts_threads}t_{config.arts_nodes}n"
-        if benchmark_name not in self._manifest_benchmarks:
-            self._manifest_benchmarks[benchmark_name] = {"configs": {}}
-        configs = self._manifest_benchmarks[benchmark_name]["configs"]
-        if config_label not in configs:
-            configs[config_label] = {
-                "artifacts": str(Path(benchmark_name) / config_label / "artifacts"),
-                "runs": {},
-            }
-        configs[config_label]["runs"][str(run_number)] = {
-            "path": str(Path(benchmark_name) / config_label / f"run_{run_number}"),
-            "has_counters": has_counters,
-            "has_perf": has_perf,
-        }
-
-    def write_manifest(
-        self,
-        results: List[BenchmarkResult],
-        command: str,
-        total_duration: float,
-    ) -> Path:
-        """Write ``manifest.json`` — a structure index and quick summary."""
-        import math
-        from collections import Counter as _Counter
-
-        passed = sum(
-            1 for r in results
-            if r.run_arts.status == Status.PASS and r.verification.correct
-        )
-        failed = sum(
-            1 for r in results
-            if r.run_arts.status in (Status.FAIL, Status.CRASH)
-        )
-        total_benchmarks = len(set(r.name for r in results))
-        total_configs = len(
-            set((r.name, r.config.arts_threads, r.config.arts_nodes) for r in results)
-        )
-        config_counts = _Counter(
-            (r.name, r.config.arts_threads, r.config.arts_nodes) for r in results
-        )
-        runs_per_config = max(config_counts.values()) if config_counts else 1
-        speedups = [r.timing.speedup for r in results if r.timing.speedup > 0]
-        geomean = (
-            math.exp(sum(math.log(s) for s in speedups) / len(speedups))
-            if speedups else 0.0
-        )
-
-        carts_dir = get_carts_dir()
-        benchmarks_dir = get_benchmarks_dir()
-        repro = get_reproducibility_metadata(carts_dir, benchmarks_dir)
-
-        manifest = {
-            "version": 1,
-            "created": datetime.now().isoformat(),
-            "command": command,
-            "layout": {
-                "results_json": "results.json",
-                "benchmarks": self._manifest_benchmarks,
-            },
-            "summary": {
-                "total_benchmarks": total_benchmarks,
-                "total_configs": total_configs,
-                "runs_per_config": runs_per_config,
-                "passed": passed,
-                "failed": failed,
-                "geometric_mean_speedup": round(geomean, 4),
-                "total_duration_sec": round(total_duration, 1),
-            },
-            "reproducibility": repro,
-        }
-
-        with open(self.manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2, default=str)
-
-        return self.manifest_path
 
 
 # ============================================================================
@@ -1323,11 +905,18 @@ class BenchmarkRunner:
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
         # Determine effective config template
+        # Search order: benchmark dir → suite dir → benchmarks root → scripts/arts.cfg
         effective_config = base_config
         if effective_config is None:
-            candidate = bench_path / "arts.cfg"
-            if candidate.exists():
-                effective_config = candidate
+            for candidate in [
+                bench_path / "arts.cfg",
+                bench_path.parent / "arts.cfg",
+                self.benchmarks_dir / "arts.cfg",
+                DEFAULT_ARTS_CONFIG,
+            ]:
+                if candidate.exists():
+                    effective_config = candidate
+                    break
             else:
                 effective_config = DEFAULT_ARTS_CONFIG
 
@@ -2114,9 +1703,15 @@ class BenchmarkRunner:
         # 3. Fall back to default carts-benchmarks config
         effective_config = arts_config.resolve() if arts_config else None
         if effective_config is None:
-            candidate = bench_path / "arts.cfg"
-            if candidate.exists():
-                effective_config = candidate
+            for candidate in [
+                bench_path / "arts.cfg",
+                bench_path.parent / "arts.cfg",
+                self.benchmarks_dir / "arts.cfg",
+                DEFAULT_ARTS_CONFIG,
+            ]:
+                if candidate.exists():
+                    effective_config = candidate
+                    break
             else:
                 effective_config = DEFAULT_ARTS_CONFIG
 
@@ -2529,6 +2124,8 @@ class BenchmarkRunner:
                         )
                     except Exception as e:
                         # Log error and continue to next benchmark
+                        self.console.print(
+                            f"[red]Error running {bench}:[/] {e}")
                         result = self._make_error_result(bench, size, str(e))
 
                     # Update results and refresh display
@@ -2582,6 +2179,8 @@ class BenchmarkRunner:
                         result = future.result()
                         results_list.append(result)
                     except Exception as e:
+                        self.console.print(
+                            f"[red]Error running {bench}:[/] {e}")
                         results_list.append(
                             self._make_error_result(bench, size, str(e)))
 
@@ -2617,6 +2216,8 @@ class BenchmarkRunner:
                         results_dict[bench] = result
                         results_list.append(result)
                     except Exception as e:
+                        self.console.print(
+                            f"[red]Error running {bench}:[/] {e}")
                         error_result = self._make_error_result(
                             bench, size, str(e))
                         results_dict[bench] = error_result
@@ -3099,814 +2700,9 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
     return Panel(content, title="Summary", border_style="blue")
 
 
-def _render_init_e2e_bar(init_sec: Optional[float], e2e_sec: Optional[float], max_total: float, width: int = 30) -> Text:
-    """Render a stacked bar: init (red) + e2e (green)."""
-    init_val = float(init_sec or 0.0)
-    e2e_val = float(e2e_sec or 0.0)
-    total = init_val + e2e_val
+# NOTE: SVG/report generation code was removed.
+# Use `carts analyze` for post-run analysis (summary, export, compare).
 
-    if max_total <= 0.0:
-        return Text("(no timing)", style="dim")
-
-    total_len = int(round(width * (total / max_total)))
-    init_len = int(round(width * (init_val / max_total)))
-    init_len = min(init_len, total_len)
-    e2e_len = max(0, total_len - init_len)
-
-    bar = Text()
-    if init_len > 0:
-        bar.append("█" * init_len, style="red")
-    if e2e_len > 0:
-        bar.append("█" * e2e_len, style="green")
-    if total_len < width:
-        bar.append(" " * (width - total_len), style="dim")
-
-    label = f" {total:.4f}s"
-    if init_sec is not None and e2e_sec is not None:
-        label += f" (init {init_val:.4f}s + e2e {e2e_val:.4f}s)"
-    elif e2e_sec is not None:
-        label += f" (e2e {e2e_val:.4f}s)"
-    elif init_sec is not None:
-        label += f" (init {init_val:.4f}s)"
-    else:
-        label += " (n/a)"
-    bar.append(label, style="dim")
-    return bar
-
-
-def create_init_e2e_bar_chart(results: List[BenchmarkResult], width: int = 30) -> Table:
-    """Create a stacked bar chart per benchmark: init + e2e (ARTS vs OMP)."""
-    table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
-    table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("ARTS init+e2e", justify="left")
-    table.add_column("OMP init+e2e", justify="left")
-
-    # Scale bars by max (init+e2e) across all rows/runtimes.
-    max_total = 0.0
-    for r in results:
-        for init_sec, e2e_sec in (
-            (r.timing.arts_init_sec, r.timing.arts_e2e_sec),
-            (r.timing.omp_init_sec, r.timing.omp_e2e_sec),
-        ):
-            init_val = float(init_sec or 0.0)
-            e2e_val = float(e2e_sec or 0.0)
-            max_total = max(max_total, init_val + e2e_val)
-
-    for r in results:
-        table.add_row(
-            r.name,
-            _render_init_e2e_bar(r.timing.arts_init_sec,
-                                 r.timing.arts_e2e_sec, max_total, width),
-            _render_init_e2e_bar(r.timing.omp_init_sec,
-                                 r.timing.omp_e2e_sec, max_total, width),
-        )
-
-    table.caption = "[dim]Bar colors: init=red, e2e=green[/]"
-    return table
-
-
-def _sanitize_filename(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "benchmark"
-
-
-def _svg_escape(s: str) -> str:
-    return (s.replace("&", "&amp;")
-             .replace("<", "&lt;")
-             .replace(">", "&gt;")
-             .replace("\"", "&quot;"))
-
-
-def _bar_segment_palette(n: int) -> List[str]:
-    # Tableau-ish distinct colors (good in print, ok for colorblind readers).
-    base = [
-        "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
-        "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC",
-    ]
-    if n <= len(base):
-        return base[:n]
-    out = list(base)
-    # Repeat with a slight offset in luminance by alternating a neutral gray.
-    while len(out) < n:
-        out.append("#777777")
-    return out[:n]
-
-
-def _write_per_benchmark_timeline_svg(
-    benchmark: str,
-    arts_init: Dict[str, float],
-    arts_e2e: Dict[str, float],
-    arts_kernel: Dict[str, float],
-    omp_init: Dict[str, float],
-    omp_e2e: Dict[str, float],
-    omp_kernel: Dict[str, float],
-    *,
-    speedup: Optional[float],
-    speedup_basis: str,
-    svg_path: Path,
-) -> None:
-    """Write a per-benchmark SVG with its own local x-scale (paper-friendly)."""
-    arts_init_total = sum(arts_init.values()) if arts_init else 0.0
-    omp_init_total = sum(omp_init.values()) if omp_init else 0.0
-    arts_e2e_total = sum(arts_e2e.values()) if arts_e2e else 0.0
-    omp_e2e_total = sum(omp_e2e.values()) if omp_e2e else 0.0
-    arts_kernel_total = sum(arts_kernel.values()) if arts_kernel else 0.0
-    omp_kernel_total = sum(omp_kernel.values()) if omp_kernel else 0.0
-    arts_other_total = max(arts_e2e_total - arts_kernel_total, 0.0)
-    omp_other_total = max(omp_e2e_total - omp_kernel_total, 0.0)
-
-    # Segment ordering: preserve observed order in ARTS, then append unseen OMP segments.
-    seg_order: List[str] = list(arts_e2e.keys())
-    for k in omp_e2e.keys():
-        if k not in seg_order:
-            seg_order.append(k)
-
-    # Total used for scaling (per runtime bars)
-    arts_total = arts_init_total + arts_e2e_total
-    omp_total = omp_init_total + omp_e2e_total
-    max_total = max(arts_total, omp_total, 1e-12)
-
-    # Layout
-    pad = 18
-    label_w = 220
-    bar_w = 640
-    right_w = 260
-    w = pad + label_w + bar_w + right_w + pad
-    title_h = 46
-    row_h = 34
-    bar_h = 14
-    h = title_h + row_h * 4 + 78
-
-    bar_x = pad + label_w
-    arts_y = title_h + 10
-    omp_y = arts_y + row_h
-    arts_b_y = omp_y + row_h + 12
-    omp_b_y = arts_b_y + row_h
-    axis_y = omp_b_y + 28
-
-    def xscale(v: float) -> float:
-        return bar_w * (v / max_total)
-
-    init_color = "#D62728"
-    other_color = "#9AA0A6"
-    kernel_color = "#1F77B4"
-    e2e_colors = _bar_segment_palette(max(1, len(seg_order)))
-    seg_color = {name: e2e_colors[i] for i, name in enumerate(seg_order)}
-
-    title = _svg_escape(benchmark)
-    lines: List[str] = []
-    lines.append(
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">')
-    lines.append("<style>")
-    lines.append(
-        'text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; }')
-    lines.append(
-        '.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }')
-    lines.append(".dim { fill: #555; }")
-    lines.append(".light { fill: #888; }")
-    lines.append("</style>")
-
-    # Title
-    sp = ""
-    if speedup is not None and speedup > 0:
-        sp = f"  |  speedup={speedup:.2f}x ({_svg_escape(speedup_basis)})"
-    lines.append(f'<text x="{pad}" y="{22}" font-size="16">{title}{sp}</text>')
-    lines.append(
-        f'<text x="{pad}" y="{40}" class="dim mono">local x-scale: 0–{max_total:.6f}s</text>')
-
-    # Legend (init + kernel/other + e2e segments)
-    legend_x = pad
-    legend_y = h - 22
-    lines.append(
-        f'<rect x="{legend_x}" y="{legend_y-10}" width="12" height="8" fill="{init_color}" />')
-    lines.append(
-        f'<text x="{legend_x+18}" y="{legend_y-3}" class="dim mono">init</text>')
-    lines.append(
-        f'<rect x="{legend_x+70}" y="{legend_y-10}" width="12" height="8" fill="{kernel_color}" />')
-    lines.append(
-        f'<text x="{legend_x+88}" y="{legend_y-3}" class="dim mono">kernel</text>')
-    lines.append(
-        f'<rect x="{legend_x+160}" y="{legend_y-10}" width="12" height="8" fill="{other_color}" />')
-    lines.append(
-        f'<text x="{legend_x+178}" y="{legend_y-3}" class="dim mono">other(e2e-kernel)</text>')
-
-    lx = legend_x + 360
-    for i, seg in enumerate(seg_order[:6]):  # keep legend compact
-        c = seg_color[seg]
-        lines.append(
-            f'<rect x="{lx}" y="{legend_y-10}" width="12" height="8" fill="{c}" />')
-        lines.append(
-            f'<text x="{lx+18}" y="{legend_y-3}" class="dim mono">{_svg_escape(seg)}</text>')
-        lx += 160
-        if lx > w - 240:
-            break
-
-    # Axis ticks (independent scale)
-    lines.append(
-        f'<line x1="{bar_x}" y1="{axis_y}" x2="{bar_x+bar_w}" y2="{axis_y}" stroke="#bbb" stroke-width="1" />')
-    for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        x = bar_x + bar_w * t
-        lines.append(
-            f'<line x1="{x}" y1="{axis_y-4}" x2="{x}" y2="{axis_y+4}" stroke="#bbb" stroke-width="1" />')
-        lines.append(
-            f'<text x="{x}" y="{axis_y+18}" text-anchor="middle" class="light mono">{(max_total*t):.3f}</text>')
-
-    def draw_runtime_row(y: int, label: str, init_map: Dict[str, float], e2e_map: Dict[str, float]) -> None:
-        init_v = sum(init_map.values()) if init_map else 0.0
-        e2e_total = sum(e2e_map.values()) if e2e_map else 0.0
-        total_v = init_v + e2e_total
-
-        lines.append(
-            f'<text x="{pad}" y="{y+12}" class="mono">{_svg_escape(label)}</text>')
-        # Background bar
-        lines.append(
-            f'<rect x="{bar_x}" y="{y}" width="{bar_w}" height="{bar_h}" fill="#f1f1f1" />')
-
-        x0 = bar_x
-        if init_v > 0:
-            iw = xscale(init_v)
-            lines.append(
-                f'<rect x="{x0}" y="{y}" width="{iw:.2f}" height="{bar_h}" fill="{init_color}"><title>init: {init_v:.6f}s</title></rect>')
-            x0 += iw
-
-        for seg in seg_order:
-            v = float(e2e_map.get(seg, 0.0))
-            if v <= 0:
-                continue
-            sw = xscale(v)
-            c = seg_color[seg]
-            pct = (v / total_v * 100.0) if total_v > 0 else 0.0
-            title_txt = f"{seg}: {v:.6f}s ({pct:.1f}%)"
-            lines.append(
-                f'<rect x="{x0:.2f}" y="{y}" width="{sw:.2f}" height="{bar_h}" fill="{c}"><title>{_svg_escape(title_txt)}</title></rect>')
-            # Inline label only if it fits well (reduce clutter)
-            if sw >= 70:
-                lines.append(
-                    f'<text x="{x0 + sw/2:.2f}" y="{y+11}" text-anchor="middle" fill="#000" class="mono">{v:.3f}s</text>')
-            x0 += sw
-
-        # Totals on the right
-        tx = bar_x + bar_w + 10
-        lines.append(
-            f'<text x="{tx}" y="{y+12}" class="dim mono">total {total_v:.6f}s</text>')
-        lines.append(
-            f'<text x="{tx}" y="{y+26}" class="light mono">init {init_v:.6f}s + e2e {e2e_total:.6f}s</text>')
-
-    draw_runtime_row(arts_y, "ARTS", arts_init, arts_e2e)
-    draw_runtime_row(omp_y, "OMP", omp_init, omp_e2e)
-
-    # Breakdown rows: init + other(e2e-kernel) + kernel (consistent across benchmarks).
-    def draw_breakdown_row(y: int, label: str, init_v: float, other_v: float, kernel_v: float) -> None:
-        total_v = init_v + other_v + kernel_v
-        lines.append(
-            f'<text x="{pad}" y="{y+12}" class="mono">{_svg_escape(label)}</text>')
-        lines.append(
-            f'<rect x="{bar_x}" y="{y}" width="{bar_w}" height="{bar_h}" fill="#f1f1f1" />')
-
-        x0 = bar_x
-        if init_v > 0:
-            iw = xscale(init_v)
-            lines.append(
-                f'<rect x="{x0}" y="{y}" width="{iw:.2f}" height="{bar_h}" fill="{init_color}"><title>init: {init_v:.6f}s</title></rect>')
-            x0 += iw
-        if other_v > 0:
-            ow = xscale(other_v)
-            lines.append(
-                f'<rect x="{x0:.2f}" y="{y}" width="{ow:.2f}" height="{bar_h}" fill="{other_color}"><title>other (e2e-kernel): {other_v:.6f}s</title></rect>')
-            x0 += ow
-        if kernel_v > 0:
-            kw = xscale(kernel_v)
-            lines.append(
-                f'<rect x="{x0:.2f}" y="{y}" width="{kw:.2f}" height="{bar_h}" fill="{kernel_color}"><title>kernel: {kernel_v:.6f}s</title></rect>')
-            x0 += kw
-
-        tx = bar_x + bar_w + 10
-        lines.append(
-            f'<text x="{tx}" y="{y+12}" class="dim mono">total {total_v:.6f}s</text>')
-        lines.append(
-            f'<text x="{tx}" y="{y+26}" class="light mono">init {init_v:.6f}s | other {other_v:.6f}s | kernel {kernel_v:.6f}s</text>')
-
-    draw_breakdown_row(arts_b_y, "ARTS breakdown",
-                       arts_init_total, arts_other_total, arts_kernel_total)
-    draw_breakdown_row(omp_b_y, "OMP breakdown", omp_init_total,
-                       omp_other_total, omp_kernel_total)
-
-    lines.append("</svg>")
-    svg_path.write_text("\n".join(lines))
-
-
-def _write_small_multiples_svg(groups: List[Dict[str, Any]], svg_path: Path) -> None:
-    """Write a multi-panel SVG: each benchmark panel has its own local x-scale."""
-    if not groups:
-        svg_path.write_text("")
-        return
-
-    pad = 18
-    panel_h = 120
-    w = 1200
-    h = 60 + panel_h * len(groups) + 30
-    lines: List[str] = []
-    lines.append(
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">')
-    lines.append("<style>")
-    lines.append(
-        'text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; }')
-    lines.append(
-        '.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }')
-    lines.append(".dim { fill: #555; }")
-    lines.append(".light { fill: #888; }")
-    lines.append("</style>")
-    lines.append(
-        f'<text x="{pad}" y="24" font-size="16">Init + E2E timeline (per-benchmark local scale)</text>')
-    lines.append(
-        f'<text x="{pad}" y="44" class="dim mono">Note: each panel has an independent x-axis scale for readability.</text>')
-
-    y0 = 60
-    for i, g in enumerate(groups):
-        y = y0 + i * panel_h
-        # Reuse per-benchmark writer by inlining a simplified rendering into a group <g>
-        bench = str(g["benchmark"])
-        sp = g.get("speedup")
-        sp_basis = str(g.get("speedup_basis", "total"))
-        scale_max = float(g["scale_max"])
-
-        label_w = 240
-        bar_w = 720
-        right_w = 200
-        bar_x = pad + label_w
-        arts_y = y + 30
-        omp_y = y + 64
-        axis_y = y + 92
-
-        def xscale(v: float) -> float:
-            return bar_w * (v / max(scale_max, 1e-12))
-
-        # Panel background
-        lines.append(
-            f'<rect x="{pad}" y="{y}" width="{w-2*pad}" height="{panel_h-6}" fill="#fafafa" stroke="#eee" />')
-
-        sp_txt = ""
-        if sp is not None and float(sp) > 0:
-            sp_txt = f"  speedup={float(sp):.2f}x ({_svg_escape(sp_basis)})"
-        lines.append(
-            f'<text x="{pad+6}" y="{y+18}" class="mono">{_svg_escape(bench)}{sp_txt}</text>')
-        lines.append(
-            f'<text x="{pad+6}" y="{y+34}" class="light mono">scale: 0–{scale_max:.4f}s</text>')
-
-        # Axis
-        lines.append(
-            f'<line x1="{bar_x}" y1="{axis_y}" x2="{bar_x+bar_w}" y2="{axis_y}" stroke="#bbb" stroke-width="1" />')
-        for t in [0.0, 0.5, 1.0]:
-            x = bar_x + bar_w * t
-            lines.append(
-                f'<line x1="{x}" y1="{axis_y-4}" x2="{x}" y2="{axis_y+4}" stroke="#bbb" stroke-width="1" />')
-            lines.append(
-                f'<text x="{x}" y="{axis_y+18}" text-anchor="middle" class="light mono">{(scale_max*t):.3f}</text>')
-
-        # Draw rows using consistent segments (init + other + kernel)
-        init_color = "#D62728"
-        other_color = "#9AA0A6"
-        kernel_color = "#1F77B4"
-
-        def draw_row(y_row: int, label: str, segments: List[Tuple[str, float]], total: float) -> None:
-            lines.append(
-                f'<text x="{pad+6}" y="{y_row+12}" class="mono">{_svg_escape(label)}</text>')
-            lines.append(
-                f'<rect x="{bar_x}" y="{y_row}" width="{bar_w}" height="14" fill="#f1f1f1" />')
-            xcur = bar_x
-            for name, val in segments:
-                if val <= 0:
-                    continue
-                sw = xscale(val)
-                if name == "__init__":
-                    c = init_color
-                    title_txt = "init"
-                elif name == "__kernel__":
-                    c = kernel_color
-                    title_txt = "kernel"
-                else:
-                    c = other_color
-                    title_txt = "other (e2e-kernel)"
-                pct = (val / total * 100.0) if total > 0 else 0.0
-                lines.append(
-                    f'<rect x="{xcur:.2f}" y="{y_row}" width="{sw:.2f}" height="14" fill="{c}"><title>{_svg_escape(title_txt)}: {val:.6f}s ({pct:.1f}%)</title></rect>')
-                xcur += sw
-            lines.append(
-                f'<text x="{bar_x+bar_w+10}" y="{y_row+12}" class="dim mono">{total:.4f}s</text>')
-
-        draw_row(arts_y, "ARTS", g["arts_segments"], g["arts_total"])
-        draw_row(omp_y, "OMP", g["omp_segments"], g["omp_total"])
-
-    lines.append("</svg>")
-    svg_path.write_text("\n".join(lines))
-
-
-def _write_speedup_bar_chart(rows: List[Dict[str, Any]], svg_path: Path) -> None:
-    """Write a single bar chart with all benchmarks/configs."""
-    valid = [
-        r
-        for r in rows
-        if r.get("speedup_mean") is not None and float(r["speedup_mean"]) > 0
-    ]
-    if not valid:
-        svg_path.write_text("")
-        return
-
-    width = 1200
-    bar_height = 30
-    gap = 12
-    pad = 150
-    height = 60 + len(valid) * (bar_height + gap)
-
-    sorted_rows = sorted(valid, key=lambda r: float(
-        r["speedup_mean"]), reverse=True)
-    max_speedup = max(float(r["speedup_mean"]) for r in sorted_rows)
-    max_speedup = max(max_speedup, 1.2)
-
-    def x_pos(value: float) -> float:
-        return pad + (width - pad - 80) * min(value / max_speedup, 1.0)
-
-    lines: List[str] = []
-    lines.append(
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">')
-    lines.append("<style>")
-    lines.append(
-        'text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; }'
-    )
-    lines.append(
-        '.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }'
-    )
-    lines.append(".dim { fill: #555; }")
-    lines.append("</style>")
-    lines.append(
-        f'<text x="{pad}" y="24" font-size="16">Speedup (OMP / ARTS) per benchmark/configuration</text>')
-    lines.append(
-        f'<text x="{pad}" y="42" class="dim mono">Bars > 1.0x → CARTS faster; < 1.0x → OpenMP wins. Multi-run mean ± std shown.</text>')
-    lines.append(
-        f'<line x1="{pad}" y1="48" x2="{width-60}" y2="48" stroke="#ddd" stroke-width="1" />')
-
-    for idx, r in enumerate(sorted_rows):
-        y = 60 + idx * (bar_height + gap)
-        label = f"{r['benchmark']} (t={r['threads']}, n={r['nodes']}, omp={r['omp_threads']})"
-        sp = float(r["speedup_mean"])
-        sp_std = r.get("speedup_std") or 0.0
-        color = "#2CA02C" if sp >= 1.0 else "#D62728"
-        lines.append(
-            f'<text x="8" y="{y + bar_height/2 + 4:.1f}" class="mono" text-anchor="start">{_svg_escape(label)}</text>')
-        bar_start = pad
-        bar_end = x_pos(sp)
-        lines.append(
-            f'<rect x="{bar_start}" y="{y}" width="{max(bar_end - bar_start, 1):.2f}" height="{bar_height}" fill="{color}" opacity="0.9">'
-        )
-        lines.append("</rect>")
-        if sp_std > 0:
-            err_start = x_pos(max(sp - float(sp_std), 0.0))
-            err_end = x_pos(sp + float(sp_std))
-            lines.append(
-                f'<line x1="{err_start:.2f}" y1="{y + bar_height/2:.2f}" x2="{err_end:.2f}" y2="{y + bar_height/2:.2f}" stroke="{color}" stroke-width="1.2" />'
-            )
-        lines.append(
-            f'<text x="{bar_end + 8:.2f}" y="{y + bar_height/2 + 4:.1f}" class="dim mono">{sp:.2f}x ± {float(sp_std):.2f}x</text>'
-        )
-
-    # x-axis
-    axis_y = height - 16
-    lines.append(
-        f'<line x1="{pad}" y1="{axis_y}" x2="{width-80}" y2="{axis_y}" stroke="#bbb" stroke-width="1" />')
-    for t in [0.2, 0.5, 1.0, 2.0, max_speedup]:
-        if t > max_speedup:
-            continue
-        x = x_pos(t)
-        lines.append(
-            f'<line x1="{x:.2f}" y1="{axis_y-4}" x2="{x:.2f}" y2="{axis_y+4}" stroke="#bbb" stroke-width="1" />')
-        lines.append(
-            f'<text x="{x:.2f}" y="{axis_y+16}" text-anchor="middle" class="light mono">{t:.2f}x</text>')
-    if max_speedup >= 1.0:
-        x1 = x_pos(1.0)
-        lines.append(
-            f'<line x1="{x1:.2f}" y1="48" x2="{x1:.2f}" y2="{axis_y}" stroke="#999" stroke-dasharray="4,3" stroke-width="1" />')
-        lines.append(f'<text x="{x1:.2f}" y="60" class="dim mono">1.0x</text>')
-
-    lines.append("</svg>")
-    svg_path.write_text("\n".join(lines))
-
-
-def generate_markdown_report(
-    results: List[BenchmarkResult],
-    report_md_path: Path,
-    chart_svg_path: Path,
-    *,
-    size: str,
-) -> Tuple[Path, Path]:
-    """Generate a Markdown report + companion SVG charts (paper-friendly)."""
-    now = datetime.now().isoformat(timespec="seconds")
-    figures_dir = report_md_path.parent / f"{report_md_path.stem}_figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    speedup_svg_path = report_md_path.parent / \
-        f"{report_md_path.stem}_speedup_bar_chart.svg"
-
-    # Build per-benchmark groups (config-aware) and per-benchmark SVGs.
-    groups: Dict[Tuple, List[BenchmarkResult]] = {}
-    for r in results:
-        key = (r.name, r.config.arts_threads, r.config.arts_nodes,
-               r.config.omp_threads, r.config.launcher)
-        groups.setdefault(key, []).append(r)
-
-    panel_groups: List[Dict[str, Any]] = []
-    per_svgs: List[Tuple[Tuple, Path]] = []
-
-    def _mean_std(vals: List[float]) -> Tuple[Optional[float], Optional[float]]:
-        if not vals:
-            return None, None
-        if len(vals) == 1:
-            return vals[0], 0.0
-        from statistics import mean, stdev
-        return mean(vals), stdev(vals)
-
-    def _fmt_ms(v: Optional[float]) -> str:
-        if v is None:
-            return "-"
-        return f"{v * 1e3:.3f}"
-
-    def _fmt_s(v: Optional[float]) -> str:
-        if v is None:
-            return "-"
-        return f"{v:.6f}"
-
-    def _fmt_mean_std_s(mean_v: Optional[float], std_v: Optional[float]) -> str:
-        if mean_v is None:
-            return "-"
-        if std_v is None:
-            return f"{mean_v:.6f}"
-        return f"{mean_v:.6f} ± {std_v:.6f}"
-
-    def _kv_lines(d: Dict[str, float]) -> str:
-        if not d:
-            return "-"
-        parts = [f"`{k}`={v:.6f}s" for k, v in sorted(d.items())]
-        return ", ".join(parts)
-
-    report_rows: List[Dict[str, Any]] = []
-
-    for key, runs in sorted(groups.items(), key=lambda kv: kv[0][0]):
-        r0 = runs[0]
-        bench = r0.name
-
-        # Aggregate timing stats across runs (mean±std) for paper reporting.
-        arts_init_vals = [float(r.run_arts.init_timings.get(
-            "arts")) for r in runs if r.run_arts.init_timings.get("arts") is not None]
-        omp_init_vals = [float(r.run_omp.init_timings.get("omp"))
-                         for r in runs if r.run_omp.init_timings.get("omp") is not None]
-        arts_e2e_vals = [sum(r.run_arts.e2e_timings.values())
-                         for r in runs if r.run_arts.e2e_timings]
-        omp_e2e_vals = [sum(r.run_omp.e2e_timings.values())
-                        for r in runs if r.run_omp.e2e_timings]
-        arts_kernel_vals = [sum(r.run_arts.kernel_timings.values())
-                            for r in runs if r.run_arts.kernel_timings]
-        omp_kernel_vals = [sum(r.run_omp.kernel_timings.values())
-                           for r in runs if r.run_omp.kernel_timings]
-
-        arts_init_mean, arts_init_std = _mean_std(arts_init_vals)
-        omp_init_mean, omp_init_std = _mean_std(omp_init_vals)
-        arts_e2e_mean, arts_e2e_std = _mean_std(arts_e2e_vals)
-        omp_e2e_mean, omp_e2e_std = _mean_std(omp_e2e_vals)
-        arts_kernel_mean, arts_kernel_std = _mean_std(arts_kernel_vals)
-        omp_kernel_mean, omp_kernel_std = _mean_std(omp_kernel_vals)
-
-        arts_other_mean = None if arts_e2e_mean is None or arts_kernel_mean is None else max(
-            arts_e2e_mean - arts_kernel_mean, 0.0)
-        omp_other_mean = None if omp_e2e_mean is None or omp_kernel_mean is None else max(
-            omp_e2e_mean - omp_kernel_mean, 0.0)
-
-        arts_total_mean = None if arts_init_mean is None or arts_e2e_mean is None else (
-            arts_init_mean + arts_e2e_mean)
-        omp_total_mean = None if omp_init_mean is None or omp_e2e_mean is None else (
-            omp_init_mean + omp_e2e_mean)
-        scale_max = max(float(arts_total_mean or 0.0),
-                        float(omp_total_mean or 0.0), 1e-12)
-
-        # Use segment maps from the first run for labeling. (If multiple runs, segment keys should match.)
-        arts_init_map = dict(r0.run_arts.init_timings)
-        omp_init_map = dict(r0.run_omp.init_timings)
-        arts_e2e_map = dict(r0.run_arts.e2e_timings)
-        omp_e2e_map = dict(r0.run_omp.e2e_timings)
-        arts_kernel_map = dict(r0.run_arts.kernel_timings)
-        omp_kernel_map = dict(r0.run_omp.kernel_timings)
-
-        # Per-benchmark SVG (local scale, detailed tooltips).
-        svg_name = f"{_sanitize_filename(bench)}_{r0.config.arts_threads}t_{r0.config.arts_nodes}n.svg"
-        svg_path = figures_dir / svg_name
-        _write_per_benchmark_timeline_svg(
-            bench,
-            arts_init_map,
-            arts_e2e_map,
-            arts_kernel_map,
-            omp_init_map,
-            omp_e2e_map,
-            omp_kernel_map,
-            speedup=(r0.timing.speedup if r0.timing.speedup > 0 else None),
-            speedup_basis=r0.timing.speedup_basis,
-            svg_path=svg_path,
-        )
-        per_svgs.append((key, svg_path))
-
-        # Multi-panel summary data (init + other(e2e-kernel) + kernel): consistent meaning across benchmarks.
-        arts_segments: List[Tuple[str, float]] = [
-            ("__init__", float(arts_init_mean or 0.0)),
-            ("__other__", float(arts_other_mean or 0.0)),
-            ("__kernel__", float(arts_kernel_mean or 0.0)),
-        ]
-        omp_segments: List[Tuple[str, float]] = [
-            ("__init__", float(omp_init_mean or 0.0)),
-            ("__other__", float(omp_other_mean or 0.0)),
-            ("__kernel__", float(omp_kernel_mean or 0.0)),
-        ]
-
-        panel_groups.append({
-            "benchmark": bench,
-            "speedup": (r0.timing.speedup if r0.timing.speedup > 0 else None),
-            "speedup_basis": r0.timing.speedup_basis,
-            "scale_max": scale_max,
-            "arts_segments": arts_segments,
-            "omp_segments": omp_segments,
-            "arts_total": sum(v for _, v in arts_segments),
-            "omp_total": sum(v for _, v in omp_segments),
-        })
-
-        # Report row (mean±std)
-        run_count = len(runs)
-        correct_count = sum(1 for r in runs if r.verification.correct)
-        arts_pass = sum(1 for r in runs if r.run_arts.status == Status.PASS)
-        omp_pass = sum(1 for r in runs if r.run_omp.status == Status.PASS)
-        speedup_vals = [r.timing.speedup for r in runs if r.timing.speedup > 0]
-        sp_mean, sp_std = _mean_std(speedup_vals)
-
-        report_rows.append({
-            "key": key,
-            "benchmark": bench,
-            "size_params": r0.size_params,
-            "threads": r0.config.arts_threads,
-            "nodes": r0.config.arts_nodes,
-            "omp_threads": r0.config.omp_threads,
-            "launcher": r0.config.launcher,
-            "run_count": run_count,
-            "arts_pass": arts_pass,
-            "omp_pass": omp_pass,
-            "correct_count": correct_count,
-            "speedup_basis": r0.timing.speedup_basis,
-            "speedup_mean": sp_mean,
-            "speedup_std": sp_std,
-            "arts_init_mean": arts_init_mean,
-            "arts_init_std": arts_init_std,
-            "arts_e2e_mean": arts_e2e_mean,
-            "arts_e2e_std": arts_e2e_std,
-            "arts_kernel_mean": arts_kernel_mean,
-            "arts_kernel_std": arts_kernel_std,
-            "arts_other_mean": arts_other_mean,
-            "omp_init_mean": omp_init_mean,
-            "omp_init_std": omp_init_std,
-            "omp_e2e_mean": omp_e2e_mean,
-            "omp_e2e_std": omp_e2e_std,
-            "omp_kernel_mean": omp_kernel_mean,
-            "omp_kernel_std": omp_kernel_std,
-            "omp_other_mean": omp_other_mean,
-            # First-run raw breakdowns (for segment listing)
-            "arts_init_map": arts_init_map,
-            "arts_e2e_map": arts_e2e_map,
-            "arts_kernel_map": arts_kernel_map,
-            "omp_init_map": omp_init_map,
-            "omp_e2e_map": omp_e2e_map,
-            "omp_kernel_map": omp_kernel_map,
-            "arts_status": r0.run_arts.status.value,
-            "omp_status": r0.run_omp.status.value,
-            "correct_note": r0.verification.note,
-        })
-
-    # Write the summary small-multiples SVG (each panel has its own scale).
-    _write_small_multiples_svg(panel_groups, chart_svg_path)
-
-    # Write a speedup scaling SVG (each benchmark has its own y-axis range).
-    _write_speedup_bar_chart(report_rows, speedup_svg_path)
-
-    # Markdown
-    lines: List[str] = []
-    lines.append("# CARTS Benchmarks Report")
-    lines.append("")
-    lines.append(f"- Timestamp: {now}")
-    lines.append(f"- Size: {size}")
-    lines.append(f"- Config groups: {len(groups)}")
-    lines.append(f"- Figures: `{figures_dir.name}/`")
-    lines.append("")
-    lines.append("## Summary Figure (local scale per benchmark)")
-    lines.append("")
-    lines.append(f"![init+e2e small multiples]({chart_svg_path.name})")
-    lines.append("")
-    lines.append("## Speedup Figure (local scale per benchmark)")
-    lines.append("")
-    lines.append(f"![speedup small multiples]({speedup_svg_path.name})")
-    lines.append("")
-    lines.append("## Results (mean ± std, seconds)")
-    lines.append("")
-    lines.append("| Benchmark | t | n | ARTS status | OMP status | ARTS init | ARTS e2e | ARTS kernel | ARTS other | OMP init | OMP e2e | OMP kernel | OMP other | Speedup | Correct |")
-    lines.append(
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|")
-    for row in report_rows:
-        speedup_txt = "-"
-        if row["speedup_mean"] is not None:
-            speedup_txt = _fmt_mean_std_s(
-                row["speedup_mean"], row["speedup_std"]) + f" ({row['speedup_basis']})"
-
-        correct_txt = "-"
-        if row["correct_note"] == "Verification disabled":
-            correct_txt = "N/A"
-        else:
-            correct_txt = f"{row['correct_count']}/{row['run_count']}"
-
-        lines.append(
-            "| "
-            + f"{row['benchmark']} "
-            + f"| {row['threads']} "
-            + f"| {row['nodes']} "
-            + f"| {row['arts_status']} "
-            + f"| {row['omp_status']} "
-            + f"| {_fmt_mean_std_s(row['arts_init_mean'], row['arts_init_std'])} "
-            + f"| {_fmt_mean_std_s(row['arts_e2e_mean'], row['arts_e2e_std'])} "
-            + f"| {_fmt_mean_std_s(row['arts_kernel_mean'], row['arts_kernel_std'])} "
-            + f"| {_fmt_s(row['arts_other_mean'])} "
-            + f"| {_fmt_mean_std_s(row['omp_init_mean'], row['omp_init_std'])} "
-            + f"| {_fmt_mean_std_s(row['omp_e2e_mean'], row['omp_e2e_std'])} "
-            + f"| {_fmt_mean_std_s(row['omp_kernel_mean'], row['omp_kernel_std'])} "
-            + f"| {_fmt_s(row['omp_other_mean'])} "
-            + f"| {speedup_txt} "
-            + f"| {correct_txt} |"
-        )
-    lines.append("")
-    lines.append("Notes:")
-    lines.append("- `other = e2e - kernel` (clamped at 0).")
-    lines.append(
-        "- Figures use independent x-axis scaling per benchmark to preserve within-benchmark structure.")
-    lines.append("")
-    lines.append("## Missing Signals")
-    lines.append("")
-    lines.append("| Benchmark | Missing | Likely cause |")
-    lines.append("|---|---|---|")
-    any_missing = False
-    for row in report_rows:
-        missing: List[str] = []
-        if not row["arts_init_map"].get("arts"):
-            missing.append("ARTS init.arts")
-        if not row["arts_e2e_map"]:
-            missing.append("ARTS e2e.*")
-        if not row["omp_init_map"].get("omp"):
-            missing.append("OMP init.omp")
-        if not row["omp_e2e_map"]:
-            missing.append("OMP e2e.*")
-        if not missing:
-            continue
-        any_missing = True
-
-        cause = []
-        if row["arts_status"] != Status.PASS.value:
-            cause.append("ARTS run failed/crashed before printing timers")
-        if row["omp_status"] != Status.PASS.value:
-            cause.append("OMP run failed/crashed before printing timers")
-        if not cause:
-            cause.append("timing macros not enabled or benchmark not rebuilt")
-
-        lines.append(
-            f"| {row['benchmark']} | {', '.join(missing)} | {', '.join(cause)} |")
-    if not any_missing:
-        lines.append("| (none) | - | - |")
-    lines.append("")
-    lines.append("## Per-Benchmark Figures")
-    lines.append("")
-    per_svg_lookup = {k: p for k, p in per_svgs}
-    for row in report_rows:
-        key = row["key"]
-        svg_path = per_svg_lookup.get(key)
-        bench = row["benchmark"]
-        lines.append(f"### {bench}")
-        lines.append("")
-        if svg_path is not None:
-            lines.append(f"![{bench}]({figures_dir.name}/{svg_path.name})")
-            lines.append("")
-        lines.append(
-            f"- Config: `threads={row['threads']}`, `nodes={row['nodes']}`, `omp_threads={row['omp_threads']}`, `launcher={row['launcher']}`, `runs={row['run_count']}`")
-        lines.append(f"- Size params: `{row['size_params'] or 'N/A'}`")
-        lines.append(
-            f"- Status: `ARTS={row['arts_status']}`, `OMP={row['omp_status']}`")
-        lines.append(
-            f"- ARTS init breakdown: {_kv_lines(row['arts_init_map'])}")
-        lines.append(f"- ARTS e2e breakdown: {_kv_lines(row['arts_e2e_map'])}")
-        lines.append(
-            f"- ARTS kernel breakdown: {_kv_lines(row['arts_kernel_map'])}")
-        lines.append(f"- OMP init breakdown: {_kv_lines(row['omp_init_map'])}")
-        lines.append(f"- OMP e2e breakdown: {_kv_lines(row['omp_e2e_map'])}")
-        lines.append(
-            f"- OMP kernel breakdown: {_kv_lines(row['omp_kernel_map'])}")
-        lines.append("")
-
-    report_md_path.write_text("\n".join(lines))
-    return chart_svg_path, speedup_svg_path
 
 
 def create_live_table(
@@ -4215,197 +3011,6 @@ def create_live_display(
 # ============================================================================
 # JSON Export
 # ============================================================================
-
-
-def get_git_hash(repo_path: Path) -> Optional[str]:
-    """Get the current git commit hash."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        logger.debug("Failed to get git hash for %s", repo_path, exc_info=True)
-    return None
-
-
-def get_compiler_version() -> Dict[str, Optional[str]]:
-    """Get compiler version information.
-
-    Prioritizes CARTS-installed LLVM/clang over system compilers,
-    since CARTS builds LLVM from source.
-    """
-    compilers = {}
-    carts_dir = get_carts_dir()
-
-    # Try CARTS-installed LLVM clang first (built from source)
-    carts_clang = carts_dir / ".install" / "llvm" / "bin" / "clang"
-    clang_paths = [str(carts_clang), "clang"]
-
-    for clang_path in clang_paths:
-        try:
-            result = subprocess.run(
-                [clang_path, "--version"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                first_line = result.stdout.split('\n')[0]
-                compilers["clang"] = first_line
-                # Record which clang was found
-                if clang_path != "clang":
-                    compilers["clang_path"] = clang_path
-                break
-        except Exception:
-            logger.debug("Failed to get clang version from %s", clang_path, exc_info=True)
-            continue
-
-    # Try gcc
-    try:
-        result = subprocess.run(
-            ["gcc", "--version"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            first_line = result.stdout.split('\n')[0]
-            compilers["gcc"] = first_line
-    except Exception:
-        logger.debug("Failed to get gcc version", exc_info=True)
-
-    return compilers
-
-
-def get_cpu_info() -> Dict[str, Any]:
-    """Get CPU information for reproducibility."""
-    cpu_info = {}
-
-    system = platform.system().lower()
-
-    if system == "darwin":
-        # macOS: use sysctl
-        try:
-            result = subprocess.run(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                cpu_info["model"] = result.stdout.strip()
-
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.ncpu"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                cpu_info["cores"] = int(result.stdout.strip())
-
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.physicalcpu"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                cpu_info["physical_cores"] = int(result.stdout.strip())
-        except Exception:
-            logger.debug("Failed to get macOS CPU info", exc_info=True)
-    elif system == "linux":
-        # Linux: parse /proc/cpuinfo
-        try:
-            with open("/proc/cpuinfo", "r") as f:
-                content = f.read()
-            for line in content.split('\n'):
-                if line.startswith("model name"):
-                    cpu_info["model"] = line.split(":")[1].strip()
-                    break
-
-            result = subprocess.run(["nproc"], capture_output=True, text=True)
-            if result.returncode == 0:
-                cpu_info["cores"] = int(result.stdout.strip())
-        except Exception:
-            logger.debug("Failed to get Linux CPU info", exc_info=True)
-
-    return cpu_info
-
-
-def get_reproducibility_metadata(carts_dir: Path, benchmarks_dir: Path) -> Dict[str, Any]:
-    """Collect comprehensive reproducibility metadata.
-
-    This captures all information needed to reproduce benchmark results:
-    - Git commit hashes for all repositories
-    - Compiler versions
-    - CPU and system information
-    - Relevant environment variables
-    """
-    metadata = {}
-
-    # Git hashes
-    metadata["git_commits"] = {
-        "carts": get_git_hash(carts_dir) or "unknown",
-        "carts_benchmarks": get_git_hash(benchmarks_dir) or "unknown",
-    }
-
-    # Check for ARTS submodule
-    arts_dir = carts_dir / "external" / "arts"
-    if arts_dir.exists():
-        metadata["git_commits"]["arts"] = get_git_hash(arts_dir) or "unknown"
-
-    # Compiler versions
-    metadata["compilers"] = get_compiler_version()
-
-    # CPU info
-    metadata["cpu"] = get_cpu_info()
-
-    # System info
-    metadata["system"] = {
-        "os": platform.system(),
-        "os_version": platform.release(),
-        "platform": platform.platform(),
-        "python_version": platform.python_version(),
-    }
-
-    # Relevant environment variables
-    env_vars_to_capture = [
-        "OMP_NUM_THREADS",
-        "OMP_PROC_BIND",
-        "OMP_PLACES",
-        "CARTS_DIR",
-        "ARTS_DIR",
-        "CC",
-        "CXX",
-        "CFLAGS",
-        "CXXFLAGS",
-        "LDFLAGS",
-    ]
-    metadata["environment"] = {
-        var: os.environ.get(var) for var in env_vars_to_capture if os.environ.get(var)
-    }
-
-    return metadata
-
-
-def _serialize_parallel_task_timing(timing: Optional[ParallelTaskTiming]) -> Optional[Dict]:
-    """Serialize ParallelTaskTiming to JSON-compatible dict."""
-    if timing is None:
-        return None
-
-    return {
-        "parallel_timings": {
-            name: [{"worker_id": t.worker_id, "time_sec": t.time_sec}
-                   for t in timings]
-            for name, timings in timing.parallel_timings.items()
-        },
-        "task_timings": {
-            name: [{"worker_id": t.worker_id, "time_sec": t.time_sec}
-                   for t in timings]
-            for name, timings in timing.task_timings.items()
-        },
-    }
 
 
 def compute_stats(values: List[float]) -> Dict[str, float]:
@@ -4799,10 +3404,6 @@ def run(
         None, "--profile", help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
-    report: bool = typer.Option(
-        False, "--report", help="Generate a Markdown+SVG report artifact after running"),
-    report_dir: Optional[Path] = typer.Option(
-        None, "--report-dir", help="Directory for report outputs (default: alongside results)"),
     perf: bool = typer.Option(
         False, "--perf", help="Enable perf stat profiling for cache metrics"),
     perf_interval: float = typer.Option(
@@ -5058,20 +3659,6 @@ def run(
     # Write manifest.json
     command_str = "carts benchmarks " + " ".join(sys.argv[1:])
     am.write_manifest(results, command_str, total_duration)
-
-    if report:
-        out_dir = report_dir or am.experiment_dir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        report_md = out_dir / f"benchmark_report_{run_timestamp}.md"
-        report_svg = out_dir / \
-            f"benchmark_report_{run_timestamp}_init_e2e_small_multiples.svg"
-        report_chart, report_speedup = generate_markdown_report(
-            results, report_md, report_svg, size=size)
-        if not quiet:
-            console.print()
-            console.print(f"[green]Report:[/] {report_md}")
-            console.print(f"[green]Chart:[/]  {report_chart}")
-            console.print(f"[green]Speedup:[/] {report_speedup}")
 
     # Show single results path
     if not quiet:
@@ -5505,7 +4092,7 @@ def slurm_run(
     #       └── slurm.err
     console.print("\n[bold]Phase 2: Generating job scripts...[/]")
 
-    slurm_job_result_script = Path(__file__).parent / "slurm_job_result.py"
+    slurm_job_result_script = Path(__file__).parent / "slurm" / "job_result.py"
 
     job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
 

@@ -35,7 +35,8 @@ OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp
 OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
 
 # Auto-detect arts.cfg
-ARTS_CFG ?= $(firstword $(wildcard arts.cfg))
+CARTS_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+ARTS_CFG ?= $(firstword $(wildcard arts.cfg) $(wildcard $(CARTS_ROOT)/configs/arts.cfg))
 ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
 ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),artsConfig=$(ARTS_CFG),)
 

@@ -1,6 +1,6 @@
 # CARTS Benchmark Runner
 
-A powerful CLI tool for building, running, verifying, and reporting on CARTS benchmarks.
+A powerful CLI tool for building, running, and verifying CARTS benchmarks.
 
 ## Quick Start
 
@@ -23,8 +23,8 @@ carts benchmarks run polybench/gemm --size medium --threads 4 --runs 5
 # Custom results directory
 carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --results-dir results/scaling
 
-# Generate a paper-friendly report (Markdown + SVG figures)
-carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --report
+# Analyze results after a run
+carts analyze summary results/20240115_120530/
 ```
 
 ## Commands
@@ -93,6 +93,51 @@ Clean build artifacts.
 carts benchmarks clean polybench/gemm
 carts benchmarks clean --all
 ```
+
+## Analyzing Results
+
+After running benchmarks, use `carts analyze` to examine results.
+
+### `carts analyze summary`
+
+Re-display the results table from a completed experiment.
+
+```bash
+carts analyze summary results/20240115_120530/
+carts analyze summary results/20240115_120530/ -b gemm    # filter by benchmark
+carts analyze summary results/20240115_120530/ --sort speedup
+```
+
+### `carts analyze export`
+
+Export timing data to CSV for external tools (spreadsheets, notebooks).
+
+```bash
+# Export to file
+carts analyze export results/20240115_120530/ -o timing.csv
+
+# Export to stdout (pipe to other tools)
+carts analyze export results/20240115_120530/ | head -5
+
+# Filter by benchmark
+carts analyze export results/20240115_120530/ -b gemm -o gemm.csv
+```
+
+**CSV columns:** `benchmark, threads, nodes, run, arts_e2e_sec, omp_e2e_sec, arts_kernel_sec, omp_kernel_sec, arts_init_sec, omp_init_sec, speedup, status`
+
+### `carts analyze compare`
+
+Compare two experiments side-by-side to identify improvements and regressions.
+
+```bash
+# Compare baseline vs optimized
+carts analyze compare results/baseline/ results/optimized/
+
+# With custom threshold (flag changes > 10%)
+carts analyze compare results/before/ results/after/ --threshold 0.10
+```
+
+Output shows per-benchmark speedup delta with IMPROVED/REGRESSED/SAME verdicts.
 
 ## Usage Examples
 

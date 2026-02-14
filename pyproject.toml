@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "carts-benchmarks"
 version = "0.1.0"
-description = "CARTS Benchmark Runner - Build, run, verify, and report"
+description = "CARTS Benchmark Runner - Build, run, and verify"
 authors = ["CARTS Team"]
 package-mode = false
 
@@ -9,9 +9,6 @@ package-mode = false
 python = "^3.9"
 typer = "^0.15.0"
 rich = "^13.7.0"
-
-[tool.poetry.scripts]
-carts-bench = "benchmark_runner:app"
 
 [build-system]
 requires = ["poetry-core"]

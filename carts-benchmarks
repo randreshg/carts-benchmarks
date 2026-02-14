@@ -9,14 +9,13 @@
 #   carts-benchmarks run [BENCHMARKS...] [OPTIONS]
 #   carts-benchmarks build [BENCHMARKS...] [--size SIZE]
 #   carts-benchmarks clean [BENCHMARKS...] [--all]
-#   carts-benchmarks report [--format FORMAT] [--output FILE]
 #
 ################################################################################
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_RUNNER="${SCRIPT_DIR}/benchmark_runner.py"
+PYTHON_RUNNER="${SCRIPT_DIR}/scripts/benchmark_runner.py"
 
 # Check if Python runner exists
 if [ ! -f "$PYTHON_RUNNER" ]; then
@@ -27,7 +26,7 @@ fi
 # Delegate to Python runner
 if command -v poetry &> /dev/null && [ -f "${SCRIPT_DIR}/pyproject.toml" ]; then
     cd "$SCRIPT_DIR"
-    exec poetry run python benchmark_runner.py "$@"
+    exec poetry run python scripts/benchmark_runner.py "$@"
 else
     exec python3 "$PYTHON_RUNNER" "$@"
 fi
