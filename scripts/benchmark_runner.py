@@ -46,6 +46,7 @@ from carts_styles import (
     format_summary_line, format_passed, format_failed, format_skipped,
     status_symbol as _status_symbol_str,
 )
+from scripts.arts_config import parse_arts_cfg as _shared_parse_arts_cfg
 
 from rich import box
 from rich.console import Console, Group
@@ -92,7 +93,7 @@ from benchmark_common import (
 # Constants (local-only — shared constants imported from benchmark_common)
 # ============================================================================
 
-DEFAULT_ARTS_CONFIG = Path(__file__).parent.parent.parent / "configs" / "arts.cfg"
+DEFAULT_ARTS_CONFIG = Path(__file__).parent.parent.parent / "configs" / "local.cfg"
 
 
 # Data models (enums + dataclasses)
@@ -420,34 +421,9 @@ def generate_arts_config(
 def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
     """Parse an ARTS config file (arts.cfg) into a key/value dict.
 
-    This parser is intentionally simple: it ignores section headers and
-    supports `key=value` lines, stripping whitespace and inline comments.
+    Delegates to shared implementation in scripts.arts_config.
     """
-    if not path or not path.exists():
-        return {}
-
-    values: Dict[str, str] = {}
-    try:
-        for raw in path.read_text().splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            if line.startswith("#") or line.startswith(";"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            # Strip common inline comments.
-            value = value.split("#", 1)[0].split(";", 1)[0].strip()
-            if key:
-                values[key] = value
-    except Exception:
-        logger.debug("Failed to parse arts.cfg: %s", path, exc_info=True)
-        return {}
-    return values
+    return _shared_parse_arts_cfg(path)
 
 
 def get_arts_cfg_int(path: Optional[Path], key: str) -> Optional[int]:
@@ -905,7 +881,7 @@ class BenchmarkRunner:
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
         # Determine effective config template
-        # Search order: benchmark dir → suite dir → benchmarks root → scripts/arts.cfg
+        # Search order: benchmark dir → suite dir → benchmarks root → configs/local.cfg
         effective_config = base_config
         if effective_config is None:
             for candidate in [
@@ -3508,51 +3484,21 @@ def run(
 
         # Show effective ARTS configuration
         if bench_list:
-            # Multiple benchmarks without custom config: each uses its own local config
-            if len(bench_list) > 1 and not arts_config:
-                console.print("ARTS Config: using local")
+            if arts_config:
+                effective_config = arts_config
+                config_source = "custom"
             else:
-                # Single benchmark or custom config: show specific values
-                sample_bench = bench_list[0]
-                bench_path = runner.benchmarks_dir / sample_bench
+                effective_config = DEFAULT_ARTS_CONFIG
+                config_source = "default"
 
-                # Determine effective config file and source in one pass
-                if arts_config:
-                    effective_config = arts_config
-                    config_source = "custom"
-                else:
-                    bench_cfg = bench_path / "arts.cfg"
-                    if bench_cfg.exists():
-                        effective_config = bench_cfg
-                        config_source = "local"
-                    else:
-                        effective_config = DEFAULT_ARTS_CONFIG
-                        config_source = "default"
+            cfg = parse_arts_cfg(effective_config)
+            arts_threads = int(cfg.get("threads", "1"))
+            arts_nodes = int(cfg.get("nodeCount", "1"))
+            arts_launcher = cfg.get("launcher", "ssh")
 
-                # Parse ARTS config values once
-                cfg = parse_arts_cfg(effective_config)
-                arts_threads = int(cfg.get("threads", "1"))
-                arts_nodes = int(cfg.get("nodeCount", "1"))
-                arts_launcher = cfg.get("launcher", "ssh")
-                arts_nodes_list = [n.strip() for n in cfg.get(
-                    "nodes", "localhost").split(",") if n.strip()]
-
-                # Build config display items efficiently
-                arts_config_items = [f"arts-threads={arts_threads}",
-                                     f"arts-nodes={arts_nodes}",
-                                     f"arts-launcher={arts_launcher}"]
-
-                # Always show node list (shows configured nodes including ports)
-                # Escape brackets to prevent Rich from interpreting as markup
-                if arts_nodes_list:
-                    node_display = ','.join(arts_nodes_list[:3])
-                    if len(arts_nodes_list) > 3:
-                        node_display += "..."
-                    arts_config_items.append(
-                        f"arts-node-list=\\[{node_display}]")
-
-                console.print(
-                    f"ARTS Config ({config_source}): {', '.join(arts_config_items)}")
+            items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
+            console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
+            console.print(f"  Path: {effective_config}")
 
         console.print(f"Benchmarks: {len(bench_list)}\n")
 

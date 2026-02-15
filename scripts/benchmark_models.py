@@ -11,17 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
-
-class Status(str, Enum):
-    """Status of a build or run operation."""
-    PENDING = "pending"
-    BUILDING = "building"
-    RUNNING = "running"
-    PASS = "pass"
-    FAIL = "fail"
-    CRASH = "crash"
-    TIMEOUT = "timeout"
-    SKIP = "skip"
+from carts_styles import Status
 
 
 class Phase(str, Enum):
