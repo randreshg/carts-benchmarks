@@ -771,6 +771,7 @@ class BenchmarkRunner:
             self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
 
         start = time.time()
+
         try:
             result = subprocess.run(
                 cmd,
@@ -964,15 +965,9 @@ class BenchmarkRunner:
                 build_arts = self.build_benchmark(
                     name, size, "arts", arts_cfg, effective_cflags, arts_exec_args)
 
-                # Build OpenMP variant (skip for multi-node)
-                if desired_nodes == 1:
-                    build_omp = self.build_benchmark(
-                        name, size, "openmp", None, effective_cflags)
-                else:
-                    build_omp = BuildResult(
-                        status=Status.SKIP, duration_sec=0.0,
-                        output="Skipped: OpenMP not applicable for multi-node",
-                        executable=None)
+                # Build OpenMP variant (single-node reference for correctness).
+                build_omp = self.build_benchmark(
+                    name, size, "openmp", None, effective_cflags)
 
                 # Copy build artifacts ONCE per config (via artifact manager)
                 artifact_paths: Dict[str, Optional[str]] = {}
@@ -1050,7 +1045,9 @@ class BenchmarkRunner:
                             exit_code=-1, stdout="", stderr="Build failed",
                         )
 
-                    timing = self.calculate_timing(run_arts, run_omp)
+                    timing = self.calculate_timing(
+                        run_arts, run_omp, report_speedup=(desired_nodes == 1)
+                    )
                     verification = self.verify_correctness(
                         run_arts, run_omp, tolerance=verify_tolerance)
                     artifacts = self.collect_artifacts(bench_path)
@@ -1236,6 +1233,44 @@ class BenchmarkRunner:
                 self.console.print(f"[dim]$ {' '.join(cmd)}[/]")
 
         start = time.time()
+        def to_text(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return str(value)
+
+        def write_run_log(
+            duration: float,
+            exit_code: int,
+            stdout_text: str,
+            stderr_text: str,
+            timed_out: bool = False,
+            note: Optional[str] = None,
+        ) -> None:
+            if not log_file:
+                return
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "w") as f:
+                f.write(f"# Command: {' '.join(cmd)}\n")
+                f.write(f"# Duration: {duration:.3f}s\n")
+                f.write(f"# Exit code: {exit_code}\n")
+                if timed_out:
+                    f.write("# Timed out: true\n")
+                if note:
+                    f.write(f"# Note: {note}\n")
+                f.write("\n")
+                if stdout_text:
+                    f.write("=== STDOUT ===\n")
+                    f.write(stdout_text)
+                    if not stdout_text.endswith("\n"):
+                        f.write("\n")
+                if stderr_text:
+                    f.write("=== STDERR ===\n")
+                    f.write(stderr_text)
+                    if not stderr_text.endswith("\n"):
+                        f.write("\n")
+
         try:
             result = subprocess.run(
                 cmd,
@@ -1249,19 +1284,12 @@ class BenchmarkRunner:
 
             # Always write log file when path is provided
             if log_file:
-                log_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(log_file, "w") as f:
-                    f.write(f"# Command: {' '.join(cmd)}\n")
-                    f.write(f"# Duration: {duration:.3f}s\n")
-                    f.write(f"# Exit code: {result.returncode}\n\n")
-                    if result.stdout:
-                        f.write("=== STDOUT ===\n")
-                        f.write(result.stdout)
-                        f.write("\n")
-                    if result.stderr:
-                        f.write("=== STDERR ===\n")
-                        f.write(result.stderr)
-                        f.write("\n")
+                write_run_log(
+                    duration=duration,
+                    exit_code=result.returncode,
+                    stdout_text=result.stdout or "",
+                    stderr_text=result.stderr or "",
+                )
                 if self.debug >= 2:
                     self.console.print(f"[dim]  Log: {log_file}[/]")
             elif self.debug >= 2:
@@ -1310,18 +1338,44 @@ class BenchmarkRunner:
                 perf_metrics=perf_metrics,
                 perf_csv_path=perf_csv_path,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            duration = time.time() - start
+            timeout_stdout = to_text(e.stdout)
+            timeout_stderr = to_text(e.stderr)
+            timeout_note = f"Execution timed out after {timeout} seconds"
+            if log_file:
+                write_run_log(
+                    duration=duration,
+                    exit_code=124,
+                    stdout_text=timeout_stdout,
+                    stderr_text=f"{timeout_stderr}\n{timeout_note}".strip(),
+                    timed_out=True,
+                    note=timeout_note,
+                )
+                if self.debug >= 2:
+                    self.console.print(f"[dim]  Log: {log_file}[/]")
             return RunResult(
                 status=Status.TIMEOUT,
-                duration_sec=float(timeout),
+                duration_sec=duration,
                 exit_code=124,
-                stdout="",
-                stderr=f"Execution timed out after {timeout} seconds",
+                stdout=timeout_stdout,
+                stderr=f"{timeout_stderr}\n{timeout_note}".strip(),
             )
         except Exception as e:
+            duration = time.time() - start
+            if log_file:
+                write_run_log(
+                    duration=duration,
+                    exit_code=-1,
+                    stdout_text="",
+                    stderr_text=str(e),
+                    note="Runner exception",
+                )
+                if self.debug >= 2:
+                    self.console.print(f"[dim]  Log: {log_file}[/]")
             return RunResult(
                 status=Status.FAIL,
-                duration_sec=time.time() - start,
+                duration_sec=duration,
                 exit_code=-1,
                 stdout="",
                 stderr=str(e),
@@ -1515,6 +1569,7 @@ class BenchmarkRunner:
         self,
         arts_result: RunResult,
         omp_result: RunResult,
+        report_speedup: bool = True,
     ) -> TimingResult:
         """Calculate speedup preferring E2E timings when available."""
         arts_kernel = get_kernel_time(arts_result)
@@ -1566,7 +1621,11 @@ class BenchmarkRunner:
             omp_time = omp_total
             speedup_basis = "total"
 
-        if arts_time == 0:
+        if not report_speedup:
+            speedup = 0.0
+            note = "Speedup hidden for distributed runs (unfair comparison)"
+            speedup_basis = "n/a"
+        elif arts_time == 0:
             speedup = 0.0
             note = f"ARTS {speedup_basis} time is zero"
         else:
@@ -1759,18 +1818,10 @@ class BenchmarkRunner:
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
-        # Build OpenMP version - skip for multi-node since OMP is single-node only
+        # Build OpenMP version (single-node reference for correctness).
         if phase_callback:
             phase_callback(Phase.BUILD_OMP)
-        if desired_nodes == 1:
-            build_omp = self.build_benchmark(name, size, "openmp", None)
-        else:
-            build_omp = BuildResult(
-                status=Status.SKIP,
-                duration_sec=0.0,
-                output="Skipped: OpenMP does not support multi-node execution",
-                executable=None,
-            )
+        build_omp = self.build_benchmark(name, size, "openmp", None)
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
@@ -1890,31 +1941,40 @@ class BenchmarkRunner:
             if perf_enabled and omp_perf_temp and omp_perf_main:
                 append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
         else:
-            skip_reason = (
-                "Skipped: OpenMP does not support multi-node execution"
-                if desired_nodes > 1
-                else "Build failed"
-            )
             run_omp = RunResult(
                 status=Status.SKIP, duration_sec=0.0,
-                exit_code=-1, stdout="", stderr=skip_reason,
+                exit_code=-1, stdout="", stderr="Build failed",
             )
 
         # Print trace output if enabled
         if self.trace:
-            arts_output = filter_benchmark_output(run_arts.stdout)
-            omp_output = filter_benchmark_output(run_omp.stdout)
+            arts_combined = (run_arts.stdout or "") + ("\n" + run_arts.stderr if run_arts.stderr else "")
+            omp_combined = (run_omp.stdout or "") + ("\n" + run_omp.stderr if run_omp.stderr else "")
+            arts_output = filter_benchmark_output(arts_combined)
+            omp_output = filter_benchmark_output(omp_combined)
 
             self.console.print(
                 f"\n[bold cyan]═══ CARTS Output ({name}) ═══[/]")
-            self.console.print(arts_output or "[dim](no benchmark output)[/]")
+            if arts_output:
+                self.console.print(arts_output)
+            elif arts_combined.strip():
+                self.console.print(arts_combined.strip())
+            else:
+                self.console.print("[dim](no benchmark output)[/]")
 
             self.console.print(f"\n[bold green]═══ OMP Output ({name}) ═══[/]")
-            self.console.print(omp_output or "[dim](no benchmark output)[/]")
+            if omp_output:
+                self.console.print(omp_output)
+            elif omp_combined.strip():
+                self.console.print(omp_combined.strip())
+            else:
+                self.console.print("[dim](no benchmark output)[/]")
             self.console.print()
 
         # Calculate timing
-        timing = self.calculate_timing(run_arts, run_omp)
+        timing = self.calculate_timing(
+            run_arts, run_omp, report_speedup=(desired_nodes == 1)
+        )
 
         # Verify correctness
         if verify:
