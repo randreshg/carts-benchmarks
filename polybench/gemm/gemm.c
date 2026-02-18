@@ -40,11 +40,14 @@ static void gemm(float **C, const float **A, const float **B, float alpha,
   }
 }
 
-static float checksum(float **C) {
-  float s = 0.0f;
-  for (int i = 0; i < NI; i++)
-    for (int j = 0; j < NJ; j++)
+static double checksum(float **C) {
+  double s = 0.0;
+#pragma omp parallel for schedule(static) reduction(+ : s)
+  for (int i = 0; i < NI; i++) {
+    for (int j = 0; j < NJ; j++) {
       s += C[i][j];
+    }
+  }
   return s;
 }
 
@@ -73,14 +76,10 @@ int main(void) {
   gemm(C, (const float **)A, (const float **)B, 1.0f, 0.0f);
   // CARTS_KERNEL_TIMER_STOP("gemm");
 
-  // Verification
-  double checksum = 0.0;
-  for (int i = 0; i < NI; i++) {
-    for (int j = 0; j < NJ; j++) {
-      checksum += C[i][j];
-    }
-  }
-  CARTS_BENCH_CHECKSUM(checksum);
+  // Verification: parallel checksum so output C is consumed through the
+  // EDT/acquire path and can be distributed safely.
+  double checksum_value = checksum(C);
+  CARTS_BENCH_CHECKSUM(checksum_value);
 
   for (int i = 0; i < NI; i++) {
     free(A[i]);
