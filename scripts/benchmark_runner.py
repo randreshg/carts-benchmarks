@@ -173,6 +173,42 @@ def parse_threads(spec: str) -> List[int]:
         return [int(spec)]
 
 
+def normalize_requested_benchmarks(
+    benchmarks: Optional[List[str]],
+) -> Tuple[Optional[List[str]], bool]:
+    """Normalize user-provided benchmark names.
+
+    Returns:
+        (normalized_list_or_none, dropped_blank_args)
+    """
+    if not benchmarks:
+        return None, False
+
+    normalized: List[str] = []
+    seen = set()
+    dropped_blank = False
+    for bench in benchmarks:
+        bench_name = bench.strip()
+        if not bench_name:
+            dropped_blank = True
+            continue
+        if bench_name in seen:
+            continue
+        normalized.append(bench_name)
+        seen.add(bench_name)
+
+    return (normalized or None), dropped_blank
+
+
+def find_invalid_benchmarks(
+    runner: "BenchmarkRunner",
+    benchmarks: List[str],
+) -> List[str]:
+    """Return benchmark names that do not exist in the benchmark tree."""
+    available = set(runner.discover_benchmarks())
+    return [name for name in benchmarks if name not in available]
+
+
 # ============================================================================
 # Weak Scaling Support
 # ============================================================================
@@ -3144,6 +3180,7 @@ def export_json(
     size: str,
     total_duration: float,
     threads_list: Optional[List[int]] = None,
+    nodes_list: Optional[List[int]] = None,
     cflags: Optional[str] = None,
     launcher: Optional[str] = None,
     weak_scaling: bool = False,
@@ -3178,6 +3215,8 @@ def export_json(
     # Add experiment configuration
     if threads_list:
         metadata["thread_sweep"] = threads_list
+    if nodes_list:
+        metadata["node_sweep"] = nodes_list
     if fixed_threads is not None:
         metadata["fixed_threads"] = fixed_threads
     if cflags:
@@ -3437,7 +3476,8 @@ def run(
     debug_level: int = typer.Option(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=verbose console output"),
     profile: Optional[Path] = typer.Option(
-        None, "--profile", help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
+        None, "--profile",
+        help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     perf: bool = typer.Option(
@@ -3481,8 +3521,21 @@ def run(
         node_counts = parse_threads(nodes)
 
     # Discover or use provided benchmarks
-    if benchmarks:
-        bench_list = list(benchmarks)
+    requested_benchmarks, dropped_blank = normalize_requested_benchmarks(
+        benchmarks)
+    if dropped_blank and not quiet:
+        console.print(
+            "[yellow]Ignoring blank benchmark arguments. "
+            "If you copied a multiline command, ensure each '\\' is immediately before a newline.[/]")
+
+    if requested_benchmarks:
+        invalid = find_invalid_benchmarks(runner, requested_benchmarks)
+        if invalid:
+            invalid_list = ", ".join(invalid)
+            console.print(f"[red]Error: Unknown benchmark(s):[/] {invalid_list}")
+            console.print("[dim]Use `carts benchmarks list` to see valid names.[/]")
+            raise typer.Exit(2)
+        bench_list = requested_benchmarks
     else:
         bench_list = runner.discover_benchmarks(suite)
 
@@ -3565,29 +3618,28 @@ def run(
     # Run benchmarks
     start_time = time.time()
 
-    # Validate multi-benchmark restrictions
-    threads_override: Optional[int] = None
-    if len(bench_list) > 1:
-        if threads_list and len(threads_list) > 1:
-            console.print(
-                "[red]Error:[/] For multiple benchmarks, `--threads` must specify a single value (e.g., `--threads 8`)."
-            )
-            raise typer.Exit(2)
-        if node_counts and len(node_counts) > 1:
-            console.print(
-                "[red]Error:[/] For multiple benchmarks, `--nodes` must specify a single value (e.g., `--nodes 2`)."
-            )
-            raise typer.Exit(2)
-        if threads_list:
-            threads_override = int(threads_list[0])
-            threads_list = None
-
     # Determine if sweep mode
-    has_thread_sweep = threads_list and len(threads_list) > 1
-    has_node_sweep = node_counts and len(node_counts) > 1
+    has_thread_sweep = bool(threads_list and len(threads_list) > 1)
+    has_node_sweep = bool(node_counts and len(node_counts) > 1)
+    has_sweep = has_thread_sweep or has_node_sweep
+
+    # Export metadata: differentiate fixed config vs sweep.
+    fixed_threads_meta: Optional[int] = None
+    fixed_nodes_meta: Optional[int] = None
+    thread_sweep_meta: Optional[List[int]] = threads_list if has_thread_sweep else None
+    node_sweep_meta: Optional[List[int]] = node_counts if has_node_sweep else None
+
+    threads_override: Optional[int] = None
+    nodes_override: Optional[int] = None
+    if not has_thread_sweep and threads_list and len(threads_list) == 1:
+        threads_override = int(threads_list[0])
+        fixed_threads_meta = threads_override
+    if not has_node_sweep and node_counts and len(node_counts) == 1:
+        nodes_override = int(node_counts[0])
+        fixed_nodes_meta = nodes_override
 
     try:
-        if len(bench_list) == 1 and (has_thread_sweep or has_node_sweep):
+        if len(bench_list) == 1 and has_sweep:
             # Sweep mode for single benchmark
             effective_threads = threads_list if threads_list else [None]
             effective_nodes = node_counts if node_counts else [None]
@@ -3609,12 +3661,50 @@ def run(
                 perf_enabled=perf,
                 perf_interval=perf_interval,
             )
+        elif len(bench_list) > 1 and has_sweep:
+            # Sweep mode for benchmark suites (all benchmark x config combinations).
+            if weak_scaling:
+                console.print(
+                    "[red]Error:[/] `--weak-scaling` is only supported for single-benchmark sweeps."
+                )
+                raise typer.Exit(2)
+
+            effective_threads = threads_list if threads_list else [None]
+            effective_nodes = node_counts if node_counts else [None]
+            total_configs = len(effective_threads) * len(effective_nodes)
+            results = []
+            config_idx = 0
+
+            for nodes_value in effective_nodes:
+                for threads_value in effective_threads:
+                    config_idx += 1
+                    if not quiet:
+                        threads_label = threads_value if threads_value is not None else "cfg"
+                        nodes_label = nodes_value if nodes_value is not None else "cfg"
+                        console.print(
+                            f"[bold]Sweep config {config_idx}/{total_configs}:[/] "
+                            f"threads={threads_label}, nodes={nodes_label}"
+                        )
+
+                    config_results = runner.run_all(
+                        bench_list,
+                        size=size,
+                        timeout=timeout,
+                        verify=verify,
+                        arts_config=arts_config,
+                        threads_override=threads_value,
+                        nodes_override=nodes_value,
+                        launcher_override=launcher,
+                        omp_threads_override=omp_threads,
+                        arts_exec_args=arts_exec_args,
+                        perf_enabled=perf,
+                        perf_interval=perf_interval,
+                        runs=runs,
+                        run_timestamp=run_timestamp,
+                    )
+                    results.extend(config_results)
         else:
             # Standard mode
-            if threads_list and len(threads_list) == 1:
-                threads_override = int(threads_list[0])
-                threads_list = None
-            nodes_int = int(node_counts[0]) if node_counts else None
             results = runner.run_all(
                 bench_list,
                 size=size,
@@ -3622,7 +3712,7 @@ def run(
                 verify=verify,
                 arts_config=arts_config,
                 threads_override=threads_override,
-                nodes_override=nodes_int,
+                nodes_override=nodes_override,
                 launcher_override=launcher,
                 omp_threads_override=omp_threads,
                 arts_exec_args=arts_exec_args,
@@ -3649,15 +3739,16 @@ def run(
         am.results_json_path,
         size,
         total_duration,
-        threads_list,
+        thread_sweep_meta,
+        node_sweep_meta,
         cflags,
         launcher,
         weak_scaling,
         base_size,
         runs,
         ".",  # artifacts are in same directory
-        fixed_threads=threads_override,
-        fixed_nodes=nodes,
+        fixed_threads=fixed_threads_meta,
+        fixed_nodes=fixed_nodes_meta,
         omp_threads_override=omp_threads,
         arts_config_override=str(arts_config) if arts_config else None,
     )
@@ -3696,8 +3787,21 @@ def build(
     runner = BenchmarkRunner(console)
 
     # Discover or use provided benchmarks
-    if benchmarks:
-        bench_list = list(benchmarks)
+    requested_benchmarks, dropped_blank = normalize_requested_benchmarks(
+        benchmarks)
+    if dropped_blank:
+        console.print(
+            "[yellow]Ignoring blank benchmark arguments. "
+            "If you copied a multiline command, ensure each '\\' is immediately before a newline.[/]")
+
+    if requested_benchmarks:
+        invalid = find_invalid_benchmarks(runner, requested_benchmarks)
+        if invalid:
+            invalid_list = ", ".join(invalid)
+            console.print(f"[red]Error: Unknown benchmark(s):[/] {invalid_list}")
+            console.print("[dim]Use `carts benchmarks list` to see valid names.[/]")
+            raise typer.Exit(2)
+        bench_list = requested_benchmarks
     else:
         bench_list = runner.discover_benchmarks(suite)
 
@@ -3756,10 +3860,26 @@ def clean(
 
     if all:
         bench_list = runner.discover_benchmarks()
-    elif benchmarks:
-        bench_list = list(benchmarks)
     else:
-        bench_list = runner.discover_benchmarks(suite)
+        requested_benchmarks, dropped_blank = normalize_requested_benchmarks(
+            benchmarks)
+        if dropped_blank:
+            console.print(
+                "[yellow]Ignoring blank benchmark arguments. "
+                "If you copied a multiline command, ensure each '\\' is immediately before a newline.[/]")
+
+        if requested_benchmarks:
+            invalid = find_invalid_benchmarks(runner, requested_benchmarks)
+            if invalid:
+                invalid_list = ", ".join(invalid)
+                console.print(
+                    f"[red]Error: Unknown benchmark(s):[/] {invalid_list}")
+                console.print(
+                    "[dim]Use `carts benchmarks list` to see valid names.[/]")
+                raise typer.Exit(2)
+            bench_list = requested_benchmarks
+        else:
+            bench_list = runner.discover_benchmarks(suite)
 
     if not bench_list:
         console.print("[yellow]No benchmarks found.[/]")
@@ -3913,8 +4033,21 @@ def slurm_run(
     print_header("SLURM Batch Submission", "\n".join(subtitle_parts))
 
     # Discover benchmarks
-    if benchmarks:
-        bench_list = benchmarks
+    requested_benchmarks, dropped_blank = normalize_requested_benchmarks(
+        benchmarks)
+    if dropped_blank:
+        console.print(
+            "[yellow]Ignoring blank benchmark arguments. "
+            "If you copied a multiline command, ensure each '\\' is immediately before a newline.[/]")
+
+    if requested_benchmarks:
+        invalid = find_invalid_benchmarks(runner, requested_benchmarks)
+        if invalid:
+            invalid_list = ", ".join(invalid)
+            console.print(f"[red]Error: Unknown benchmark(s):[/] {invalid_list}")
+            console.print("[dim]Use `carts benchmarks list` to see valid names.[/]")
+            raise typer.Exit(2)
+        bench_list = requested_benchmarks
     else:
         bench_list = runner.discover_benchmarks(suite)
 
