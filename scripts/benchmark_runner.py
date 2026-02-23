@@ -93,9 +93,6 @@ from benchmark_common import (
 # Constants (local-only — shared constants imported from benchmark_common)
 # ============================================================================
 
-DEFAULT_ARTS_CONFIG = Path(__file__).parent.parent.parent / "configs" / "local.cfg"
-
-
 # Data models (enums + dataclasses)
 from benchmark_models import (
     Status, Phase,
@@ -138,6 +135,9 @@ def get_carts_dir() -> Path:
         if env_dir:
             carts_dir = Path(env_dir)
     return carts_dir
+
+
+DEFAULT_ARTS_CONFIG = get_carts_dir() / "configs" / "local.cfg"
 
 
 def get_benchmarks_dir() -> Path:
