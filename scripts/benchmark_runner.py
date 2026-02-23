@@ -3609,6 +3609,14 @@ def run(
             arts_nodes = int(cfg.get("nodeCount", "1"))
             arts_launcher = cfg.get("launcher", "ssh")
 
+            # Apply CLI overrides for display
+            if threads_list and len(threads_list) == 1:
+                arts_threads = int(threads_list[0])
+            if node_counts and len(node_counts) == 1:
+                arts_nodes = int(node_counts[0])
+            if launcher:
+                arts_launcher = launcher
+
             items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
             console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
             console.print(f"  Path: {effective_config}")
