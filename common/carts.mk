@@ -53,8 +53,8 @@ OMP_FLAGS := -fopenmp -O3 $(INCLUDES) $(CFLAGS) -lm -lcartsbenchmarks
 # Build ARTS executable (carts compile -O3 does everything in one step)
 all: | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
-	@$(CARTS) compile $(if $(LDFLAGS),--compile-args "$(LDFLAGS)") \
-		$(SRC) -O3 $(ARTS_CFG_ARG) $(EXECUTE_FLAGS) $(EXECUTE_ARGS) \
+	@$(CARTS) compile $(SRC) -O3 $(LDFLAGS) \
+		$(ARTS_CFG_ARG) $(EXECUTE_FLAGS) $(EXECUTE_ARGS) \
 		> $(LOG_DIR)/build.log 2>&1 || (cat $(LOG_DIR)/build.log >&2; exit 1)
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 
