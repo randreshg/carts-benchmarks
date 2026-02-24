@@ -103,6 +103,7 @@ from benchmark_models import (
 
 # Artifact management
 from benchmark_artifacts import ArtifactManager
+from benchmark_report import generate_report
 
 # Reproducibility metadata
 from benchmark_metadata import (
@@ -2773,7 +2774,7 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
 
 
 # NOTE: SVG/report generation code was removed.
-# Use `carts analyze` for post-run analysis (summary, export, compare).
+# Benchmark reports are generated automatically into each results directory.
 
 
 
@@ -3760,6 +3761,18 @@ def run(
         omp_threads_override=omp_threads,
         arts_config_override=str(arts_config) if arts_config else None,
     )
+
+    report_path: Optional[Path] = None
+    try:
+        report_path = generate_report(results, am.experiment_dir, quiet=quiet)
+    except Exception as e:
+        if not quiet:
+            console.print(f"[yellow]Warning:[/] Failed to generate report.xlsx: {e}")
+
+    if not quiet and report_path:
+        console.print(f"  [dim]Report: {report_path.name}[/]")
+    elif not quiet:
+        console.print("  [yellow]Report not generated (openpyxl may be unavailable in this environment).[/]")
 
     # Write manifest.json
     command_str = "carts benchmarks " + " ".join(sys.argv[1:])

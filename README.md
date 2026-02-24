@@ -9,6 +9,7 @@ A powerful CLI tool for building, running, and verifying CARTS benchmarks.
 carts benchmarks list
 
 # Run a single benchmark (results in carts-benchmarks/results/{timestamp}/)
+# This also auto-generates report.xlsx in the same directory.
 carts benchmarks run polybench/gemm --size small --threads 2
 
 # Run with multiple thread counts (thread sweep)
@@ -23,8 +24,8 @@ carts benchmarks run polybench/gemm --size medium --threads 4 --runs 5
 # Custom results directory
 carts benchmarks run polybench/gemm --size medium --threads 1,2,4,8 --results-dir results/scaling
 
-# Analyze results after a run
-carts analyze summary results/20240115_120530/
+# Inspect generated report path
+ls results/20240115_120530/report.xlsx
 ```
 
 ## Commands
@@ -58,7 +59,7 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--size` | `-s` | Dataset size: `small`, `medium`, `large` (default: small) |
 | `--timeout` | `-t` | Execution timeout in seconds (default: 60) |
 | `--threads` | | Thread counts: `1,2,4,8` or `1:16:2` for sweep |
-| `--runs` | `-r` | Number of runs per configuration (default: 10) |
+| `--runs` | `-r` | Number of runs per configuration (default: 1) |
 | `--omp-threads` | | OpenMP thread count (default: same as ARTS threads) |
 | `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
 | `--nodes` | `-n` | Node counts: single (`2`), list (`1,2,4`), range (`1:8:2`) |
@@ -69,7 +70,8 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--no-verify` | | Disable correctness verification |
 | `--no-clean` | | Skip cleaning before build (faster, may use stale artifacts) |
 | `--debug` | `-d` | Debug level: `0`=off, `1`=commands, `2`=verbose console output (logs always captured) |
-| `--counters` | | Counter level: `0`=off (default), `1`=artsid metrics, `2`=deep captures |
+| `--perf` | | Enable perf stat profiling for cache metrics |
+| `--perf-interval` | | Perf stat sampling interval in seconds (default: 0.1) |
 | `--cflags` | | Additional CFLAGS: `-DNI=500 -DNJ=500` |
 | `--weak-scaling` | | Enable weak scaling (auto-scale problem size) |
 | `--base-size` | | Base problem size for weak scaling |
@@ -94,50 +96,12 @@ carts benchmarks clean polybench/gemm
 carts benchmarks clean --all
 ```
 
-## Analyzing Results
+## Results Output
 
-After running benchmarks, use `carts analyze` to examine results.
-
-### `carts analyze summary`
-
-Re-display the results table from a completed experiment.
-
-```bash
-carts analyze summary results/20240115_120530/
-carts analyze summary results/20240115_120530/ -b gemm    # filter by benchmark
-carts analyze summary results/20240115_120530/ --sort speedup
-```
-
-### `carts analyze export`
-
-Export timing data to CSV for external tools (spreadsheets, notebooks).
-
-```bash
-# Export to file
-carts analyze export results/20240115_120530/ -o timing.csv
-
-# Export to stdout (pipe to other tools)
-carts analyze export results/20240115_120530/ | head -5
-
-# Filter by benchmark
-carts analyze export results/20240115_120530/ -b gemm -o gemm.csv
-```
-
-**CSV columns:** `benchmark, threads, nodes, run, arts_e2e_sec, omp_e2e_sec, arts_kernel_sec, omp_kernel_sec, arts_init_sec, omp_init_sec, speedup, status`
-
-### `carts analyze compare`
-
-Compare two experiments side-by-side to identify improvements and regressions.
-
-```bash
-# Compare baseline vs optimized
-carts analyze compare results/baseline/ results/optimized/
-
-# With custom threshold (flag changes > 10%)
-carts analyze compare results/before/ results/after/ --threshold 0.10
-```
-
-Output shows per-benchmark speedup delta with IMPROVED/REGRESSED/SAME verdicts.
+Each run writes a timestamped directory containing:
+- `results.json` (full machine-readable data)
+- `manifest.json` (run layout and summary)
+- `report.xlsx` (spreadsheet with Results, Summary, Scaling, Metadata tabs)
 
 ## Usage Examples
 
