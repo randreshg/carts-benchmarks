@@ -62,12 +62,17 @@ class ArtifactManager:
         self.results_json_path = self.experiment_dir / "results.json"
         self.manifest_path = self.experiment_dir / "manifest.json"
         self._manifest_benchmarks: Dict[str, Dict] = {}
+        self._phase_label: Optional[str] = None
+
+    def set_phase(self, phase_label: Optional[str] = None) -> None:
+        self._phase_label = phase_label
 
     # -- directory getters (create on first access) --------------------------
 
     def get_config_dir(self, benchmark_name: str, config: BenchmarkConfig) -> Path:
         config_label = f"{config.arts_threads}t_{config.arts_nodes}n"
-        d = self.experiment_dir / benchmark_name / config_label
+        base = self.experiment_dir / self._phase_label if self._phase_label else self.experiment_dir
+        d = base / benchmark_name / config_label
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -90,6 +95,64 @@ class ArtifactManager:
         d = self.get_run_dir(benchmark_name, config, run_number) / "perf"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def save_run_config(
+        self,
+        benchmark_name: str,
+        config: BenchmarkConfig,
+        run_number: int,
+        arts_cfg_path: Optional[Path] = None,
+        *,
+        command: Optional[str] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
+        size: Optional[str] = None,
+        cflags: Optional[str] = None,
+        run_phase: Optional[str] = None,
+    ) -> Path:
+        """Save the effective arts.cfg and a run_config.json into the run directory.
+
+        This makes each run directory fully self-contained with all configuration
+        needed to reproduce the run.
+        """
+        run_dir = self.get_run_dir(benchmark_name, config, run_number)
+
+        # Copy the effective arts.cfg used for this run
+        if arts_cfg_path and arts_cfg_path.exists():
+            dest = run_dir / "arts.cfg"
+            shutil.copy2(arts_cfg_path, dest)
+
+        # Write run_config.json with full execution context
+        run_config: Dict[str, object] = {
+            "benchmark": benchmark_name,
+            "run_number": run_number,
+            "threads": config.arts_threads,
+            "nodes": config.arts_nodes,
+            "config": {
+                "arts_threads": config.arts_threads,
+                "arts_nodes": config.arts_nodes,
+                "omp_threads": config.omp_threads,
+                "launcher": config.launcher,
+            },
+        }
+        if size is not None:
+            run_config["size"] = size
+        if cflags:
+            run_config["cflags"] = cflags
+        if run_phase:
+            run_config["run_phase"] = run_phase
+        if command:
+            run_config["command"] = command
+        if env_overrides:
+            run_config["env_overrides"] = env_overrides
+        if arts_cfg_path:
+            run_config["arts_cfg_source"] = str(arts_cfg_path)
+        run_config["timestamp"] = datetime.now().isoformat()
+
+        config_path = run_dir / "run_config.json"
+        with open(config_path, "w") as f:
+            json.dump(run_config, f, indent=2, default=str)
+
+        return config_path
 
     # -- artifact operations -------------------------------------------------
 

@@ -193,6 +193,23 @@ class BenchmarkConfig:
 
 
 @dataclass
+class ExperimentStep:
+    """Single phase definition for a multi-step experiment."""
+    name: str
+    counters: int = 0
+    counter_profile: Optional[str] = None
+    debug: int = 0
+    runs: int = 1
+    perf: bool = False
+    perf_interval: float = 0.1
+    threads: Optional[str] = None
+    nodes: Optional[str] = None
+    timeout: Optional[int] = None
+    cflags: Optional[str] = None
+    arts_config: Optional[str] = None
+
+
+@dataclass
 class BenchmarkResult:
     """Complete result for a single benchmark."""
     name: str
@@ -211,3 +228,5 @@ class BenchmarkResult:
     total_duration_sec: float
     # Actual CFLAGS used for this size (e.g., "-DNI=2000 -DNJ=2000")
     size_params: Optional[str] = None
+    # Multi-step experiment phase label (e.g. "production", "instrumented")
+    run_phase: Optional[str] = None

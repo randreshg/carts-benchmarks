@@ -19,6 +19,7 @@ import logging
 import os
 import platform
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -97,7 +98,7 @@ from benchmark_common import (
 from benchmark_models import (
     Status, Phase,
     BuildResult, WorkerTiming, ParallelTaskTiming, PerfCacheMetrics,
-    RunResult, TimingResult, VerificationResult,
+    RunResult, TimingResult, VerificationResult, ExperimentStep,
     Artifacts, BenchmarkConfig, BenchmarkResult,
 )
 
@@ -1131,6 +1132,15 @@ class BenchmarkRunner:
                         am.record_run(name, config, run_num,
                                       has_counters=has_counters, has_perf=has_perf)
 
+                        # Save effective arts.cfg and run_config.json per-run
+                        am.save_run_config(
+                            name, config, run_num,
+                            arts_cfg_path=arts_cfg,
+                            env_overrides=env if env else None,
+                            size=size,
+                            cflags=effective_cflags or None,
+                        )
+
                     result = BenchmarkResult(
                         name=name,
                         suite=name.split("/")[0] if "/" in name else "",
@@ -1308,30 +1318,34 @@ class BenchmarkRunner:
                     if not stderr_text.endswith("\n"):
                         f.write("\n")
 
+        proc: Optional[subprocess.Popen[str]] = None
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 cwd=Path(executable).parent,
                 env=run_env,
+                start_new_session=True,
             )
+            stdout_text, stderr_text = proc.communicate(timeout=timeout)
             duration = time.time() - start
+            return_code = proc.returncode if proc.returncode is not None else -1
 
             # Always write log file when path is provided
             if log_file:
                 write_run_log(
                     duration=duration,
-                    exit_code=result.returncode,
-                    stdout_text=result.stdout or "",
-                    stderr_text=result.stderr or "",
+                    exit_code=return_code,
+                    stdout_text=stdout_text or "",
+                    stderr_text=stderr_text or "",
                 )
                 if self.debug >= 2:
                     self.console.print(f"[dim]  Log: {log_file}[/]")
             elif self.debug >= 2:
                 # No log file specified, print summary only
-                lines = (result.stdout + result.stderr).strip().split('\n')
+                lines = ((stdout_text or "") + (stderr_text or "")).strip().split('\n')
                 if len(lines) > 10:
                     self.console.print(
                         f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
@@ -1340,19 +1354,18 @@ class BenchmarkRunner:
                         self.console.print(f"[dim]  {line}[/]")
 
             # Determine status based on exit code
-            if result.returncode == 0:
+            if return_code == 0:
                 status = Status.PASS
-            elif result.returncode in (139, 134, 136):  # SEGV, ABRT, FPE
+            elif return_code in (139, 134, 136):  # SEGV, ABRT, FPE
                 status = Status.CRASH
             else:
                 status = Status.FAIL
 
-            checksum = self.extract_checksum(result.stdout)
-            kernel_timings = self.extract_kernel_timings(result.stdout)
-            e2e_timings = self.extract_e2e_timings(result.stdout)
-            init_timings = self.extract_init_timings(result.stdout)
-            parallel_task_timing = self.extract_parallel_task_timings(
-                result.stdout)
+            checksum = self.extract_checksum(stdout_text)
+            kernel_timings = self.extract_kernel_timings(stdout_text)
+            e2e_timings = self.extract_e2e_timings(stdout_text)
+            init_timings = self.extract_init_timings(stdout_text)
+            parallel_task_timing = self.extract_parallel_task_timings(stdout_text)
 
             # Parse perf metrics if enabled
             perf_metrics = None
@@ -1364,9 +1377,9 @@ class BenchmarkRunner:
             return RunResult(
                 status=status,
                 duration_sec=duration,
-                exit_code=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                exit_code=return_code,
+                stdout=stdout_text or "",
+                stderr=stderr_text or "",
                 checksum=checksum,
                 kernel_timings=kernel_timings,
                 e2e_timings=e2e_timings,
@@ -1380,6 +1393,43 @@ class BenchmarkRunner:
             timeout_stdout = to_text(e.stdout)
             timeout_stderr = to_text(e.stderr)
             timeout_note = f"Execution timed out after {timeout} seconds"
+
+            if proc is not None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                except Exception:
+                    pass
+
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+
+                try:
+                    collected_stdout, collected_stderr = proc.communicate(timeout=2)
+                    if collected_stdout:
+                        timeout_stdout = to_text(collected_stdout)
+                    if collected_stderr:
+                        timeout_stderr = to_text(collected_stderr)
+                except subprocess.TimeoutExpired:
+                    pass
+                except Exception:
+                    pass
+
+            self._cleanup_port()
+            time.sleep(0.5)
+
             if log_file:
                 write_run_log(
                     duration=duration,
@@ -1756,6 +1806,7 @@ class BenchmarkRunner:
         run_number: int = 1,
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
+        cflags: str = "",
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -1851,14 +1902,14 @@ class BenchmarkRunner:
         if phase_callback:
             phase_callback(Phase.BUILD_ARTS)
         build_arts = self.build_benchmark(
-            name, size, "arts", effective_arts_cfg, "", arts_exec_args)
+            name, size, "arts", effective_arts_cfg, cflags, arts_exec_args)
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
         # Build OpenMP version (single-node reference for correctness).
         if phase_callback:
             phase_callback(Phase.BUILD_OMP)
-        build_omp = self.build_benchmark(name, size, "openmp", None)
+        build_omp = self.build_benchmark(name, size, "openmp", None, cflags)
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
@@ -2065,6 +2116,15 @@ class BenchmarkRunner:
 
             am.record_run(name, config, run_number,
                           has_counters=has_counters, has_perf=has_perf)
+
+            # Save effective arts.cfg and run_config.json per-run
+            am.save_run_config(
+                name, config, run_number,
+                arts_cfg_path=effective_arts_cfg,
+                env_overrides=common_env if common_env else None,
+                size=size,
+                cflags=cflags or None,
+            )
         else:
             if effective_arts_cfg:
                 artifacts.arts_config = str(effective_arts_cfg)
@@ -2111,6 +2171,7 @@ class BenchmarkRunner:
         runs: int = 1,
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
+        cflags: str = "",
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2139,6 +2200,7 @@ class BenchmarkRunner:
                         run_number=run_num,
                         run_timestamp=run_timestamp,
                         perf_dir=perf_dir,
+                        cflags=cflags,
                     )
                     results_list.append(result)
             self.results = results_list
@@ -2194,6 +2256,7 @@ class BenchmarkRunner:
                             run_number=run_num,
                             run_timestamp=run_timestamp,
                             perf_dir=perf_dir,
+                            cflags=cflags,
                         )
                     except Exception as e:
                         # Log error and continue to next benchmark
@@ -2404,6 +2467,68 @@ class BenchmarkRunner:
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
+
+        # macOS fallback: terminate any process IDs bound to tcp:{port}
+        try:
+            lsof_result = subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return
+        except Exception:
+            return
+
+        pids: List[int] = []
+        for line in (lsof_result.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pid = int(line)
+            except ValueError:
+                continue
+            if pid != os.getpid():
+                pids.append(pid)
+
+        if not pids:
+            return
+
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                continue
+            except Exception:
+                continue
+
+        deadline = time.time() + 2.0
+        alive = set(pids)
+        while alive and time.time() < deadline:
+            remaining = set()
+            for pid in alive:
+                try:
+                    os.kill(pid, 0)
+                    remaining.add(pid)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    continue
+            if not remaining:
+                break
+            alive = remaining
+            time.sleep(0.1)
+
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                continue
+            except Exception:
+                continue
 
     def clean_benchmark(self, name: str) -> bool:
         """Clean build artifacts for a benchmark."""
@@ -3282,6 +3407,7 @@ def export_json(
             "suite": r.suite,
             "size": r.size,
             "size_params": r.size_params,
+            "run_phase": r.run_phase,
             "config": {
                 "arts_threads": r.config.arts_threads,
                 "arts_nodes": r.config.arts_nodes,
@@ -3436,6 +3562,388 @@ def list_benchmarks(
             console.print()
 
 
+def _parse_bool_flag(value: Any) -> bool:
+    """Parse common bool-like values from JSON/CLI step definitions."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value}")
+
+
+def _make_experiment_step(
+    data: Dict[str, Any],
+    default_name: str,
+    base_dir: Optional[Path] = None,
+) -> ExperimentStep:
+    """Create an ExperimentStep from a dictionary payload."""
+    normalized = {str(k).replace("-", "_"): v for k, v in data.items()}
+
+    def _resolve_path(raw: Any) -> Optional[str]:
+        if raw is None or str(raw).strip() == "":
+            return None
+        p = Path(str(raw))
+        if base_dir and not p.is_absolute():
+            return str((base_dir / p).resolve())
+        return str(p)
+
+    step = ExperimentStep(
+        name=str(normalized.get("name", default_name)),
+        counters=int(normalized.get("counters", 0) or 0),
+        counter_profile=_resolve_path(normalized.get("counter_profile")),
+        debug=int(normalized.get("debug", 0) or 0),
+        runs=int(normalized.get("runs", 1) or 1),
+        perf=_parse_bool_flag(normalized.get("perf", False)),
+        perf_interval=float(normalized.get("perf_interval", 0.1) or 0.1),
+        threads=str(normalized["threads"]) if normalized.get("threads") is not None else None,
+        nodes=str(normalized["nodes"]) if normalized.get("nodes") is not None else None,
+        timeout=int(normalized["timeout"]) if normalized.get("timeout") is not None else None,
+        cflags=str(normalized["cflags"]) if normalized.get("cflags") is not None else None,
+        arts_config=_resolve_path(normalized.get("arts_config")),
+    )
+    setattr(step, "_has_runs", "runs" in normalized and normalized.get("runs") is not None)
+    setattr(step, "_has_perf", "perf" in normalized and normalized.get("perf") is not None)
+    setattr(
+        step,
+        "_has_perf_interval",
+        "perf_interval" in normalized and normalized.get("perf_interval") is not None,
+    )
+    setattr(step, "_has_threads", "threads" in normalized and normalized.get("threads") is not None)
+    setattr(step, "_has_nodes", "nodes" in normalized and normalized.get("nodes") is not None)
+    setattr(step, "_has_timeout", "timeout" in normalized and normalized.get("timeout") is not None)
+    setattr(step, "_has_cflags", "cflags" in normalized and normalized.get("cflags") is not None)
+    setattr(
+        step,
+        "_has_arts_config",
+        "arts_config" in normalized and normalized.get("arts_config") is not None,
+    )
+    setattr(
+        step,
+        "_has_counter_profile",
+        "counter_profile" in normalized and normalized.get("counter_profile") is not None,
+    )
+    return step
+
+
+def _rebuild_arts(
+    console: Console,
+    counters: int = 0,
+    debug: int = 0,
+    profile: Optional[Path] = None,
+) -> None:
+    """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
+    if profile and not profile.exists():
+        console.print(f"[red]Error: Profile not found: {profile}[/]")
+        raise typer.Exit(1)
+
+    if profile:
+        cmd = [
+            "carts", "build", "--arts",
+            f"--profile={profile}",
+            f"--debug={debug}",
+        ]
+    else:
+        cmd = [
+            "carts", "build", "--arts",
+            f"--counters={counters}",
+            f"--debug={debug}",
+        ]
+
+    details: List[str] = []
+    if counters > 0:
+        details.append(f"counters={counters}")
+    if debug > 0:
+        details.append(f"debug={debug}")
+    if profile:
+        details.append(f"profile={profile}")
+
+    detail_text = ", ".join(details) if details else "default config"
+    console.print(f"[yellow]Rebuilding ARTS ({detail_text})[/]")
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() if result.stderr else "(no stderr)"
+        console.print(f"[red]ARTS rebuild failed:[/]\n{stderr}")
+        raise typer.Exit(1)
+    console.print("[green]ARTS rebuild complete[/]")
+
+
+def _load_experiment(experiment: str, configs_dir: Path) -> List[ExperimentStep]:
+    """Load experiment step definitions from JSON config."""
+    exp_path: Optional[Path] = None
+    exp_arg = Path(experiment)
+    if exp_arg.exists():
+        exp_path = exp_arg.resolve()
+    else:
+        candidates = [
+            (configs_dir / "experiments" / f"{experiment}.json").resolve(),
+            (configs_dir / "experiments" / experiment).resolve(),
+        ]
+        exp_path = next((p for p in candidates if p.exists()), None)
+
+    if exp_path is None:
+        raise ValueError(f"Experiment config not found: {experiment}")
+
+    with open(exp_path, "r") as f:
+        payload = json.load(f)
+
+    if isinstance(payload, dict):
+        raw_steps = payload.get("steps")
+    elif isinstance(payload, list):
+        raw_steps = payload
+    else:
+        raise ValueError(f"Invalid experiment format in {exp_path}")
+
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError(f"Experiment '{experiment}' has no steps")
+
+    steps: List[ExperimentStep] = []
+    for idx, item in enumerate(raw_steps, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Step {idx} in {exp_path} must be an object")
+        steps.append(
+            _make_experiment_step(
+                item,
+                default_name=f"step_{idx}",
+                base_dir=exp_path.parent,
+            )
+        )
+    return steps
+
+
+def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
+    """Parse repeatable --step options into ExperimentStep objects."""
+    if not step_args:
+        return []
+
+    steps: List[ExperimentStep] = []
+    for idx, raw_arg in enumerate(step_args, start=1):
+        raw = raw_arg.strip()
+        if not raw:
+            continue
+
+        if raw.startswith("{"):
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError(f"--step #{idx} must be a JSON object")
+            steps.append(_make_experiment_step(payload, default_name=f"step_{idx}"))
+            continue
+
+        payload: Dict[str, Any] = {}
+        if ":" in raw:
+            name_part, fields_part = raw.split(":", 1)
+            name_value = name_part.strip()
+            if name_value:
+                payload["name"] = name_value
+            fields = [t.strip() for t in fields_part.split(",") if t.strip()]
+        else:
+            fields = [t.strip() for t in raw.split(",") if t.strip()]
+
+        for token in fields:
+            if "=" in token:
+                key, value = token.split("=", 1)
+                payload[key.strip().replace("-", "_")] = value.strip()
+            else:
+                key = token.strip().replace("-", "_")
+                if key == "perf":
+                    payload["perf"] = True
+                elif "name" not in payload:
+                    payload["name"] = token
+                else:
+                    raise ValueError(
+                        f"Invalid --step token '{token}' in '{raw_arg}' "
+                        "(expected key=value or bare 'perf')"
+                    )
+
+        steps.append(_make_experiment_step(payload, default_name=f"step_{idx}"))
+
+    if not steps:
+        raise ValueError("No valid --step values provided")
+    return steps
+
+
+def _parse_nodes_spec(spec: str) -> List[int]:
+    """Parse node spec with support for both thread-style and SLURM-style ranges."""
+    try:
+        return parse_threads(spec)
+    except ValueError:
+        return parse_node_spec(spec)
+
+
+def _run_step(
+    runner: BenchmarkRunner,
+    bench_list: List[str],
+    size: str,
+    timeout: int,
+    verify: bool,
+    arts_config: Optional[Path],
+    threads_list: Optional[List[int]],
+    node_counts: Optional[List[int]],
+    launcher: Optional[str],
+    omp_threads: Optional[int],
+    weak_scaling: bool,
+    base_size: Optional[int],
+    runs: int,
+    arts_exec_args: Optional[str],
+    perf: bool,
+    perf_interval: float,
+    run_timestamp: str,
+    cflags: Optional[str],
+    quiet: bool,
+) -> List[BenchmarkResult]:
+    """Execute one resolved step using existing run dispatch rules."""
+    has_thread_sweep = bool(threads_list and len(threads_list) > 1)
+    has_node_sweep = bool(node_counts and len(node_counts) > 1)
+    has_sweep = has_thread_sweep or has_node_sweep
+
+    threads_override: Optional[int] = None
+    nodes_override: Optional[int] = None
+    if not has_thread_sweep and threads_list and len(threads_list) == 1:
+        threads_override = int(threads_list[0])
+    if not has_node_sweep and node_counts and len(node_counts) == 1:
+        nodes_override = int(node_counts[0])
+
+    if len(bench_list) == 1 and has_sweep:
+        effective_threads = threads_list if threads_list else [None]
+        effective_nodes = node_counts if node_counts else [None]
+        return runner.run_with_thread_sweep(
+            bench_list[0],
+            size,
+            effective_threads,
+            arts_config,
+            cflags or "",
+            None,  # counter_dir (auto-managed by ArtifactManager)
+            timeout,
+            omp_threads,
+            launcher,
+            node_counts=effective_nodes,
+            weak_scaling=weak_scaling,
+            base_size=base_size,
+            runs=runs,
+            arts_exec_args=arts_exec_args,
+            perf_enabled=perf,
+            perf_interval=perf_interval,
+        )
+
+    if len(bench_list) > 1 and has_sweep:
+        if weak_scaling:
+            raise ValueError(
+                "`--weak-scaling` is only supported for single-benchmark sweeps."
+            )
+
+        effective_threads = threads_list if threads_list else [None]
+        effective_nodes = node_counts if node_counts else [None]
+        total_configs = len(effective_threads) * len(effective_nodes)
+        results: List[BenchmarkResult] = []
+        config_idx = 0
+
+        for nodes_value in effective_nodes:
+            for threads_value in effective_threads:
+                config_idx += 1
+                if not quiet:
+                    threads_label = threads_value if threads_value is not None else "cfg"
+                    nodes_label = nodes_value if nodes_value is not None else "cfg"
+                    console.print(
+                        f"[bold]Sweep config {config_idx}/{total_configs}:[/] "
+                        f"threads={threads_label}, nodes={nodes_label}"
+                    )
+
+                config_results = runner.run_all(
+                    bench_list,
+                    size=size,
+                    timeout=timeout,
+                    verify=verify,
+                    arts_config=arts_config,
+                    threads_override=threads_value,
+                    nodes_override=nodes_value,
+                    launcher_override=launcher,
+                    omp_threads_override=omp_threads,
+                    arts_exec_args=arts_exec_args,
+                    perf_enabled=perf,
+                    perf_interval=perf_interval,
+                    runs=runs,
+                    run_timestamp=run_timestamp,
+                    cflags=cflags or "",
+                )
+                results.extend(config_results)
+        return results
+
+    return runner.run_all(
+        bench_list,
+        size=size,
+        timeout=timeout,
+        verify=verify,
+        arts_config=arts_config,
+        threads_override=threads_override,
+        nodes_override=nodes_override,
+        launcher_override=launcher,
+        omp_threads_override=omp_threads,
+        arts_exec_args=arts_exec_args,
+        perf_enabled=perf,
+        perf_interval=perf_interval,
+        runs=runs,
+        run_timestamp=run_timestamp,
+        cflags=cflags or "",
+    )
+
+
+def _run_step_slurm(
+    bench_list: List[str],
+    size: str,
+    node_counts: List[int],
+    runs: int,
+    partition: Optional[str],
+    time_limit: str,
+    arts_config: Optional[Path],
+    threads_list: Optional[List[int]],
+    results_dir: Path,
+    verbose: bool,
+    cflags: Optional[str],
+    perf: bool,
+    perf_interval: float,
+) -> None:
+    """Execute one resolved step through SLURM batch mode."""
+    if not node_counts:
+        raise ValueError("SLURM mode requires at least one node count")
+    if threads_list and len(threads_list) > 1:
+        raise ValueError("SLURM mode currently supports a single --threads value")
+
+    nodes_arg = ",".join(str(n) for n in node_counts)
+    slurm_threads = int(threads_list[0]) if threads_list else None
+
+    _execute_slurm_batch(
+        benchmarks=bench_list,
+        nodes=nodes_arg,
+        size=size,
+        runs=runs,
+        partition=partition,
+        time_limit=time_limit,
+        account=None,
+        arts_config=arts_config,
+        threads=slurm_threads,
+        output_dir=results_dir,
+        suite=None,
+        dry_run=False,
+        no_build=False,
+        verbose=verbose,
+        cflags=cflags,
+        gdb=False,
+        profile=None,
+        perf=perf,
+        perf_interval=perf_interval,
+        exclude_nodes=None,
+        exclude=None,
+    )
+
+
 @app.command()
 def run(
     benchmarks: Optional[List[str]] = typer.Argument(
@@ -3487,6 +3995,18 @@ def run(
         0.1, "--perf-interval", help="Perf stat sampling interval in seconds"),
     results_dir: Optional[Path] = typer.Option(
         None, "--results-dir", help="Base directory for experiment output (default: carts-benchmarks/results/)"),
+    experiment: Optional[str] = typer.Option(
+        None, "--experiment", "-x",
+        help="Experiment definition name/path from configs/experiments/*.json"),
+    step: Optional[List[str]] = typer.Option(
+        None, "--step",
+        help="Inline step: 'name:key=value,...' (repeatable). Example: production:counters=0,runs=5,perf"),
+    slurm: bool = typer.Option(
+        False, "--slurm", help="Submit as SLURM batch jobs instead of local execution"),
+    partition: Optional[str] = typer.Option(
+        None, "--partition", "-p", help="SLURM partition (only with --slurm)"),
+    time_limit: str = typer.Option(
+        "01:00:00", "--time-limit", help="SLURM time limit per job (only with --slurm)"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -3511,15 +4031,9 @@ def run(
         debug=debug_level, artifact_manager=am,
     )
 
-    # Parse thread specification
-    threads_list = None
-    if threads:
-        threads_list = parse_threads(threads)
-
-    # Parse node specification
-    node_counts = None
-    if nodes:
-        node_counts = parse_threads(nodes)
+    # Parse thread/node specification (base CLI config)
+    base_threads_list = parse_threads(threads) if threads else None
+    base_node_counts = _parse_nodes_spec(nodes) if nodes else None
 
     # Discover or use provided benchmarks
     requested_benchmarks, dropped_blank = normalize_requested_benchmarks(
@@ -3553,33 +4067,146 @@ def run(
         console.print("[yellow]No benchmarks found.[/]")
         raise typer.Exit(1)
 
-    # Handle custom counter profile (triggers ARTS rebuild)
-    if profile:
-        if not profile.exists():
-            console.print(f"[red]Error: Profile not found: {profile}[/]")
-            raise typer.Exit(1)
+    # Resolve experiment steps
+    if experiment and step:
+        console.print("[red]Error:[/] Use either --experiment or --step, not both.")
+        raise typer.Exit(2)
 
-        console.print(f"[yellow]Rebuilding ARTS with profile: {profile}[/]")
-        import subprocess
-        result = subprocess.run(
-            ["carts", "build", "--arts", f"--profile={profile}"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            console.print(f"[red]ARTS rebuild failed:[/]\n{result.stderr}")
+    explicit_step_mode = bool(experiment or step)
+    configs_dir = get_benchmarks_dir() / "configs"
+    try:
+        if step:
+            steps = _parse_inline_steps(step)
+        elif experiment:
+            steps = _load_experiment(experiment, configs_dir)
+        else:
+            implicit_step = ExperimentStep(
+                name="default",
+                counters=0,
+                counter_profile=str(profile.resolve()) if profile else None,
+                debug=0,
+                runs=runs,
+                perf=perf,
+                perf_interval=perf_interval,
+                threads=threads,
+                nodes=nodes,
+                timeout=timeout,
+                cflags=cflags,
+                arts_config=str(arts_config.resolve()) if arts_config else None,
+            )
+            setattr(implicit_step, "_has_runs", True)
+            setattr(implicit_step, "_has_perf", True)
+            setattr(implicit_step, "_has_perf_interval", True)
+            setattr(implicit_step, "_has_threads", threads is not None)
+            setattr(implicit_step, "_has_nodes", nodes is not None)
+            setattr(implicit_step, "_has_timeout", True)
+            setattr(implicit_step, "_has_cflags", cflags is not None)
+            setattr(implicit_step, "_has_arts_config", arts_config is not None)
+            setattr(implicit_step, "_has_counter_profile", profile is not None)
+            steps = [implicit_step]
+    except ValueError as e:
+        console.print(f"[red]Error:[/] {e}")
+        raise typer.Exit(1)
+
+    if explicit_step_mode and profile:
+        if len(steps) == 1 and not getattr(steps[0], "_has_counter_profile", False):
+            steps[0].counter_profile = str(profile.resolve())
+            setattr(steps[0], "_has_counter_profile", True)
+        elif not quiet:
+            console.print(
+                "[yellow]Warning:[/] Ignoring --profile because explicit steps are provided. "
+                "Use step `counter_profile=...` instead."
+            )
+
+    if slurm:
+        if weak_scaling:
+            console.print("[red]Error:[/] --weak-scaling is not supported with --slurm.")
+            raise typer.Exit(2)
+        if arts_exec_args:
+            console.print("[yellow]Warning:[/] --arts-exec-args is ignored in --slurm mode.")
+
+        try:
+            for idx, step_def in enumerate(steps, start=1):
+                step_name = step_def.name or f"step_{idx}"
+                if not quiet and len(steps) > 1:
+                    console.print(f"\n[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
+
+                step_profile_path = (
+                    Path(step_def.counter_profile) if step_def.counter_profile else None
+                )
+                should_rebuild = (
+                    explicit_step_mode
+                    or step_profile_path is not None
+                    or step_def.counters > 0
+                    or step_def.debug > 0
+                )
+                if should_rebuild:
+                    _rebuild_arts(
+                        console,
+                        counters=step_def.counters,
+                        debug=step_def.debug,
+                        profile=step_profile_path,
+                    )
+
+                use_step_threads = getattr(step_def, "_has_threads", False) or not explicit_step_mode
+                use_step_nodes = getattr(step_def, "_has_nodes", False) or not explicit_step_mode
+                use_step_runs = getattr(step_def, "_has_runs", False) or not explicit_step_mode
+                use_step_perf = getattr(step_def, "_has_perf", False) or not explicit_step_mode
+                use_step_perf_interval = (
+                    getattr(step_def, "_has_perf_interval", False) or not explicit_step_mode
+                )
+                use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
+                use_step_arts_config = (
+                    getattr(step_def, "_has_arts_config", False) or not explicit_step_mode
+                )
+
+                step_threads_spec = step_def.threads if use_step_threads else threads
+                step_nodes_spec = step_def.nodes if use_step_nodes else nodes
+                step_runs = step_def.runs if use_step_runs else runs
+                step_perf = step_def.perf if use_step_perf else perf
+                step_perf_interval = (
+                    step_def.perf_interval if use_step_perf_interval else perf_interval
+                )
+                step_cflags = step_def.cflags if use_step_cflags else cflags
+
+                if not step_nodes_spec:
+                    raise ValueError("--slurm requires --nodes (or step nodes override)")
+                step_node_counts = _parse_nodes_spec(step_nodes_spec)
+                step_threads_list = parse_threads(step_threads_spec) if step_threads_spec else None
+
+                step_arts_config: Optional[Path] = arts_config
+                if use_step_arts_config and step_def.arts_config:
+                    step_arts_config = Path(step_def.arts_config).resolve()
+
+                _run_step_slurm(
+                    bench_list=bench_list,
+                    size=size,
+                    node_counts=step_node_counts,
+                    runs=step_runs,
+                    partition=partition,
+                    time_limit=time_limit,
+                    arts_config=step_arts_config,
+                    threads_list=step_threads_list,
+                    results_dir=results_dir,
+                    verbose=verbose,
+                    cflags=step_cflags,
+                    perf=step_perf,
+                    perf_interval=step_perf_interval,
+                )
+        except ValueError as e:
+            console.print(f"\n[red]Error:[/] {e}")
             raise typer.Exit(1)
-        console.print("[green]ARTS rebuild complete[/]")
+        return
 
     # Print header
     if not quiet:
         config_items = [f"size={size}", f"timeout={timeout}s",
                         f"verify={verify}", f"clean={clean}"]
-        if threads_list:
+        if base_threads_list:
             config_items.append(f"threads={threads}")
         if launcher is not None:
             config_items.append(f"launcher={launcher}")
-        if node_counts is not None:
+        if base_node_counts is not None:
             config_items.append(f"nodes={nodes}")
         if runs > 1:
             config_items.append(f"runs={runs}")
@@ -3593,6 +4220,10 @@ def run(
             config_items.append(f"profile={profile.name}")
         if perf:
             config_items.append("perf=on")
+        if experiment:
+            config_items.append(f"experiment={experiment}")
+        if step:
+            config_items.append(f"steps={len(step)}")
         subtitle = f"Config: {', '.join(config_items)}"
         print_header("CARTS Benchmark Runner", subtitle)
 
@@ -3611,10 +4242,10 @@ def run(
             arts_launcher = cfg.get("launcher", "ssh")
 
             # Apply CLI overrides for display
-            if threads_list and len(threads_list) == 1:
-                arts_threads = int(threads_list[0])
-            if node_counts and len(node_counts) == 1:
-                arts_nodes = int(node_counts[0])
+            if base_threads_list and len(base_threads_list) == 1:
+                arts_threads = int(base_threads_list[0])
+            if base_node_counts and len(base_node_counts) == 1:
+                arts_nodes = int(base_node_counts[0])
             if launcher:
                 arts_launcher = launcher
 
@@ -3628,112 +4259,113 @@ def run(
     start_time = time.time()
 
     # Determine if sweep mode
-    has_thread_sweep = bool(threads_list and len(threads_list) > 1)
-    has_node_sweep = bool(node_counts and len(node_counts) > 1)
-    has_sweep = has_thread_sweep or has_node_sweep
+    has_thread_sweep = bool(base_threads_list and len(base_threads_list) > 1)
+    has_node_sweep = bool(base_node_counts and len(base_node_counts) > 1)
 
     # Export metadata: differentiate fixed config vs sweep.
     fixed_threads_meta: Optional[int] = None
     fixed_nodes_meta: Optional[int] = None
-    thread_sweep_meta: Optional[List[int]] = threads_list if has_thread_sweep else None
-    node_sweep_meta: Optional[List[int]] = node_counts if has_node_sweep else None
+    thread_sweep_meta: Optional[List[int]] = base_threads_list if has_thread_sweep else None
+    node_sweep_meta: Optional[List[int]] = base_node_counts if has_node_sweep else None
 
-    threads_override: Optional[int] = None
-    nodes_override: Optional[int] = None
-    if not has_thread_sweep and threads_list and len(threads_list) == 1:
-        threads_override = int(threads_list[0])
-        fixed_threads_meta = threads_override
-    if not has_node_sweep and node_counts and len(node_counts) == 1:
-        nodes_override = int(node_counts[0])
-        fixed_nodes_meta = nodes_override
+    if not has_thread_sweep and base_threads_list and len(base_threads_list) == 1:
+        fixed_threads_meta = int(base_threads_list[0])
+    if not has_node_sweep and base_node_counts and len(base_node_counts) == 1:
+        fixed_nodes_meta = int(base_node_counts[0])
 
+    all_results: List[BenchmarkResult] = []
     try:
-        if len(bench_list) == 1 and has_sweep:
-            # Sweep mode for single benchmark
-            effective_threads = threads_list if threads_list else [None]
-            effective_nodes = node_counts if node_counts else [None]
-            results = runner.run_with_thread_sweep(
-                bench_list[0],
-                size,
-                effective_threads,
-                arts_config,
-                cflags or "",
-                None,  # counter_dir (auto-managed by ArtifactManager)
-                timeout,
-                omp_threads,
-                launcher,
-                node_counts=effective_nodes,
+        for idx, step_def in enumerate(steps, start=1):
+            step_name = step_def.name or f"step_{idx}"
+
+            if not quiet and len(steps) > 1:
+                console.print(f"[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
+
+            am.set_phase(step_name if len(steps) > 1 else None)
+            if explicit_step_mode:
+                runner.clean = True
+            else:
+                runner.clean = clean
+
+            step_profile_path = (
+                Path(step_def.counter_profile) if step_def.counter_profile else None
+            )
+            should_rebuild = (
+                explicit_step_mode
+                or step_profile_path is not None
+                or step_def.counters > 0
+                or step_def.debug > 0
+            )
+            if should_rebuild:
+                _rebuild_arts(
+                    console,
+                    counters=step_def.counters,
+                    debug=step_def.debug,
+                    profile=step_profile_path,
+                )
+
+            use_step_threads = getattr(step_def, "_has_threads", False) or not explicit_step_mode
+            use_step_nodes = getattr(step_def, "_has_nodes", False) or not explicit_step_mode
+            use_step_timeout = getattr(step_def, "_has_timeout", False) or not explicit_step_mode
+            use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
+            use_step_runs = getattr(step_def, "_has_runs", False) or not explicit_step_mode
+            use_step_perf = getattr(step_def, "_has_perf", False) or not explicit_step_mode
+            use_step_perf_interval = (
+                getattr(step_def, "_has_perf_interval", False) or not explicit_step_mode
+            )
+            use_step_arts_config = (
+                getattr(step_def, "_has_arts_config", False) or not explicit_step_mode
+            )
+
+            step_threads_spec = step_def.threads if use_step_threads else threads
+            step_nodes_spec = step_def.nodes if use_step_nodes else nodes
+            step_timeout = (
+                step_def.timeout if (use_step_timeout and step_def.timeout is not None) else timeout
+            )
+            step_cflags = step_def.cflags if use_step_cflags else cflags
+            step_runs = step_def.runs if use_step_runs else runs
+            step_perf = step_def.perf if use_step_perf else perf
+            step_perf_interval = (
+                step_def.perf_interval if use_step_perf_interval else perf_interval
+            )
+
+            step_arts_config: Optional[Path] = arts_config
+            if use_step_arts_config and step_def.arts_config:
+                step_arts_config = Path(step_def.arts_config).resolve()
+
+            step_threads_list = parse_threads(step_threads_spec) if step_threads_spec else None
+            step_node_counts = _parse_nodes_spec(step_nodes_spec) if step_nodes_spec else None
+
+            step_results = _run_step(
+                runner=runner,
+                bench_list=bench_list,
+                size=size,
+                timeout=step_timeout,
+                verify=verify,
+                arts_config=step_arts_config,
+                threads_list=step_threads_list,
+                node_counts=step_node_counts,
+                launcher=launcher,
+                omp_threads=omp_threads,
                 weak_scaling=weak_scaling,
                 base_size=base_size,
-                runs=runs,
+                runs=step_runs,
                 arts_exec_args=arts_exec_args,
-                perf_enabled=perf,
-                perf_interval=perf_interval,
-            )
-        elif len(bench_list) > 1 and has_sweep:
-            # Sweep mode for benchmark suites (all benchmark x config combinations).
-            if weak_scaling:
-                console.print(
-                    "[red]Error:[/] `--weak-scaling` is only supported for single-benchmark sweeps."
-                )
-                raise typer.Exit(2)
-
-            effective_threads = threads_list if threads_list else [None]
-            effective_nodes = node_counts if node_counts else [None]
-            total_configs = len(effective_threads) * len(effective_nodes)
-            results = []
-            config_idx = 0
-
-            for nodes_value in effective_nodes:
-                for threads_value in effective_threads:
-                    config_idx += 1
-                    if not quiet:
-                        threads_label = threads_value if threads_value is not None else "cfg"
-                        nodes_label = nodes_value if nodes_value is not None else "cfg"
-                        console.print(
-                            f"[bold]Sweep config {config_idx}/{total_configs}:[/] "
-                            f"threads={threads_label}, nodes={nodes_label}"
-                        )
-
-                    config_results = runner.run_all(
-                        bench_list,
-                        size=size,
-                        timeout=timeout,
-                        verify=verify,
-                        arts_config=arts_config,
-                        threads_override=threads_value,
-                        nodes_override=nodes_value,
-                        launcher_override=launcher,
-                        omp_threads_override=omp_threads,
-                        arts_exec_args=arts_exec_args,
-                        perf_enabled=perf,
-                        perf_interval=perf_interval,
-                        runs=runs,
-                        run_timestamp=run_timestamp,
-                    )
-                    results.extend(config_results)
-        else:
-            # Standard mode
-            results = runner.run_all(
-                bench_list,
-                size=size,
-                timeout=timeout,
-                verify=verify,
-                arts_config=arts_config,
-                threads_override=threads_override,
-                nodes_override=nodes_override,
-                launcher_override=launcher,
-                omp_threads_override=omp_threads,
-                arts_exec_args=arts_exec_args,
-                perf_enabled=perf,
-                perf_interval=perf_interval,
-                runs=runs,
+                perf=step_perf,
+                perf_interval=step_perf_interval,
                 run_timestamp=run_timestamp,
+                cflags=step_cflags,
+                quiet=quiet,
             )
+            result_phase = step_name if (explicit_step_mode or len(steps) > 1) else None
+            for result in step_results:
+                result.run_phase = result_phase
+            all_results.extend(step_results)
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
         raise typer.Exit(1)
 
+    results = all_results
     total_duration = time.time() - start_time
 
     # Display results
@@ -3929,8 +4561,7 @@ def clean(
 # ============================================================================
 
 
-@app.command(name="slurm-run")
-def slurm_run(
+def _execute_slurm_batch(
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to run (default: all)"),
     nodes: str = typer.Option(
@@ -3998,9 +4629,9 @@ def slurm_run(
     5. Collects and aggregates results
 
     Example:
-        carts benchmarks slurm-run --nodes=1-15 --runs 10
-        carts benchmarks slurm-run polybench/gemm --nodes=4 -t 00:30:00
-        carts benchmarks slurm-run --nodes=1,2,4,8,16 --partition compute
+        carts benchmarks run --slurm --nodes=1-15 --runs 10
+        carts benchmarks run polybench/gemm --slurm --nodes=4 --time-limit 00:30:00
+        carts benchmarks run --slurm --nodes=1,2,4,8,16 --partition compute
 
     Key Features:
     - Submit all jobs at once (no sequential waiting)

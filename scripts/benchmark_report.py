@@ -10,7 +10,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, stdev
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from benchmark_common import parse_all_counters
 
@@ -36,6 +36,7 @@ RESULTS_COLUMNS = [
     "threads",
     "nodes",
     "run",
+    "run_phase",
     "status",
     "speedup_basis",
     "arts_e2e_sec",
@@ -76,6 +77,7 @@ SUMMARY_COLUMNS = [
     "size",
     "threads",
     "nodes",
+    "run_phase",
     "num_runs",
     "arts_e2e_mean",
     "arts_e2e_std",
@@ -286,6 +288,7 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "threads": result.config.arts_threads,
             "nodes": result.config.arts_nodes,
             "run": result.run_number,
+            "run_phase": getattr(result, "run_phase", None) or "default",
             "status": _status_text(result.run_arts.status),
             "speedup_basis": result.timing.speedup_basis,
             "arts_e2e_sec": result.timing.arts_e2e_sec,
@@ -318,7 +321,7 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
 
 
 def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    grouped: Dict[Tuple[Any, Any, Any, Any, Any], List[Dict[str, Any]]] = defaultdict(list)
+    grouped: Dict[Tuple[Any, Any, Any, Any, Any, Any], List[Dict[str, Any]]] = defaultdict(list)
     for row in result_rows:
         key = (
             row.get("benchmark"),
@@ -326,12 +329,23 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             row.get("size"),
             row.get("threads"),
             row.get("nodes"),
+            row.get("run_phase"),
         )
         grouped[key].append(row)
 
     summary_rows: List[Dict[str, Any]] = []
-    for key in sorted(grouped.keys(), key=lambda k: (str(k[0]), int(k[3] or 0), int(k[4] or 0))):
-        benchmark, suite, size, threads, nodes = key
+    for key in sorted(
+        grouped.keys(),
+        key=lambda k: (
+            str(k[0]),
+            str(k[1]),
+            str(k[2]),
+            int(k[3] or 0),
+            int(k[4] or 0),
+            str(k[5] or ""),
+        ),
+    ):
+        benchmark, suite, size, threads, nodes, run_phase = key
         runs = grouped[key]
 
         def collect(field: str) -> List[float]:
@@ -375,6 +389,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "size": size,
                 "threads": threads,
                 "nodes": nodes,
+                "run_phase": run_phase,
                 "num_runs": len(runs),
                 "arts_e2e_mean": arts_e2e_mean,
                 "arts_e2e_std": arts_e2e_std,
@@ -404,6 +419,134 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
         summary_rows.append(footer)
 
     return summary_rows
+
+
+def _build_comparison_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]]) -> None:
+    phase_values = sorted(
+        {
+            str(row.get("run_phase") or "default").strip() or "default"
+            for row in result_rows
+        }
+    )
+    if len(phase_values) <= 1:
+        return
+
+    def select_phase(candidates: Tuple[str, ...]) -> Optional[str]:
+        for candidate in candidates:
+            for phase in phase_values:
+                if phase.lower() == candidate:
+                    return phase
+        return None
+
+    prod_phase = select_phase(("production", "prod", "default"))
+    instr_phase = select_phase(("instrumented", "instr"))
+    if prod_phase is None:
+        prod_phase = phase_values[0]
+    if instr_phase is None:
+        instr_phase = next((phase for phase in phase_values if phase != prod_phase), None)
+    if instr_phase is None:
+        return
+
+    counter_fields = [
+        "num_edts_created",
+        "num_edts_finished",
+        "num_dbs_created",
+        "memory_footprint_bytes",
+        "remote_bytes_sent",
+        "remote_bytes_received",
+        "edt_running_time_ms",
+        "initialization_time_ms",
+        "end_to_end_time_ms",
+        "task_throughput",
+        "avg_task_time_us",
+        "memory_per_edt",
+        "comm_bytes_per_edt",
+    ]
+    columns = [
+        "benchmark",
+        "suite",
+        "size",
+        "threads",
+        "nodes",
+        "prod_arts_e2e_mean",
+        "prod_arts_e2e_std",
+        "prod_speedup_mean",
+        "instr_arts_e2e_mean",
+        "instr_arts_e2e_std",
+        "instr_speedup_mean",
+        "overhead_ratio",
+        "overhead_pct",
+        *counter_fields,
+    ]
+
+    grouped: Dict[Tuple[Any, Any, Any, Any, Any, str], List[Dict[str, Any]]] = defaultdict(list)
+    config_keys: Set[Tuple[Any, Any, Any, Any, Any]] = set()
+    for row in result_rows:
+        phase = str(row.get("run_phase") or "default").strip() or "default"
+        config_key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+        )
+        config_keys.add(config_key)
+        grouped[(*config_key, phase)].append(row)
+
+    def collect(rows: List[Dict[str, Any]], field: str) -> List[float]:
+        values = [_to_float(r.get(field)) for r in rows]
+        return [v for v in values if v is not None]
+
+    ws = workbook.create_sheet(title="Comparison")
+    ws.append(columns)
+    _style_header(ws)
+    ws.freeze_panes = "A2"
+
+    for config_key in sorted(
+        config_keys,
+        key=lambda k: (
+            str(k[0]),
+            str(k[1]),
+            str(k[2]),
+            int(k[3] or 0),
+            int(k[4] or 0),
+        ),
+    ):
+        benchmark, suite, size, threads, nodes = config_key
+        prod_rows = grouped.get((*config_key, prod_phase), [])
+        instr_rows = grouped.get((*config_key, instr_phase), [])
+
+        prod_arts_e2e_mean, prod_arts_e2e_std = _mean_std(collect(prod_rows, "arts_e2e_sec"))
+        prod_speedup_mean, _ = _mean_std(collect(prod_rows, "speedup"))
+        instr_arts_e2e_mean, instr_arts_e2e_std = _mean_std(collect(instr_rows, "arts_e2e_sec"))
+        instr_speedup_mean, _ = _mean_std(collect(instr_rows, "speedup"))
+
+        overhead_ratio = _safe_div(instr_arts_e2e_mean, prod_arts_e2e_mean)
+        overhead_pct = (overhead_ratio - 1.0) * 100.0 if overhead_ratio is not None else None
+
+        ws.append(
+            [
+                benchmark,
+                suite,
+                size,
+                threads,
+                nodes,
+                prod_arts_e2e_mean,
+                prod_arts_e2e_std,
+                prod_speedup_mean,
+                instr_arts_e2e_mean,
+                instr_arts_e2e_std,
+                instr_speedup_mean,
+                overhead_ratio,
+                overhead_pct,
+                *[_mean_std(collect(instr_rows, field))[0] for field in counter_fields],
+            ]
+        )
+
+    _apply_table_formats(ws, columns)
+    _apply_speedup_rules(ws, columns)
+    ws.auto_filter.ref = ws.dimensions
+    _autosize_columns(ws)
 
 
 def _append_table_sheet(workbook: Workbook, title: str, columns: List[str], rows: List[Dict[str, Any]]) -> None:
@@ -837,6 +980,7 @@ def _write_report(
     summary_rows = _build_summary_rows(result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
     _build_scaling_sheet(workbook, summary_rows)
+    _build_comparison_sheet(workbook, result_rows)
 
     effective_command = command or _load_manifest_command(experiment_dir)
     report_summary = _build_report_summary(result_rows)

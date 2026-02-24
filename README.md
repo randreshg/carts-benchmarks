@@ -359,6 +359,8 @@ results/{YYYYMMDD_HHMMSS}/
         │   ├── gemm_arts, gemm_omp
         │   └── build_arts.log, build_omp.log
         ├── run_1/                       # Per-run outputs
+        │   ├── run_config.json          # Full execution context (see below)
+        │   ├── arts.cfg                 # Copy of effective ARTS config
         │   ├── arts.log                 # ARTS stdout+stderr (always captured)
         │   ├── omp.log                  # OpenMP stdout+stderr
         │   ├── counters/                # If counters enabled
@@ -369,6 +371,43 @@ results/{YYYYMMDD_HHMMSS}/
         └── run_2/                       # If --runs > 1
             └── ...
 ```
+
+### Run Configuration (`run_config.json`)
+
+Each run directory contains a `run_config.json` that fully describes the execution
+context — everything needed to reproduce that specific run:
+
+```json
+{
+  "benchmark": "polybench/gemm",
+  "run_number": 1,
+  "threads": 4,
+  "nodes": 1,
+  "config": {
+    "arts_threads": 4,
+    "arts_nodes": 1,
+    "omp_threads": 4,
+    "launcher": "ssh"
+  },
+  "size": "medium",
+  "cflags": "-DNI=2000 -DNJ=2000",
+  "arts_cfg_source": "/path/to/arts.cfg",
+  "timestamp": "2026-02-24T10:30:00.000000"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `threads` | ARTS thread count for this run (top-level for easy scanning in sweeps) |
+| `nodes` | ARTS node count for this run (top-level for easy scanning in sweeps) |
+| `config` | Full configuration object (threads, nodes, OMP threads, launcher) |
+| `size` | Dataset size used (if specified) |
+| `cflags` | Compile flags (if specified) |
+| `run_phase` | Experiment phase label (if using multi-step experiments) |
+| `command` | CLI command that triggered this run |
+| `env_overrides` | Environment variables set for this run |
+| `arts_cfg_source` | Path to the arts.cfg file used |
+| `timestamp` | ISO timestamp of when the run was recorded |
 
 ### Key Properties
 
