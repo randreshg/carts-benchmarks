@@ -134,11 +134,11 @@ int main(void) {
   // CARTS_KERNEL_TIMER_STOP("sw4lite_vel4sg_update");
 
   // Compute checksum
-  float checksum = 0.0f;
+  double checksum = 0.0;
   for (int i = 0; i < NX; ++i) {
     for (int j = 0; j < NY; ++j) {
       for (int k = 0; k < NZ; ++k) {
-        checksum += fabsf(vx[i][j][k]) + fabsf(vy[i][j][k]) + fabsf(vz[i][j][k]);
+        checksum += fabs(vx[i][j][k]) + fabs(vy[i][j][k]) + fabs(vz[i][j][k]);
       }
     }
   }

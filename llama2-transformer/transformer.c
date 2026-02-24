@@ -424,7 +424,7 @@ int main(void) {
   printf("\n");
 
   // Verification
-  float checksum = 0.0f;
+  double checksum = 0.0;
   for (int i = 0; i < VOCAB_SIZE; i++) {
     checksum += logits_out[i];
   }

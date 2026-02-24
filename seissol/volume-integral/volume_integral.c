@@ -89,7 +89,7 @@ int main(void) {
   // CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
 
   // Compute checksum
-  float checksum = 0.0f;
+  double checksum = 0.0;
   for (int e = 0; e < N_ELEMENTS; ++e) {
     for (int b = 0; b < N_BASIS; ++b) {
       checksum += fluxOut[e][b];
