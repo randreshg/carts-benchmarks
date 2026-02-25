@@ -1,0 +1,48 @@
+{
+  "name": "gemm-node-2v4-distributed-compare",
+  "description": "GEMM multi-node comparison: 2/4 nodes with and without --distributed-db",
+  "steps": [
+    {
+      "name": "n2-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "2",
+      "threads": "4",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "n2-distributed-db",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "2",
+      "threads": "4",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg",
+      "compile_args": "--distributed-db"
+    },
+    {
+      "name": "n4-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "4",
+      "threads": "4",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "n4-distributed-db",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "4",
+      "threads": "4",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg",
+      "compile_args": "--distributed-db"
+    }
+  ]
+}

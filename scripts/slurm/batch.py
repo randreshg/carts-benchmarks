@@ -105,7 +105,6 @@ SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --nodes={node_count}
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task={threads}
 #SBATCH --exclusive
 #SBATCH --time={time_limit}
 {partition_line}

@@ -5176,6 +5176,13 @@ def _execute_slurm_batch(
     console.print("\n[bold]Phase 3: Submitting jobs...[/]")
 
     job_statuses = slurm_batch.submit_all_jobs(job_configs, console, dry_run)
+    failed_submissions = len(job_configs) - len(job_statuses)
+    if failed_submissions > 0:
+        print_error(
+            f"SLURM submission failed for {failed_submissions}/{len(job_configs)} jobs. "
+            "Fix submission errors and retry."
+        )
+        raise typer.Exit(1)
 
     # Write job manifest
     metadata = {
