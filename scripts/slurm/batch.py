@@ -57,7 +57,7 @@ class SlurmJobConfig:
     executable_arts: Path
     executable_omp: Optional[Path]
     arts_config_path: Path
-    output_dir: Path
+    run_dir: Path
     size: str
     threads: int  # For OpenMP comparison (single-node only)
     port: Optional[str] = None  # Per-job port override (e.g., "10001" or "[10001-10002]")
@@ -75,6 +75,7 @@ class SlurmJobStatus:
     run_number: int
     node_count: int  # Node count for directory path
     state: str  # PENDING, RUNNING, COMPLETED, FAILED, TIMEOUT, CANCELLED
+    run_dir: Optional[Path] = None
     exit_code: Optional[int] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -214,11 +215,10 @@ def generate_sbatch_script(
         ├── arts.cfg                              <- compile-time config
         ├── {name}_arts, {name}_omp               <- executables
 
-        results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/  <- experiment-specific
-        ├── job_1.sbatch, job_2.sbatch, ...
-        ├── arts_1.cfg, arts_2.cfg, ...           <- runtime config (counterFolder differs)
+        results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/      <- experiment-specific
         └── run_1/                                <- per-run directory
             ├── result.json
+            ├── arts.cfg                          <- runtime config
             ├── counters/
             ├── perf/                             <- if --perf
             ├── slurm.out
@@ -235,13 +235,10 @@ def generate_sbatch_script(
     exclude_line = f"#SBATCH --exclude={config.exclude_nodes}" if config.exclude_nodes else ""
 
     # CRITICAL: Use absolute paths - jobs may run from different working directories
-    output_dir_abs = config.output_dir.resolve()
-
-    # Per-run paths: nested run_{N}/ directory
-    run_dir = output_dir_abs / f"run_{config.run_number}"
+    run_dir = config.run_dir.resolve()
     counter_dir = run_dir / "counters"
     result_json = run_dir / "result.json"
-    runtime_arts_cfg = output_dir_abs / f"arts_{config.run_number}.cfg"
+    runtime_arts_cfg = run_dir / "arts.cfg"
     perf_dir = run_dir / "perf" if config.perf else None
 
     arts_config_abs = config.arts_config_path.resolve() if config.arts_config_path else None
@@ -330,11 +327,10 @@ def generate_sbatch_script(
         threads=config.threads,
     )
 
-    # Create output directory and run directory
+    # Create run directory
     # CRITICAL: run_dir must exist before sbatch submission because
     # Slurm opens --output/--error files before executing the script body.
     # Slurm 21.08+ does not auto-create parent directories for output paths.
-    config.output_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Write script
@@ -352,7 +348,7 @@ def generate_arts_config_for_node(
 
     This config is used at compile time to embed nodeCount into the executable.
     counterFolder is set to a placeholder - the sbatch script will override it per-run
-    when creating the runtime arts.cfg in the jobs/ directory.
+    when creating the runtime arts.cfg in each run directory.
 
     Args:
         base_config: Base arts.cfg to use as template
@@ -495,6 +491,7 @@ def submit_all_jobs(
                 run_number=config.run_number,
                 node_count=config.node_count,
                 state="DRY_RUN",
+                run_dir=config.run_dir,
             )
         return job_statuses
 
@@ -512,6 +509,7 @@ def submit_all_jobs(
                 run_number=config.run_number,
                 node_count=config.node_count,
                 state="PENDING",
+                run_dir=config.run_dir,
             )
             submitted += 1
         except subprocess.CalledProcessError as e:
@@ -602,6 +600,8 @@ def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
     if not job_ids:
         return {}
 
+    statuses: Dict[str, SlurmJobStatus] = {}
+
     try:
         result = subprocess.run(
             [
@@ -616,7 +616,6 @@ def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
             timeout=60,
         )
 
-        statuses = {}
         for line in result.stdout.strip().split("\n"):
             if not line:
                 continue
@@ -780,6 +779,8 @@ def wait_for_jobs_completion(
             # Preserve benchmark_name and run_number from original
             final_status.benchmark_name = job_statuses[job_id].benchmark_name
             final_status.run_number = job_statuses[job_id].run_number
+            final_status.node_count = job_statuses[job_id].node_count
+            final_status.run_dir = job_statuses[job_id].run_dir
             job_statuses[job_id] = final_status
 
     return job_statuses
@@ -797,7 +798,7 @@ def collect_results(
     """Collect results from completed SLURM jobs.
 
     Directory structure (experiment-specific):
-        results/slurm_{timestamp}/jobs/{benchmark}/nodes_{N}/
+        results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/
         └── run_{N}/
             ├── result.json
             ├── counters/
@@ -807,23 +808,32 @@ def collect_results(
 
     Args:
         job_statuses: Final job statuses
-        experiment_dir: Experiment directory (results/slurm_{timestamp}/)
+        experiment_dir: Experiment directory (kept for API compatibility)
 
     Returns:
         List of result dictionaries (one per successful job)
     """
     results = []
 
-    jobs_dir = experiment_dir / "jobs"
-
     for job_id, status in job_statuses.items():
         if status.state == "DRY_RUN":
             continue
 
-        # Find run_{run_number}/result.json for this job
-        safe_name = status.benchmark_name.replace("/", "_")
-        node_dir = jobs_dir / safe_name / f"nodes_{status.node_count}"
-        result_file = node_dir / f"run_{status.run_number}" / "result.json"
+        if not status.run_dir:
+            results.append({
+                "benchmark": status.benchmark_name,
+                "run_number": status.run_number,
+                "status": "FAIL",
+                "slurm": {
+                    "job_id": job_id,
+                    "state": status.state,
+                    "exit_code": status.exit_code,
+                },
+                "error": "Missing run_dir in SLURM job status",
+            })
+            continue
+
+        result_file = status.run_dir / "result.json"
 
         if result_file.exists():
             try:
@@ -858,7 +868,7 @@ def collect_results(
                     "state": status.state,
                     "exit_code": status.exit_code,
                 },
-                "error": f"No run_{status.run_number}/result.json found in {node_dir}",
+                "error": f"No result.json found in {status.run_dir}",
             })
 
     return results
@@ -919,7 +929,7 @@ def write_aggregated_results(
         "results": results,
     }
 
-    results_path = experiment_dir / "aggregated_results.json"
+    results_path = experiment_dir / "results.json"
     with open(results_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
 
@@ -936,7 +946,7 @@ def write_slurm_manifest(
 ) -> Path:
     """Write manifest.json with the same schema as the standard run manifest.
 
-    This gives both run and slurm-run the same entry point for analysis tools.
+    This gives both run and run --slurm the same entry point for analysis tools.
     """
     passed = sum(1 for r in results if r.get("status") == "PASS")
     failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
@@ -946,7 +956,7 @@ def write_slurm_manifest(
         "created": datetime.now().isoformat(),
         "command": command,
         "layout": {
-            "results_json": "aggregated_results.json",
+            "results_json": "results.json",
             "job_manifest": "job_manifest.json",
         },
         "summary": {

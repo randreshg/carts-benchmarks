@@ -39,7 +39,7 @@ class ArtifactManager:
     """Manages a self-contained artifact directory for a benchmark experiment.
 
     Every execution produces a single timestamped directory with all artifacts,
-    logs, and a manifest.  Both ``run`` and ``slurm-run`` share the same
+    logs, and a manifest.  Both ``run`` and ``run --slurm`` share the same
     canonical layout:
 
         {base_results_dir}/{timestamp}/

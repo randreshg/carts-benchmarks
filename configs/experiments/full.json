@@ -1,6 +1,6 @@
 {
   "steps": [
     {"name": "production", "debug": 0, "runs": 5, "perf": false},
-    {"name": "instrumented", "counter_profile": "../profiles/profile-timing.cfg", "debug": 0, "runs": 5, "perf": true}
+    {"name": "instrumented", "profile": "profile-timing.cfg", "debug": 0, "runs": 5, "perf": true}
   ]
 }

@@ -1,13 +1,18 @@
 {
+  "name": "quick-gemm",
+  "description": "Quick validation with polybench/gemm only",
+  "arts_config": "local.cfg",
   "steps": [
     {
       "name": "production",
+      "benchmarks": ["polybench/gemm"],
       "debug": 0,
       "runs": 1,
       "perf": false
     },
     {
       "name": "instrumented",
+      "benchmarks": ["polybench/gemm"],
       "profile": "profile-timing.cfg",
       "debug": 0,
       "runs": 1,

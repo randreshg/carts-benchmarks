@@ -1,0 +1,15 @@
+{
+  "name": "docker-debug-counters",
+  "description": "Single-node 64 threads - debug enabled, ARTS workload counters",
+  "steps": [
+    {
+      "name": "debug-instrumented",
+      "threads": "64",
+      "nodes": "1",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    }
+  ]
+}

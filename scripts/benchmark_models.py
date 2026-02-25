@@ -197,7 +197,7 @@ class ExperimentStep:
     """Single phase definition for a multi-step experiment."""
     name: str
     benchmarks: Optional[List[str]] = None
-    counter_profile: Optional[str] = None
+    profile: Optional[str] = None
     debug: int = 0
     runs: int = 1
     perf: bool = False
@@ -206,6 +206,7 @@ class ExperimentStep:
     nodes: Optional[str] = None
     timeout: Optional[int] = None
     cflags: Optional[str] = None
+    compile_args: Optional[str] = None
     arts_config: Optional[str] = None
     launcher: Optional[str] = None
 

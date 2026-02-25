@@ -6,8 +6,8 @@
       "nodes": "1",
       "timeout": 60,
       "runs": 1,
-      "arts_config": "../local.cfg",
-      "counter_profile": "../profiles/profile-workload.cfg",
+      "arts_config": "local.cfg",
+      "profile": "profile-workload.cfg",
       "launcher": "local"
     }
   ]

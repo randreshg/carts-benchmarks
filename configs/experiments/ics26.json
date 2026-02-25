@@ -1,104 +1,77 @@
 {
   "name": "ics26",
   "description": "ICS26 SLURM experiment set migrated from tests/ics26.sh",
-  "slurm": true,
-  "slurm_runs": [
+  "steps": [
     {
       "name": "workload-profiling-large",
       "nodes": "1",
-      "arts_config": "../arts.cfg",
-      "profile": "../profiles/profile-workload.cfg",
-      "size": "large",
+      "arts_config": "arts.cfg",
+      "profile": "profile-workload.cfg",
       "runs": 1,
-      "time_limit": "00:01:00",
       "perf": true
     },
     {
       "name": "single-node-baseline-large",
       "nodes": "1",
-      "arts_config": "../arts.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:01:00",
       "perf": false
     },
     {
       "name": "single-node-32t-large",
       "nodes": "1",
-      "arts_config": "../arts-32T.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts-32T.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:02:00",
       "perf": false
     },
     {
       "name": "single-node-16t-large",
       "nodes": "1",
-      "arts_config": "../arts-16T.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts-16T.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:04:00",
       "perf": false
     },
     {
       "name": "single-node-8t-large",
       "nodes": "1",
-      "arts_config": "../arts-8T.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts-8T.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:08:00",
       "perf": false
     },
     {
       "name": "single-node-4t-large",
       "nodes": "1",
-      "arts_config": "../arts-4T.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts-4T.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:16:00",
       "perf": false
     },
     {
       "name": "single-node-2t-large",
       "nodes": "1",
-      "arts_config": "../arts-2T.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts-2T.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:32:00",
       "perf": false
     },
     {
       "name": "multinode-large",
       "nodes": "2,4,8,16,32",
-      "arts_config": "../arts.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "large",
+      "arts_config": "arts.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:10:00",
-      "exclude": [
-        "jacobi-task-dep",
-        "poisson-task"
-      ],
       "perf": false
     },
     {
       "name": "multinode-extralarge",
       "nodes": "1,2,4,8,16,32",
-      "arts_config": "../arts.cfg",
-      "profile": "../profiles/profile-timing.cfg",
-      "size": "extralarge",
+      "arts_config": "arts.cfg",
+      "profile": "profile-timing.cfg",
       "runs": 5,
-      "time_limit": "00:10:00",
-      "exclude": [
-        "jacobi-task-dep",
-        "poisson-task"
-      ],
       "perf": false
     }
   ]

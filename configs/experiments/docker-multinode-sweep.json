@@ -1,0 +1,14 @@
+{
+  "name": "docker-multinode-sweep",
+  "description": "Multi-node scaling sweep from 2 to 48 nodes via SLURM",
+  "steps": [
+    {
+      "name": "multinode-sweep",
+      "nodes": "2,4,8,16,32,48",
+      "debug": 0,
+      "runs": 5,
+      "perf": false,
+      "profile": "profile-timing.cfg"
+    }
+  ]
+}
