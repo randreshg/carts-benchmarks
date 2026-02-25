@@ -1164,6 +1164,7 @@ class BenchmarkRunner:
                             env_overrides=env if env else None,
                             size=size,
                             cflags=effective_cflags or None,
+                            compile_args=compile_args or None,
                         )
 
                     result = BenchmarkResult(
@@ -2149,6 +2150,7 @@ class BenchmarkRunner:
                 env_overrides=common_env if common_env else None,
                 size=size,
                 cflags=cflags or None,
+                compile_args=compile_args or None,
             )
         else:
             if effective_arts_cfg:
@@ -5147,6 +5149,7 @@ def _execute_slurm_batch(
                 arts_cfg_path=build_arts_cfg,
                 size=size,
                 cflags=cflags,
+                compile_args=compile_args,
                 run_phase=step_name or "default",
             )
             am.record_run(

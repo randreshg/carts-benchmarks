@@ -107,6 +107,7 @@ class ArtifactManager:
         env_overrides: Optional[Dict[str, str]] = None,
         size: Optional[str] = None,
         cflags: Optional[str] = None,
+        compile_args: Optional[str] = None,
         run_phase: Optional[str] = None,
     ) -> Path:
         """Save the effective arts.cfg and a run_config.json into the run directory.
@@ -138,6 +139,8 @@ class ArtifactManager:
             run_config["size"] = size
         if cflags:
             run_config["cflags"] = cflags
+        if compile_args:
+            run_config["compile_args"] = compile_args
         if run_phase:
             run_config["run_phase"] = run_phase
         if command:
