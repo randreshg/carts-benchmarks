@@ -4111,6 +4111,7 @@ def run(
                 timeout=timeout,
                 cflags=cflags,
                 arts_config=str(arts_config.resolve()) if arts_config else None,
+                launcher=launcher,
             )
             setattr(implicit_step, "_has_runs", True)
             setattr(implicit_step, "_has_perf", True)
