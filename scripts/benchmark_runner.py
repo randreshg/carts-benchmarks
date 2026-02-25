@@ -19,6 +19,7 @@ import logging
 import os
 import platform
 import re
+import hashlib
 import signal
 import shlex
 import shutil
@@ -5017,13 +5018,24 @@ def _execute_slurm_batch(
         bench_path = runner.benchmarks_dir / bench
         src_arts, src_omp = runner.get_executable_paths(bench_path)
         results = []
+        compile_variant = "compile_none"
+        if compile_args:
+            compile_hash = hashlib.sha1(compile_args.encode("utf-8")).hexdigest()[:8]
+            compile_variant = f"compile_{compile_hash}"
 
         for node_count in node_counts:
             if node_count > 1 and bench in multinode_disabled:
                 continue
 
-            # Build directory: build/{benchmark}/nodes_{N}/{T}T/ (shared, reusable)
-            build_node_dir = build_dir / safe_name / f"nodes_{node_count}" / f"{threads}T"
+            # Build directory: build/{benchmark}/nodes_{N}/{T}T/{compile_variant}/ (shared, reusable)
+            # compile_variant ensures different compile_args do not reuse stale executables.
+            build_node_dir = (
+                build_dir
+                / safe_name
+                / f"nodes_{node_count}"
+                / f"{threads}T"
+                / compile_variant
+            )
             build_node_dir.mkdir(parents=True, exist_ok=True)
 
             dst_arts = build_node_dir / src_arts.name
