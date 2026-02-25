@@ -139,12 +139,15 @@ def get_carts_dir() -> Path:
     return carts_dir
 
 
-DEFAULT_ARTS_CONFIG = get_carts_dir() / "configs" / "local.cfg"
+BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
+CONFIGS_DIR = BENCHMARKS_DIR / "configs"
+PROFILES_DIR = CONFIGS_DIR / "profiles"
+DEFAULT_ARTS_CONFIG = CONFIGS_DIR / "local.cfg"
 
 
 def get_benchmarks_dir() -> Path:
     """Get the benchmarks directory."""
-    return Path(__file__).parent.parent.resolve()
+    return BENCHMARKS_DIR
 
 
 # ============================================================================
@@ -920,7 +923,7 @@ class BenchmarkRunner:
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
         # Determine effective config template
-        # Search order: benchmark dir → suite dir → benchmarks root → configs/local.cfg
+        # Search order: benchmark dir → suite dir → benchmarks root → carts-benchmarks/configs/local.cfg
         effective_config = base_config
         if effective_config is None:
             for candidate in [
@@ -3584,18 +3587,39 @@ def _make_experiment_step(
     """Create an ExperimentStep from a dictionary payload."""
     normalized = {str(k).replace("-", "_"): v for k, v in data.items()}
 
-    def _resolve_path(raw: Any) -> Optional[str]:
+    def _resolve_path(raw: Any, field: str) -> Optional[str]:
         if raw is None or str(raw).strip() == "":
             return None
-        p = Path(str(raw))
-        if base_dir and not p.is_absolute():
+        p = Path(str(raw).strip())
+        if p.is_absolute():
+            return str(p)
+
+        if base_dir:
+            base_candidate = (base_dir / p).resolve()
+            if base_candidate.exists():
+                return str(base_candidate)
+
+        if p.exists():
+            return str(p.resolve())
+
+        search_dirs: List[Path] = []
+        if field == "arts_config":
+            search_dirs = [CONFIGS_DIR]
+        elif field == "counter_profile":
+            search_dirs = [PROFILES_DIR]
+
+        for search_dir in search_dirs:
+            candidate = (search_dir / p).resolve()
+            if candidate.exists():
+                return str(candidate)
+
+        if base_dir:
             return str((base_dir / p).resolve())
         return str(p)
 
     step = ExperimentStep(
         name=str(normalized.get("name", default_name)),
-        counters=int(normalized.get("counters", 0) or 0),
-        counter_profile=_resolve_path(normalized.get("counter_profile")),
+        counter_profile=_resolve_path(normalized.get("counter_profile"), "counter_profile"),
         debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
         perf=_parse_bool_flag(normalized.get("perf", False)),
@@ -3604,7 +3628,8 @@ def _make_experiment_step(
         nodes=str(normalized["nodes"]) if normalized.get("nodes") is not None else None,
         timeout=int(normalized["timeout"]) if normalized.get("timeout") is not None else None,
         cflags=str(normalized["cflags"]) if normalized.get("cflags") is not None else None,
-        arts_config=_resolve_path(normalized.get("arts_config")),
+        arts_config=_resolve_path(normalized.get("arts_config"), "arts_config"),
+        launcher=str(normalized["launcher"]) if normalized.get("launcher") is not None else None,
     )
     setattr(step, "_has_runs", "runs" in normalized and normalized.get("runs") is not None)
     setattr(step, "_has_perf", "perf" in normalized and normalized.get("perf") is not None)
@@ -3627,42 +3652,36 @@ def _make_experiment_step(
         "_has_counter_profile",
         "counter_profile" in normalized and normalized.get("counter_profile") is not None,
     )
+    setattr(
+        step,
+        "_has_launcher",
+        "launcher" in normalized and normalized.get("launcher") is not None,
+    )
     return step
 
 
 def _rebuild_arts(
     console: Console,
-    counters: int = 0,
     debug: int = 0,
-    profile: Optional[Path] = None,
+    profile: Path = PROFILES_DIR / "profile-none.cfg",
 ) -> None:
     """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
-    if profile and not profile.exists():
+    if not profile.exists():
         console.print(f"[red]Error: Profile not found: {profile}[/]")
         raise typer.Exit(1)
 
-    if profile:
-        cmd = [
-            "carts", "build", "--arts",
-            f"--profile={profile}",
-            f"--debug={debug}",
-        ]
-    else:
-        cmd = [
-            "carts", "build", "--arts",
-            f"--counters={counters}",
-            f"--debug={debug}",
-        ]
+    cmd = [
+        "carts", "build", "--arts",
+        f"--profile={profile}",
+        f"--debug={debug}",
+    ]
 
     details: List[str] = []
-    if counters > 0:
-        details.append(f"counters={counters}")
     if debug > 0:
         details.append(f"debug={debug}")
-    if profile:
-        details.append(f"profile={profile}")
+    details.append(f"profile={profile}")
 
-    detail_text = ", ".join(details) if details else "default config"
+    detail_text = ", ".join(details)
     console.print(f"[yellow]Rebuilding ARTS ({detail_text})[/]")
     result = subprocess.run(
         cmd,
@@ -4000,7 +4019,7 @@ def run(
         help="Experiment definition name/path from configs/experiments/*.json"),
     step: Optional[List[str]] = typer.Option(
         None, "--step",
-        help="Inline step: 'name:key=value,...' (repeatable). Example: production:counters=0,runs=5,perf"),
+        help="Inline step: 'name:key=value,...' (repeatable). Example: production:runs=5,perf"),
     slurm: bool = typer.Option(
         False, "--slurm", help="Submit as SLURM batch jobs instead of local execution"),
     partition: Optional[str] = typer.Option(
@@ -4073,7 +4092,7 @@ def run(
         raise typer.Exit(2)
 
     explicit_step_mode = bool(experiment or step)
-    configs_dir = get_benchmarks_dir() / "configs"
+    configs_dir = CONFIGS_DIR
     try:
         if step:
             steps = _parse_inline_steps(step)
@@ -4082,7 +4101,6 @@ def run(
         else:
             implicit_step = ExperimentStep(
                 name="default",
-                counters=0,
                 counter_profile=str(profile.resolve()) if profile else None,
                 debug=0,
                 runs=runs,
@@ -4132,18 +4150,19 @@ def run(
                     console.print(f"\n[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
 
                 step_profile_path = (
-                    Path(step_def.counter_profile) if step_def.counter_profile else None
+                    Path(step_def.counter_profile)
+                    if step_def.counter_profile
+                    else PROFILES_DIR / "profile-none.cfg"
                 )
+                has_explicit_step_profile = step_def.counter_profile is not None
                 should_rebuild = (
                     explicit_step_mode
-                    or step_profile_path is not None
-                    or step_def.counters > 0
+                    or has_explicit_step_profile
                     or step_def.debug > 0
                 )
                 if should_rebuild:
                     _rebuild_arts(
                         console,
-                        counters=step_def.counters,
                         debug=step_def.debug,
                         profile=step_profile_path,
                     )
@@ -4288,18 +4307,19 @@ def run(
                 runner.clean = clean
 
             step_profile_path = (
-                Path(step_def.counter_profile) if step_def.counter_profile else None
+                Path(step_def.counter_profile)
+                if step_def.counter_profile
+                else PROFILES_DIR / "profile-none.cfg"
             )
+            has_explicit_step_profile = step_def.counter_profile is not None
             should_rebuild = (
                 explicit_step_mode
-                or step_profile_path is not None
-                or step_def.counters > 0
+                or has_explicit_step_profile
                 or step_def.debug > 0
             )
             if should_rebuild:
                 _rebuild_arts(
                     console,
-                    counters=step_def.counters,
                     debug=step_def.debug,
                     profile=step_profile_path,
                 )
@@ -4316,6 +4336,7 @@ def run(
             use_step_arts_config = (
                 getattr(step_def, "_has_arts_config", False) or not explicit_step_mode
             )
+            use_step_launcher = getattr(step_def, "_has_launcher", False) or not explicit_step_mode
 
             step_threads_spec = step_def.threads if use_step_threads else threads
             step_nodes_spec = step_def.nodes if use_step_nodes else nodes
@@ -4333,6 +4354,8 @@ def run(
             if use_step_arts_config and step_def.arts_config:
                 step_arts_config = Path(step_def.arts_config).resolve()
 
+            step_launcher = step_def.launcher if use_step_launcher and step_def.launcher else launcher
+
             step_threads_list = parse_threads(step_threads_spec) if step_threads_spec else None
             step_node_counts = _parse_nodes_spec(step_nodes_spec) if step_nodes_spec else None
 
@@ -4345,7 +4368,7 @@ def run(
                 arts_config=step_arts_config,
                 threads_list=step_threads_list,
                 node_counts=step_node_counts,
-                launcher=launcher,
+                launcher=step_launcher,
                 omp_threads=omp_threads,
                 weak_scaling=weak_scaling,
                 base_size=base_size,

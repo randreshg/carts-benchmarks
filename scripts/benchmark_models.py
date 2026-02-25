@@ -196,7 +196,6 @@ class BenchmarkConfig:
 class ExperimentStep:
     """Single phase definition for a multi-step experiment."""
     name: str
-    counters: int = 0
     counter_profile: Optional[str] = None
     debug: int = 0
     runs: int = 1
@@ -207,6 +206,7 @@ class ExperimentStep:
     timeout: Optional[int] = None
     cflags: Optional[str] = None
     arts_config: Optional[str] = None
+    launcher: Optional[str] = None
 
 
 @dataclass

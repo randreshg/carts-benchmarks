@@ -1,0 +1,14 @@
+{
+  "steps": [
+    {
+      "name": "workload-profiling",
+      "threads": "8,16,32,64",
+      "nodes": "1",
+      "timeout": 60,
+      "runs": 1,
+      "arts_config": "../local.cfg",
+      "counter_profile": "../profiles/profile-workload.cfg",
+      "launcher": "local"
+    }
+  ]
+}
