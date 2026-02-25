@@ -853,11 +853,28 @@ class BenchmarkRunner:
                     duration_sec=duration,
                     output=result.stdout + result.stderr,
                 )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            if isinstance(e.stdout, bytes):
+                partial_stdout = e.stdout.decode("utf-8", errors="replace")
+            elif isinstance(e.stdout, str):
+                partial_stdout = e.stdout
+            else:
+                partial_stdout = ""
+
+            if isinstance(e.stderr, bytes):
+                partial_stderr = e.stderr.decode("utf-8", errors="replace")
+            elif isinstance(e.stderr, str):
+                partial_stderr = e.stderr
+            else:
+                partial_stderr = ""
+
+            partial_out = (partial_stdout + partial_stderr).strip()
+            timeout_msg = "Build timed out after 300 seconds"
+            output = f"{partial_out}\n{timeout_msg}".strip() if partial_out else timeout_msg
             return BuildResult(
                 status=Status.TIMEOUT,
                 duration_sec=300.0,
-                output="Build timed out after 300 seconds",
+                output=output,
             )
         except Exception as e:
             return BuildResult(
@@ -3579,6 +3596,43 @@ def _parse_bool_flag(value: Any) -> bool:
     raise ValueError(f"Invalid boolean value: {value}")
 
 
+def _parse_step_benchmarks(raw: Any) -> Optional[List[str]]:
+    """Parse optional step benchmark selection."""
+    if raw is None:
+        return None
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        parts = [p.strip() for p in re.split(r"[,\|;]", text) if p.strip()]
+        return parts or None
+
+    if isinstance(raw, list):
+        parsed = [str(item).strip() for item in raw if str(item).strip()]
+        return parsed or None
+
+    raise ValueError("Step field `benchmarks` must be a list or string")
+
+
+KNOWN_STEP_KEYS = {
+    "name",
+    "benchmarks",
+    "counter_profile",
+    "debug",
+    "runs",
+    "perf",
+    "perf_interval",
+    "threads",
+    "nodes",
+    "timeout",
+    "cflags",
+    "arts_config",
+    "launcher",
+    "description",
+}
+
+
 def _make_experiment_step(
     data: Dict[str, Any],
     default_name: str,
@@ -3617,8 +3671,15 @@ def _make_experiment_step(
             return str((base_dir / p).resolve())
         return str(p)
 
+    unknown = sorted(set(normalized.keys()) - KNOWN_STEP_KEYS)
+    if unknown:
+        console.print(
+            f"[yellow]Warning:[/] Unknown step keys: {', '.join(unknown)}"
+        )
+
     step = ExperimentStep(
         name=str(normalized.get("name", default_name)),
+        benchmarks=_parse_step_benchmarks(normalized.get("benchmarks")),
         counter_profile=_resolve_path(normalized.get("counter_profile"), "counter_profile"),
         debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
@@ -3651,6 +3712,11 @@ def _make_experiment_step(
         step,
         "_has_counter_profile",
         "counter_profile" in normalized and normalized.get("counter_profile") is not None,
+    )
+    setattr(
+        step,
+        "_has_benchmarks",
+        "benchmarks" in normalized and normalized.get("benchmarks") is not None,
     )
     setattr(
         step,
@@ -3715,6 +3781,12 @@ def _load_experiment(experiment: str, configs_dir: Path) -> List[ExperimentStep]
         payload = json.load(f)
 
     if isinstance(payload, dict):
+        known_top_keys = {"name", "description", "steps"}
+        unknown_top = sorted(set(payload.keys()) - known_top_keys)
+        if unknown_top:
+            console.print(
+                f"[yellow]Warning:[/] Unknown experiment keys: {', '.join(unknown_top)}"
+            )
         raw_steps = payload.get("steps")
     elif isinstance(payload, list):
         raw_steps = payload
@@ -3912,6 +3984,36 @@ def _run_step(
         run_timestamp=run_timestamp,
         cflags=cflags or "",
     )
+
+
+def _resolve_step_bench_list(
+    step_name: str,
+    all_benchmarks: List[str],
+    step_benchmarks: Optional[List[str]],
+) -> List[str]:
+    """Resolve benchmark list for a step, validating explicit subsets."""
+    if not step_benchmarks:
+        return all_benchmarks
+
+    requested = [b.strip() for b in step_benchmarks if b and b.strip()]
+    if not requested:
+        raise ValueError(f"Step '{step_name}' has an empty `benchmarks` selection")
+
+    unknown = [b for b in requested if b not in all_benchmarks]
+    if unknown:
+        raise ValueError(
+            f"Step '{step_name}' has unknown benchmark(s): {', '.join(unknown)}"
+        )
+
+    # Keep user-provided order but drop duplicates.
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for bench in requested:
+        if bench in seen:
+            continue
+        seen.add(bench)
+        ordered.append(bench)
+    return ordered
 
 
 def _run_step_slurm(
@@ -4122,6 +4224,7 @@ def run(
             setattr(implicit_step, "_has_cflags", cflags is not None)
             setattr(implicit_step, "_has_arts_config", arts_config is not None)
             setattr(implicit_step, "_has_counter_profile", profile is not None)
+            setattr(implicit_step, "_has_benchmarks", False)
             steps = [implicit_step]
     except ValueError as e:
         console.print(f"[red]Error:[/] {e}")
@@ -4149,6 +4252,12 @@ def run(
                 step_name = step_def.name or f"step_{idx}"
                 if not quiet and len(steps) > 1:
                     console.print(f"\n[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
+
+                step_bench_list = _resolve_step_bench_list(
+                    step_name,
+                    bench_list,
+                    step_def.benchmarks,
+                )
 
                 step_profile_path = (
                     Path(step_def.counter_profile)
@@ -4199,7 +4308,7 @@ def run(
                     step_arts_config = Path(step_def.arts_config).resolve()
 
                 _run_step_slurm(
-                    bench_list=bench_list,
+                    bench_list=step_bench_list,
                     size=size,
                     node_counts=step_node_counts,
                     runs=step_runs,
@@ -4301,6 +4410,12 @@ def run(
             if not quiet and len(steps) > 1:
                 console.print(f"[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
 
+            step_bench_list = _resolve_step_bench_list(
+                step_name,
+                bench_list,
+                step_def.benchmarks,
+            )
+
             am.set_phase(step_name if len(steps) > 1 else None)
             if explicit_step_mode:
                 runner.clean = True
@@ -4362,7 +4477,7 @@ def run(
 
             step_results = _run_step(
                 runner=runner,
-                bench_list=bench_list,
+                bench_list=step_bench_list,
                 size=size,
                 timeout=step_timeout,
                 verify=verify,
@@ -4420,7 +4535,13 @@ def run(
 
     report_path: Optional[Path] = None
     try:
-        report_path = generate_report(results, am.experiment_dir, quiet=quiet)
+        report_steps = steps if (explicit_step_mode or len(steps) > 1) else None
+        report_path = generate_report(
+            results,
+            am.experiment_dir,
+            quiet=quiet,
+            steps=report_steps,
+        )
     except Exception as e:
         if not quiet:
             console.print(f"[yellow]Warning:[/] Failed to generate report.xlsx: {e}")

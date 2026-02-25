@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tupl
 from benchmark_common import parse_all_counters
 
 if TYPE_CHECKING:
-    from benchmark_models import BenchmarkResult
+    from benchmark_models import BenchmarkResult, ExperimentStep
 
 try:
     from openpyxl import Workbook
@@ -195,6 +195,11 @@ def _status_text(value: Any) -> str:
     return str(raw).upper()
 
 
+def _phase_name(value: Any) -> str:
+    phase = str(value or "default").strip()
+    return phase or "default"
+
+
 def _counter_dir_from_artifacts(artifacts: Any) -> Optional[Path]:
     counter_dir: Optional[str] = None
     if isinstance(artifacts, dict):
@@ -288,7 +293,7 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "threads": result.config.arts_threads,
             "nodes": result.config.arts_nodes,
             "run": result.run_number,
-            "run_phase": getattr(result, "run_phase", None) or "default",
+            "run_phase": _phase_name(getattr(result, "run_phase", None)),
             "status": _status_text(result.run_arts.status),
             "speedup_basis": result.timing.speedup_basis,
             "arts_e2e_sec": result.timing.arts_e2e_sec,
@@ -411,42 +416,54 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             }
         )
 
-    geomean_speedup = _geomean(row.get("speedup_mean") for row in summary_rows)
-    if geomean_speedup is not None:
+    phases = sorted(
+        {
+            _phase_name(row.get("run_phase"))
+            for row in summary_rows
+            if row.get("benchmark") != "GEOMEAN"
+        }
+    )
+    for phase in phases:
+        phase_rows = [
+            row
+            for row in summary_rows
+            if row.get("benchmark") != "GEOMEAN" and _phase_name(row.get("run_phase")) == phase
+        ]
+        geomean_speedup = _geomean(row.get("speedup_mean") for row in phase_rows)
+        if geomean_speedup is None:
+            continue
         footer = {column: None for column in SUMMARY_COLUMNS}
         footer["benchmark"] = "GEOMEAN"
+        footer["run_phase"] = phase
         footer["speedup_mean"] = geomean_speedup
         summary_rows.append(footer)
 
     return summary_rows
 
 
-def _build_comparison_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]]) -> None:
-    phase_values = sorted(
-        {
-            str(row.get("run_phase") or "default").strip() or "default"
-            for row in result_rows
-        }
-    )
-    if len(phase_values) <= 1:
+def _build_comparison_sheet(
+    workbook: Workbook,
+    result_rows: List[Dict[str, Any]],
+    steps: Optional[List["ExperimentStep"]] = None,
+) -> None:
+    all_phases = sorted({_phase_name(row.get("run_phase")) for row in result_rows})
+    if len(all_phases) <= 1:
         return
 
-    def select_phase(candidates: Tuple[str, ...]) -> Optional[str]:
-        for candidate in candidates:
-            for phase in phase_values:
-                if phase.lower() == candidate:
-                    return phase
-        return None
+    # Determine phase order: use steps definition order, fall back to sorted names.
+    if steps:
+        ordered_phases: List[str] = []
+        for idx, step in enumerate(steps, start=1):
+            name = _phase_name(getattr(step, "name", None) or f"step_{idx}")
+            if name in all_phases and name not in ordered_phases:
+                ordered_phases.append(name)
+        for phase in all_phases:
+            if phase not in ordered_phases:
+                ordered_phases.append(phase)
+    else:
+        ordered_phases = list(all_phases)
 
-    prod_phase = select_phase(("production", "prod", "default"))
-    instr_phase = select_phase(("instrumented", "instr"))
-    if prod_phase is None:
-        prod_phase = phase_values[0]
-    if instr_phase is None:
-        instr_phase = next((phase for phase in phase_values if phase != prod_phase), None)
-    if instr_phase is None:
-        return
-
+    # Group result rows by (config_key, phase).
     counter_fields = [
         "num_edts_created",
         "num_edts_finished",
@@ -462,27 +479,19 @@ def _build_comparison_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]
         "memory_per_edt",
         "comm_bytes_per_edt",
     ]
-    columns = [
-        "benchmark",
-        "suite",
-        "size",
-        "threads",
-        "nodes",
-        "prod_arts_e2e_mean",
-        "prod_arts_e2e_std",
-        "prod_speedup_mean",
-        "instr_arts_e2e_mean",
-        "instr_arts_e2e_std",
-        "instr_speedup_mean",
-        "overhead_ratio",
-        "overhead_pct",
-        *counter_fields,
+    perf_fields = [
+        "cache_references",
+        "cache_misses",
+        "cache_miss_rate",
+        "l1d_loads",
+        "l1d_load_misses",
+        "l1d_load_miss_rate",
     ]
 
     grouped: Dict[Tuple[Any, Any, Any, Any, Any, str], List[Dict[str, Any]]] = defaultdict(list)
     config_keys: Set[Tuple[Any, Any, Any, Any, Any]] = set()
     for row in result_rows:
-        phase = str(row.get("run_phase") or "default").strip() or "default"
+        phase = _phase_name(row.get("run_phase"))
         config_key = (
             row.get("benchmark"),
             row.get("suite"),
@@ -492,6 +501,30 @@ def _build_comparison_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]
         )
         config_keys.add(config_key)
         grouped[(*config_key, phase)].append(row)
+
+    # Detect which phases have counter / perf data in any row.
+    phases_with_counters: Set[str] = set()
+    phases_with_perf: Set[str] = set()
+    for row in result_rows:
+        phase = _phase_name(row.get("run_phase"))
+        if any(row.get(f) is not None for f in counter_fields):
+            phases_with_counters.add(phase)
+        if any(row.get(f) is not None for f in perf_fields):
+            phases_with_perf.add(phase)
+
+    # Build dynamic column list.
+    columns: List[str] = ["benchmark", "suite", "size", "threads", "nodes"]
+    for phase in ordered_phases:
+        columns.extend([
+            f"{phase}_arts_e2e_mean",
+            f"{phase}_speedup_mean",
+        ])
+    for phase in ordered_phases:
+        if phase in phases_with_counters:
+            columns.extend(f"{phase}_{f}" for f in counter_fields)
+    for phase in ordered_phases:
+        if phase in phases_with_perf:
+            columns.extend(f"{phase}_{f}" for f in perf_fields)
 
     def collect(rows: List[Dict[str, Any]], field: str) -> List[float]:
         values = [_to_float(r.get(field)) for r in rows]
@@ -513,38 +546,89 @@ def _build_comparison_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]
         ),
     ):
         benchmark, suite, size, threads, nodes = config_key
-        prod_rows = grouped.get((*config_key, prod_phase), [])
-        instr_rows = grouped.get((*config_key, instr_phase), [])
+        row_values: List[Any] = [benchmark, suite, size, threads, nodes]
 
-        prod_arts_e2e_mean, prod_arts_e2e_std = _mean_std(collect(prod_rows, "arts_e2e_sec"))
-        prod_speedup_mean, _ = _mean_std(collect(prod_rows, "speedup"))
-        instr_arts_e2e_mean, instr_arts_e2e_std = _mean_std(collect(instr_rows, "arts_e2e_sec"))
-        instr_speedup_mean, _ = _mean_std(collect(instr_rows, "speedup"))
+        # Timing columns for each phase.
+        for phase in ordered_phases:
+            phase_rows = grouped.get((*config_key, phase), [])
+            arts_e2e_mean, _ = _mean_std(collect(phase_rows, "arts_e2e_sec"))
+            speedup_mean, _ = _mean_std(collect(phase_rows, "speedup"))
+            row_values.extend([arts_e2e_mean, speedup_mean])
 
-        overhead_ratio = _safe_div(instr_arts_e2e_mean, prod_arts_e2e_mean)
-        overhead_pct = (overhead_ratio - 1.0) * 100.0 if overhead_ratio is not None else None
+        # Counter columns for phases that have counter data.
+        for phase in ordered_phases:
+            if phase in phases_with_counters:
+                phase_rows = grouped.get((*config_key, phase), [])
+                for field in counter_fields:
+                    row_values.append(_mean_std(collect(phase_rows, field))[0])
+
+        # Perf columns for phases that have perf data.
+        for phase in ordered_phases:
+            if phase in phases_with_perf:
+                phase_rows = grouped.get((*config_key, phase), [])
+                for field in perf_fields:
+                    row_values.append(_mean_std(collect(phase_rows, field))[0])
+
+        ws.append(row_values)
+
+    _apply_table_formats(ws, columns)
+    _apply_speedup_rules(ws, columns)
+    ws.auto_filter.ref = ws.dimensions
+    _autosize_columns(ws)
+
+
+def _build_overview_sheet(
+    workbook: Workbook,
+    result_rows: List[Dict[str, Any]],
+    steps: Optional[List["ExperimentStep"]],
+) -> None:
+    if not steps:
+        return
+
+    ws = workbook.create_sheet(title="Overview")
+    columns = [
+        "step",
+        "threads",
+        "nodes",
+        "runs",
+        "perf",
+        "counter_profile",
+        "benchmarks_run",
+        "passed",
+        "failed",
+    ]
+    ws.append(columns)
+    _style_header(ws)
+    ws.freeze_panes = "A2"
+
+    by_phase: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in result_rows:
+        by_phase[_phase_name(row.get("run_phase"))].append(row)
+
+    for idx, step in enumerate(steps, start=1):
+        step_name = _phase_name(getattr(step, "name", None) or f"step_{idx}")
+        phase_rows = by_phase.get(step_name, [])
+        statuses = [str(r.get("status") or "").upper() for r in phase_rows]
+        passed = sum(1 for s in statuses if s == "PASS")
+        failed = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
+        benchmarks = getattr(step, "benchmarks", None)
+        benchmarks_run = ", ".join(benchmarks) if benchmarks else "all"
 
         ws.append(
             [
-                benchmark,
-                suite,
-                size,
-                threads,
-                nodes,
-                prod_arts_e2e_mean,
-                prod_arts_e2e_std,
-                prod_speedup_mean,
-                instr_arts_e2e_mean,
-                instr_arts_e2e_std,
-                instr_speedup_mean,
-                overhead_ratio,
-                overhead_pct,
-                *[_mean_std(collect(instr_rows, field))[0] for field in counter_fields],
+                step_name,
+                getattr(step, "threads", None),
+                getattr(step, "nodes", None),
+                getattr(step, "runs", None),
+                bool(getattr(step, "perf", False)),
+                getattr(step, "counter_profile", None),
+                benchmarks_run,
+                passed,
+                failed,
             ]
         )
 
     _apply_table_formats(ws, columns)
-    _apply_speedup_rules(ws, columns)
     ws.auto_filter.ref = ws.dimensions
     _autosize_columns(ws)
 
@@ -585,24 +669,41 @@ def _style_header(worksheet: Any) -> None:
             cell.fill = fill
 
 
+TIME_SUFFIXES = {"_e2e", "_e2e_mean", "_e2e_std", "_kernel", "_kernel_mean", "_init", "_init_mean"}
+
+
+def _classify_format(field: str) -> Optional[str]:
+    """Return number format for a field, using suffix matching for step-prefixed columns."""
+    for int_field in INT_FIELDS:
+        if field == int_field or field.endswith(f"_{int_field}"):
+            return "#,##0"
+    for ratio_field in RATIO_FIELDS:
+        if field == ratio_field or field.endswith(f"_{ratio_field}"):
+            return "0.00%"
+    for pct_field in PCT_POINT_FIELDS:
+        if field == pct_field or field.endswith(f"_{pct_field}"):
+            return "0.00"
+    for suffix in TIME_SUFFIXES:
+        if field == suffix.lstrip("_") or field.endswith(suffix):
+            return "0.000"
+    return None
+
+
 def _apply_table_formats(worksheet: Any, columns: List[str]) -> None:
     max_row = worksheet.max_row
     if max_row < 2:
         return
 
     for idx, field in enumerate(columns, start=1):
+        fmt = _classify_format(field)
         for row in range(2, max_row + 1):
             cell = worksheet.cell(row=row, column=idx)
             value = cell.value
             if value is None or value == "":
                 continue
 
-            if field in INT_FIELDS:
-                cell.number_format = "#,##0"
-            elif field in RATIO_FIELDS:
-                cell.number_format = "0.00%"
-            elif field in PCT_POINT_FIELDS:
-                cell.number_format = "0.00"
+            if fmt is not None:
+                cell.number_format = fmt
             elif isinstance(value, (float, int)):
                 cell.number_format = "0.000000"
 
@@ -660,38 +761,63 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
     ws = workbook.create_sheet(title="Scaling")
 
     data_rows = [r for r in summary_rows if r.get("benchmark") != "GEOMEAN"]
+    phase_threads: Dict[str, Set[int]] = defaultdict(set)
+    phase_nodes: Dict[str, Set[int]] = defaultdict(set)
+    for row in data_rows:
+        phase = _phase_name(row.get("run_phase"))
+        threads_value = _to_float(row.get("threads"))
+        nodes_value = _to_float(row.get("nodes"))
+        if threads_value is not None:
+            phase_threads[phase].add(int(threads_value))
+        if nodes_value is not None:
+            phase_nodes[phase].add(int(nodes_value))
+
+    sweep_phases = sorted(
+        {
+            phase
+            for phase in set(list(phase_threads.keys()) + list(phase_nodes.keys()))
+            if len(phase_threads.get(phase, set())) > 1 or len(phase_nodes.get(phase, set())) > 1
+        }
+    )
+    has_thread_sweep = any(len(values) > 1 for values in phase_threads.values())
+    has_node_sweep = any(len(values) > 1 for values in phase_nodes.values())
+    if sweep_phases:
+        data_rows = [
+            row for row in data_rows if _phase_name(row.get("run_phase")) in sweep_phases
+        ]
+
     threads = sorted({int(r["threads"]) for r in data_rows if r.get("threads") is not None})
     nodes = sorted({int(r["nodes"]) for r in data_rows if r.get("nodes") is not None})
-    has_thread_sweep = len(threads) > 1
-    has_node_sweep = len(nodes) > 1
 
     if not has_thread_sweep and not has_node_sweep:
         ws["A1"] = "No thread/node sweep detected. Scaling view is empty for this run."
         _autosize_columns(ws)
         return
 
-    indexed: Dict[Tuple[str, str, str], Dict[Tuple[int, int], Dict[str, Any]]] = defaultdict(dict)
+    indexed: Dict[Tuple[str, str, str, str], Dict[Tuple[int, int], Dict[str, Any]]] = defaultdict(dict)
     for row in data_rows:
         benchmark = str(row.get("benchmark") or "")
         suite = str(row.get("suite") or "")
         size = str(row.get("size") or "")
+        run_phase = _phase_name(row.get("run_phase"))
         threads_value = int(row.get("threads") or 0)
         nodes_value = int(row.get("nodes") or 0)
-        indexed[(benchmark, suite, size)][(threads_value, nodes_value)] = row
+        indexed[(benchmark, suite, size, run_phase)][(threads_value, nodes_value)] = row
 
     headers: List[str]
     matrix_rows: List[List[Any]] = []
 
     if has_thread_sweep and not has_node_sweep:
-        fixed_node = nodes[0]
-        headers = ["benchmark", "suite"]
+        headers = ["benchmark", "suite", "run_phase"]
         for t in threads:
             headers.extend([f"T{t}_arts_e2e", f"T{t}_speedup", f"T{t}_efficiency"])
         headers.extend(["peak_speedup", "peak_threads", "arts_self_scaling"])
 
-        for (benchmark, suite, _size), configs in sorted(indexed.items()):
-            row_values: List[Any] = [benchmark, suite]
+        for (benchmark, suite, _size, run_phase), configs in sorted(indexed.items()):
+            row_values: List[Any] = [benchmark, suite, run_phase]
             speedup_candidates: List[Tuple[float, int]] = []
+            phase_nodes = sorted({n for (_t, n) in configs.keys()})
+            fixed_node = phase_nodes[0] if phase_nodes else nodes[0]
 
             for t in threads:
                 entry = configs.get((t, fixed_node), {})
@@ -715,17 +841,18 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
             matrix_rows.append(row_values)
 
     elif has_node_sweep and not has_thread_sweep:
-        fixed_thread = threads[0]
-        headers = ["benchmark", "suite"]
+        headers = ["benchmark", "suite", "run_phase"]
         for n in nodes:
             headers.extend([f"N{n}_arts_e2e", f"N{n}_speedup"])
             if n != 1:
                 headers.append(f"N{n}_scaling_vs_N1")
         headers.extend(["peak_speedup", "peak_nodes"])
 
-        for (benchmark, suite, _size), configs in sorted(indexed.items()):
-            row_values = [benchmark, suite]
+        for (benchmark, suite, _size, run_phase), configs in sorted(indexed.items()):
+            row_values = [benchmark, suite, run_phase]
             speedup_candidates: List[Tuple[float, int]] = []
+            phase_threads = sorted({t for (t, _n) in configs.keys()})
+            fixed_thread = phase_threads[0] if phase_threads else threads[0]
             baseline_e2e = _to_float(configs.get((fixed_thread, 1), {}).get("arts_e2e_mean"))
 
             for n in nodes:
@@ -748,7 +875,7 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
             matrix_rows.append(row_values)
 
     else:
-        headers = ["benchmark", "suite"]
+        headers = ["benchmark", "suite", "run_phase"]
         for t in threads:
             for n in nodes:
                 prefix = f"T{t}N{n}"
@@ -761,8 +888,8 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
                 )
         headers.extend(["peak_speedup", "peak_threads", "peak_nodes"])
 
-        for (benchmark, suite, _size), configs in sorted(indexed.items()):
-            row_values = [benchmark, suite]
+        for (benchmark, suite, _size, run_phase), configs in sorted(indexed.items()):
+            row_values = [benchmark, suite, run_phase]
             peak_tuple: Optional[Tuple[float, int, int]] = None
 
             for t in threads:
@@ -794,15 +921,21 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
         ws.append(values)
 
     if matrix_rows:
-        geomean_row: List[Any] = ["GEOMEAN", ""]
-        for idx, header in enumerate(headers[2:], start=2):
-            if header.startswith("peak_"):
-                geomean_row.append(None)
-                continue
-            values = [_to_float(r[idx]) for r in matrix_rows]
-            values = [v for v in values if v is not None and v > 0]
-            geomean_row.append(_geomean(values))
-        ws.append(geomean_row)
+        phase_groups: Dict[str, List[List[Any]]] = defaultdict(list)
+        for row in matrix_rows:
+            phase_groups[row[2]].append(row)
+
+        for phase in sorted(phase_groups.keys()):
+            rows = phase_groups[phase]
+            geomean_row: List[Any] = ["GEOMEAN", "", phase]
+            for idx, header in enumerate(headers[3:], start=3):
+                if header.startswith("peak_"):
+                    geomean_row.append(None)
+                    continue
+                values = [_to_float(r[idx]) for r in rows]
+                values = [v for v in values if v is not None and v > 0]
+                geomean_row.append(_geomean(values))
+            ws.append(geomean_row)
 
     _apply_table_formats(ws, headers)
     _apply_speedup_rules(ws, headers)
@@ -924,8 +1057,17 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     fail_count = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
     skip_count = sum(1 for s in statuses if s == "SKIP")
 
-    speedups = [_to_float(r.get("speedup")) for r in result_rows]
-    geomean_speedup = _geomean(v for v in speedups if v is not None and v > 0)
+    phases = sorted({_phase_name(r.get("run_phase")) for r in result_rows})
+    geomean_speedup: Dict[str, Optional[float]] = {}
+    for phase in phases:
+        phase_speedups = [
+            _to_float(r.get("speedup"))
+            for r in result_rows
+            if _phase_name(r.get("run_phase")) == phase
+        ]
+        geomean_speedup[phase] = _geomean(
+            v for v in phase_speedups if v is not None and v > 0
+        )
 
     rows_with_counters = sum(
         1
@@ -965,6 +1107,7 @@ def _write_report(
     experiment_dir: Path,
     metadata: Optional[Dict[str, Any]] = None,
     command: Optional[str] = None,
+    steps: Optional[List["ExperimentStep"]] = None,
 ) -> Optional[Path]:
     if Workbook is None:
         return None
@@ -975,12 +1118,13 @@ def _write_report(
     workbook = Workbook()
     workbook.remove(workbook.active)
 
+    _build_overview_sheet(workbook, result_rows, steps)
     _append_table_sheet(workbook, "Results", RESULTS_COLUMNS, result_rows)
 
     summary_rows = _build_summary_rows(result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
     _build_scaling_sheet(workbook, summary_rows)
-    _build_comparison_sheet(workbook, result_rows)
+    _build_comparison_sheet(workbook, result_rows, steps=steps)
 
     effective_command = command or _load_manifest_command(experiment_dir)
     report_summary = _build_report_summary(result_rows)
@@ -999,6 +1143,7 @@ def generate_report(
     results: List["BenchmarkResult"],
     experiment_dir: Path,
     quiet: bool = False,
+    steps: Optional[List["ExperimentStep"]] = None,
 ) -> Optional[Path]:
     """Generate report.xlsx from in-memory benchmark results."""
     del quiet  # kept for compatibility with caller API
@@ -1006,4 +1151,9 @@ def generate_report(
     result_rows = [_flatten_result_dataclass(result) for result in results]
 
     command = "carts benchmarks " + " ".join(sys.argv[1:])
-    return _write_report(result_rows, Path(experiment_dir), command=command)
+    return _write_report(
+        result_rows,
+        Path(experiment_dir),
+        command=command,
+        steps=steps,
+    )

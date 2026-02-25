@@ -196,6 +196,7 @@ class BenchmarkConfig:
 class ExperimentStep:
     """Single phase definition for a multi-step experiment."""
     name: str
+    benchmarks: Optional[List[str]] = None
     counter_profile: Optional[str] = None
     debug: int = 0
     runs: int = 1
