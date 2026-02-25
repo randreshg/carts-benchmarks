@@ -1,0 +1,67 @@
+{
+  "name": "gemm-large-validation",
+  "description": "GEMM large validation: thread sweep, counters, 2/4 nodes baseline vs distributed-db",
+  "steps": [
+    {
+      "name": "thread-sweep",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "1,2,4,8,16,32,64",
+      "nodes": "1",
+      "debug": 0,
+      "runs": 1,
+      "perf": false
+    },
+    {
+      "name": "debug-counters",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "64",
+      "nodes": "1",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "n2-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "4",
+      "nodes": "2",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "n2-distributed-db",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "4",
+      "nodes": "2",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg",
+      "compile_args": "--distributed-db"
+    },
+    {
+      "name": "n4-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "4",
+      "nodes": "4",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "n4-distributed-db",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "4",
+      "nodes": "4",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg",
+      "compile_args": "--distributed-db"
+    }
+  ]
+}
