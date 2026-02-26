@@ -1,11 +1,21 @@
 {
-  "name": "gemm-node-2v4-distributed-compare",
-  "description": "GEMM multi-node comparison: 2/4 nodes with and without --distributed-db",
+  "name": "gemm-node-2v64-distributed-compare",
+  "description": "GEMM single-node reference + multi-node strong-scaling + 64-node thread-sensitivity with and without --distributed-db",
   "steps": [
     {
-      "name": "n2-baseline",
+      "name": "n1-64t-baseline",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "2",
+      "nodes": "1",
+      "threads": "64",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "strong-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "2,4,8,16,32,64",
       "threads": "4",
       "debug": 1,
       "runs": 1,
@@ -13,9 +23,9 @@
       "profile": "profile-workload.cfg"
     },
     {
-      "name": "n2-distributed-db",
+      "name": "strong-distributed-db",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "2",
+      "nodes": "2,4,8,16,32,64",
       "threads": "4",
       "debug": 1,
       "runs": 1,
@@ -24,20 +34,20 @@
       "compile_args": "--distributed-db"
     },
     {
-      "name": "n4-baseline",
+      "name": "n64-thread-sweep-baseline",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "4",
-      "threads": "4",
+      "nodes": "64",
+      "threads": "2,4,8,16,32",
       "debug": 1,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg"
     },
     {
-      "name": "n4-distributed-db",
+      "name": "n64-thread-sweep-distributed-db",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "4",
-      "threads": "4",
+      "nodes": "64",
+      "threads": "2,4,8,16,32",
       "debug": 1,
       "runs": 1,
       "perf": false,
