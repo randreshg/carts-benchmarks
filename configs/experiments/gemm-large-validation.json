@@ -1,6 +1,9 @@
 {
   "name": "gemm-large-validation",
   "description": "GEMM large validation: thread sweep, counters, 2/4 nodes baseline vs distributed-db",
+  "setup_commands": [
+    "carts update --force"
+  ],
   "steps": [
     {
       "name": "thread-sweep",

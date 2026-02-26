@@ -105,6 +105,7 @@ SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --nodes={node_count}
 #SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task={threads}
 #SBATCH --exclusive
 #SBATCH --time={time_limit}
 {partition_line}
@@ -118,7 +119,7 @@ SBATCH_TEMPLATE = """#!/bin/bash
 # Run: {run_number}
 # Generated: {timestamp}
 
-set -e
+set -uo pipefail
 
 # Create per-run directory and subdirectories
 RUN_DIR="{run_dir}"
@@ -134,6 +135,12 @@ sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > 
 export artsConfig="{runtime_arts_cfg}"
 export counterFolder="$COUNTER_DIR"
 export CARTS_BENCHMARKS_REPORT_INIT=1
+
+ARTS_EXIT=125
+ARTS_DURATION=0
+OMP_EXIT=-1
+OMP_DURATION=0
+RESULT_GENERATOR_EXIT=0
 
 echo "=========================================="
 echo "CARTS Benchmark: {benchmark_name}"
@@ -179,6 +186,10 @@ python3 "{slurm_job_result_script}" \\
     --slurm-job-id "$SLURM_JOB_ID" \\
     --slurm-nodelist "$SLURM_JOB_NODELIST" \\
     --output "{result_json}"
+RESULT_GENERATOR_EXIT=$?
+if [ $RESULT_GENERATOR_EXIT -ne 0 ]; then
+    echo "Warning: job_result.py failed with exit code $RESULT_GENERATOR_EXIT"
+fi
 
 exit $ARTS_EXIT
 """
@@ -286,7 +297,7 @@ def generate_sbatch_script(
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     if config.gdb:
         srun_command = (
-            f'srun --exclusive bash -c '
+            f'srun --exclusive --cpus-per-task={config.threads} --kill-on-bad-exit=1 bash -c '
             f"'gdb --batch -ex run -ex \"thread apply all bt\" -ex quit --args {executable_arts_abs}'"
         )
     elif config.perf and perf_dir:
@@ -295,13 +306,16 @@ def generate_sbatch_script(
         # Single quotes: run_dir/perf is baked as absolute path at generation time,
         # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
         srun_command = (
-            f"srun --exclusive bash -c "
+            f"srun --exclusive --cpus-per-task={config.threads} --kill-on-bad-exit=1 bash -c "
             f"'perf stat -e {events} -I {interval_ms} -x , "
             f"-o {run_dir}/perf/arts_node_${{SLURM_PROCID}}.csv "
             f"-- {executable_arts_abs}'"
         )
     else:
-        srun_command = f'srun --exclusive {executable_arts_abs}'
+        srun_command = (
+            f"srun --exclusive --cpus-per-task={config.threads} "
+            f"--kill-on-bad-exit=1 {executable_arts_abs}"
+        )
 
     script_content = SBATCH_TEMPLATE.format(
         job_name=job_name,
@@ -810,9 +824,197 @@ def collect_results(
         experiment_dir: Experiment directory (kept for API compatibility)
 
     Returns:
-        List of result dictionaries (one per successful job)
+        List of result dictionaries (one per job, including failures)
     """
     results = []
+    snapshot_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _parse_key_value_tokens(text: str) -> Dict[str, str]:
+        parsed: Dict[str, str] = {}
+        for token in text.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            parsed[key] = value
+        return parsed
+
+    def _run_snapshot_cmd(command: List[str], timeout: int) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {
+            "command": " ".join(command),
+            "ok": False,
+        }
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            snapshot["return_code"] = proc.returncode
+            snapshot["stdout"] = (proc.stdout or "").strip()
+            snapshot["stderr"] = (proc.stderr or "").strip()
+            snapshot["ok"] = proc.returncode == 0
+        except FileNotFoundError:
+            snapshot["error"] = f"{command[0]} not found"
+        except subprocess.TimeoutExpired:
+            snapshot["error"] = f"{command[0]} timed out after {timeout}s"
+        except Exception as exc:
+            snapshot["error"] = str(exc)
+        return snapshot
+
+    def _collect_slurm_snapshot(job_id: str) -> Dict[str, Any]:
+        if job_id in snapshot_cache:
+            return snapshot_cache[job_id]
+
+        snapshot: Dict[str, Any] = {
+            "captured_at": datetime.now().isoformat(),
+            "job_id": job_id,
+        }
+
+        sacct_cmd = [
+            "sacct",
+            f"--jobs={job_id}",
+            "--format=JobIDRaw,State,ExitCode,Elapsed,NodeList,Start,End,Reason",
+            "--parsable2",
+            "--noheader",
+        ]
+        sacct = _run_snapshot_cmd(sacct_cmd, timeout=20)
+        if sacct.get("ok") and sacct.get("stdout"):
+            lines = [line for line in str(sacct["stdout"]).splitlines() if line.strip()]
+            primary = None
+            for line in lines:
+                parts = line.split("|")
+                if parts and parts[0] == job_id:
+                    primary = line
+                    break
+            if primary is None:
+                primary = lines[0] if lines else ""
+            if primary:
+                parts = primary.split("|")
+                if len(parts) >= 8:
+                    exit_parts = parts[2].split(":", 1)
+                    sacct["parsed"] = {
+                        "job_id_raw": parts[0],
+                        "state": parts[1],
+                        "exit_code": parts[2],
+                        "elapsed": parts[3],
+                        "nodelist": parts[4],
+                        "start": parts[5],
+                        "end": parts[6],
+                        "reason": parts[7],
+                        "exit_status": int(exit_parts[0]) if exit_parts[0].isdigit() else None,
+                        "exit_signal": int(exit_parts[1]) if len(exit_parts) > 1 and exit_parts[1].isdigit() else None,
+                    }
+            sacct["lines"] = lines[-20:]
+        snapshot["sacct"] = sacct
+
+        scontrol_cmd = ["scontrol", "show", "job", job_id]
+        scontrol = _run_snapshot_cmd(scontrol_cmd, timeout=20)
+        if scontrol.get("ok") and scontrol.get("stdout"):
+            parsed = _parse_key_value_tokens(str(scontrol["stdout"]))
+            keys = [
+                "JobId",
+                "JobName",
+                "JobState",
+                "Reason",
+                "ExitCode",
+                "RunTime",
+                "SubmitTime",
+                "StartTime",
+                "EndTime",
+                "NodeList",
+                "BatchHost",
+                "NumNodes",
+                "NumCPUs",
+                "NumTasks",
+                "CPUs/Task",
+            ]
+            scontrol["parsed"] = {k: parsed.get(k) for k in keys if k in parsed}
+            scontrol["stdout_tail"] = str(scontrol["stdout"]).splitlines()[-60:]
+        snapshot["scontrol"] = scontrol
+
+        snapshot_cache[job_id] = snapshot
+        return snapshot
+
+    def _load_run_config(run_dir: Path) -> Dict[str, Any]:
+        run_config_file = run_dir / "run_config.json"
+        if not run_config_file.exists():
+            return {}
+        try:
+            payload = json.loads(run_config_file.read_text())
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _apply_run_config(result: Dict[str, Any], run_config: Dict[str, Any]) -> None:
+        if not run_config:
+            return
+        result["threads"] = run_config.get("threads")
+        result["nodes"] = run_config.get("nodes")
+        result["run_phase"] = run_config.get("run_phase")
+        if "compile_args" in run_config:
+            result["compile_args"] = run_config.get("compile_args")
+        if "config" in run_config and isinstance(run_config["config"], dict):
+            result["config"] = run_config["config"]
+
+    def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "path": str(log_path),
+            "exists": log_path.exists(),
+        }
+        if not log_path.exists():
+            return summary
+        try:
+            text = log_path.read_text(errors="replace")
+        except Exception as exc:
+            summary["read_error"] = str(exc)
+            return summary
+
+        lines = text.splitlines()
+        summary["line_count"] = len(lines)
+        summary["tail"] = lines[-tail_lines:]
+        if log_path.name.endswith(".err"):
+            summary["broken_pipe_count"] = len(re.findall(r"Broken pipe", text))
+            summary["srun_error_count"] = len(re.findall(r"^srun: error:", text, flags=re.MULTILINE))
+            summary["counter_timeout_warnings"] = len(
+                re.findall(r"Could not read counter file", text)
+            )
+        return summary
+
+    def _build_failure_result(
+        status: SlurmJobStatus,
+        error: str,
+        run_dir: Path,
+        run_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        failure: Dict[str, Any] = {
+            "benchmark": status.benchmark_name,
+            "run_number": status.run_number,
+            "status": "FAIL",
+            "slurm": {
+                "job_id": status.job_id,
+                "state": status.state,
+                "exit_code": status.exit_code,
+                "elapsed": status.elapsed,
+                "nodelist": status.node_list,
+            },
+            "error": error,
+            "_run_dir": str(run_dir),
+            "artifacts": {
+                "run_dir": str(run_dir),
+                "run_config": str(run_dir / "run_config.json"),
+                "result_json": str(run_dir / "result.json"),
+                "slurm_out": str(run_dir / "slurm.out"),
+                "slurm_err": str(run_dir / "slurm.err"),
+            },
+            "diagnostics": {
+                "slurm_out": _summarize_log(run_dir / "slurm.out"),
+                "slurm_err": _summarize_log(run_dir / "slurm.err"),
+                "slurm_snapshot": _collect_slurm_snapshot(status.job_id),
+            },
+        }
+        _apply_run_config(failure, run_config)
+        return failure
 
     for job_id, status in job_statuses.items():
         if status.state == "DRY_RUN":
@@ -829,10 +1031,14 @@ def collect_results(
                     "exit_code": status.exit_code,
                 },
                 "error": "Missing run_dir in SLURM job status",
+                "diagnostics": {
+                    "slurm_snapshot": _collect_slurm_snapshot(job_id),
+                },
             })
             continue
 
         result_file = status.run_dir / "result.json"
+        run_config = _load_run_config(status.run_dir)
 
         if result_file.exists():
             try:
@@ -846,43 +1052,38 @@ def collect_results(
                     "nodelist": status.node_list,
                 })
                 result["_run_dir"] = str(status.run_dir)
-
-                run_config_file = status.run_dir / "run_config.json"
-                if run_config_file.exists():
-                    try:
-                        with open(run_config_file) as rc:
-                            run_config = json.load(rc)
-                        result["threads"] = run_config.get("threads")
-                        result["nodes"] = run_config.get("nodes")
-                        result["run_phase"] = run_config.get("run_phase")
-                        if "config" in run_config and isinstance(run_config["config"], dict):
-                            result["config"] = run_config["config"]
-                    except Exception:
-                        pass
+                _apply_run_config(result, run_config)
+                result.setdefault("artifacts", {}).update({
+                    "run_dir": str(status.run_dir),
+                    "run_config": str(status.run_dir / "run_config.json"),
+                    "result_json": str(result_file),
+                    "slurm_out": str(status.run_dir / "slurm.out"),
+                    "slurm_err": str(status.run_dir / "slurm.err"),
+                })
+                if result.get("status") != "PASS":
+                    result.setdefault("diagnostics", {}).setdefault(
+                        "slurm_snapshot",
+                        _collect_slurm_snapshot(status.job_id),
+                    )
                 results.append(result)
             except json.JSONDecodeError:
-                results.append({
-                    "benchmark": status.benchmark_name,
-                    "run_number": status.run_number,
-                    "status": "FAIL",
-                    "slurm": {
-                        "job_id": job_id,
-                        "state": status.state,
-                    },
-                    "error": "Failed to parse result.json",
-                })
+                results.append(
+                    _build_failure_result(
+                        status,
+                        "Failed to parse result.json",
+                        status.run_dir,
+                        run_config,
+                    )
+                )
         else:
-            results.append({
-                "benchmark": status.benchmark_name,
-                "run_number": status.run_number,
-                "status": "FAIL",
-                "slurm": {
-                    "job_id": job_id,
-                    "state": status.state,
-                    "exit_code": status.exit_code,
-                },
-                "error": f"No result.json found in {status.run_dir}",
-            })
+            results.append(
+                _build_failure_result(
+                    status,
+                    f"No result.json found in {status.run_dir}",
+                    status.run_dir,
+                    run_config,
+                )
+            )
 
     return results
 

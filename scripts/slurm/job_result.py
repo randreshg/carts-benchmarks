@@ -134,6 +134,30 @@ def determine_status(
     return "PASS", "Completed (no checksums to verify)"
 
 
+def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[str, Any]:
+    """Summarize SLURM log content for debugging failed runs."""
+    stdout_lines = stdout.splitlines()
+    stderr_lines = stderr.splitlines()
+
+    summary: Dict[str, Any] = {
+        "slurm_stdout": {
+            "line_count": len(stdout_lines),
+        },
+        "slurm_stderr": {
+            "line_count": len(stderr_lines),
+            "srun_error_count": len(re.findall(r"^srun: error:", stderr, flags=re.MULTILINE)),
+            "broken_pipe_count": len(re.findall(r"Broken pipe", stderr)),
+            "counter_timeout_warnings": len(re.findall(r"Could not read counter file", stderr)),
+        },
+    }
+
+    if include_tails:
+        summary["slurm_stdout"]["tail"] = stdout_lines[-40:]
+        summary["slurm_stderr"]["tail"] = stderr_lines[-40:]
+
+    return summary
+
+
 def generate_result(
     benchmark: str,
     run_number: int,
@@ -204,6 +228,7 @@ def generate_result(
     status, verification_note = determine_status(
         arts_exit, omp_exit, arts_checksum, omp_checksum
     )
+    diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != "PASS"))
 
     # Build result
     result = {
@@ -240,6 +265,13 @@ def generate_result(
             "job_id": slurm_job_id,
             "nodelist": slurm_nodelist,
         },
+        "artifacts": {
+            "run_dir": str(output_dir),
+            "slurm_out": str(output_dir / "slurm.out"),
+            "slurm_err": str(output_dir / "slurm.err"),
+            "counter_dir": str(counter_dir) if counter_dir else None,
+        },
+        "diagnostics": diagnostics,
     }
 
     # Compute speedup if both ran

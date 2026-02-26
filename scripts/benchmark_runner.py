@@ -3641,6 +3641,35 @@ KNOWN_STEP_KEYS = {
 }
 
 
+def _parse_command_list(raw: Any, field_name: str) -> Optional[List[str]]:
+    """Parse command hook value into a normalized command list."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else None
+    if isinstance(raw, list):
+        commands = [str(item).strip() for item in raw if str(item).strip()]
+        return commands or None
+    raise ValueError(f"Field `{field_name}` must be a string or list")
+
+
+def _run_hook_commands(commands: Optional[List[str]], hook_name: str) -> None:
+    """Run pre-configured shell commands for experiment/step hooks."""
+    if not commands:
+        return
+    carts_dir = get_carts_dir()
+    for idx, command in enumerate(commands, start=1):
+        print_step(f"{hook_name} ({idx}/{len(commands)}): {command}")
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=carts_dir,
+        )
+        if result.returncode != 0:
+            print_error(f"{hook_name} failed with exit code {result.returncode}")
+            raise typer.Exit(1)
+
+
 def _make_experiment_step(
     data: Dict[str, Any],
     default_name: str,
@@ -3773,8 +3802,11 @@ def _rebuild_arts(
     print_success("ARTS rebuild complete")
 
 
-def _load_experiment(experiment: str, configs_dir: Path) -> List[ExperimentStep]:
-    """Load experiment step definitions from JSON config."""
+def _load_experiment(
+    experiment: str,
+    configs_dir: Path,
+) -> Tuple[List[ExperimentStep], List[str]]:
+    """Load experiment step definitions and setup commands from JSON config."""
     exp_path: Optional[Path] = None
     exp_arg = Path(experiment)
     if exp_arg.exists():
@@ -3792,8 +3824,9 @@ def _load_experiment(experiment: str, configs_dir: Path) -> List[ExperimentStep]
     with open(exp_path, "r") as f:
         payload = json.load(f)
 
+    setup_commands: List[str] = []
     if isinstance(payload, dict):
-        known_top_keys = {"name", "description", "steps"} | KNOWN_STEP_KEYS
+        known_top_keys = {"name", "description", "steps", "setup_commands"} | KNOWN_STEP_KEYS
         unknown_top = sorted(set(payload.keys()) - known_top_keys)
         if unknown_top:
             console.print(
@@ -3801,6 +3834,9 @@ def _load_experiment(experiment: str, configs_dir: Path) -> List[ExperimentStep]
             )
         raw_steps = payload.get("steps")
         defaults = {k: v for k, v in payload.items() if k in KNOWN_STEP_KEYS}
+        parsed_setup = _parse_command_list(payload.get("setup_commands"), "setup_commands")
+        if parsed_setup:
+            setup_commands = parsed_setup
     elif isinstance(payload, list):
         raw_steps = payload
         defaults = {}
@@ -3822,7 +3858,7 @@ def _load_experiment(experiment: str, configs_dir: Path) -> List[ExperimentStep]
                 base_dir=exp_path.parent,
             )
         )
-    return steps
+    return steps, setup_commands
 
 
 def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
@@ -4218,12 +4254,13 @@ def run(
         raise typer.Exit(2)
 
     explicit_step_mode = bool(experiment or step)
+    experiment_setup_commands: List[str] = []
     configs_dir = CONFIGS_DIR
     try:
         if step:
             steps = _parse_inline_steps(step)
         elif experiment:
-            steps = _load_experiment(experiment, configs_dir)
+            steps, experiment_setup_commands = _load_experiment(experiment, configs_dir)
         else:
             implicit_step = ExperimentStep(
                 name="default",
@@ -4274,6 +4311,8 @@ def run(
         if s.profile and not Path(s.profile).exists():
             print_error(f"Step '{s.name}': profile not found: {s.profile}")
             raise typer.Exit(1)
+
+    _run_hook_commands(experiment_setup_commands, "Experiment setup")
 
     # Reject simultaneous thread + node sweeps early (per-step checks also exist).
     has_thread_sweep = bool(base_threads_list and len(base_threads_list) > 1)

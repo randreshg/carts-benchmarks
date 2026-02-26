@@ -1,6 +1,9 @@
 {
   "name": "gemm-node-2v64-distributed-compare",
   "description": "GEMM single-node reference + multi-node strong-scaling + 64-node thread-sensitivity with and without --distributed-db",
+  "setup_commands": [
+    "carts update --force"
+  ],
   "steps": [
     {
       "name": "n1-64t-baseline",
