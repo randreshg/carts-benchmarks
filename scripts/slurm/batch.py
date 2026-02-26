@@ -411,6 +411,19 @@ def generate_arts_config_for_node(
     else:
         content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
 
+    # Update threads to match this build combination.
+    # (SLURM runtime still exports SLURM_CPUS_PER_TASK, but keeping the config
+    # aligned with the combination makes artifacts self-describing.)
+    if re.search(r'^threads\s*=', content, re.MULTILINE):
+        content = re.sub(
+            r'^threads\s*=.*$',
+            f'threads={threads}',
+            content,
+            flags=re.MULTILINE
+        )
+    else:
+        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
+
     # Ensure launcher is slurm
     if re.search(r'^launcher\s*=', content, re.MULTILINE):
         content = re.sub(

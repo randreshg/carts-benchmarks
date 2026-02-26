@@ -1,6 +1,7 @@
 {
   "name": "gemm-node-2v64-distributed-compare",
   "description": "GEMM single-node reference + multi-node strong-scaling + 64-node thread-sensitivity with and without --distributed-db",
+  "arts_config": "arts-4T.cfg",
   "setup_commands": [
     "carts update --force"
   ],
@@ -18,7 +19,7 @@
     {
       "name": "strong-baseline",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "2,4,8,16,32,64",
+      "nodes": "2,4,8,16,32",
       "threads": "4",
       "debug": 1,
       "runs": 1,
@@ -28,7 +29,7 @@
     {
       "name": "strong-distributed-db",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "2,4,8,16,32,64",
+      "nodes": "2,4,8,16,32",
       "threads": "4",
       "debug": 1,
       "runs": 1,
@@ -37,20 +38,20 @@
       "compile_args": "--distributed-db"
     },
     {
-      "name": "n64-thread-sweep-baseline",
+      "name": "n32-thread-sweep-baseline",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "64",
-      "threads": "2,4,8,16,32",
+      "nodes": "32",
+      "threads": "4,8,16,32,64",
       "debug": 1,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg"
     },
     {
-      "name": "n64-thread-sweep-distributed-db",
+      "name": "n32-thread-sweep-distributed-db",
       "benchmarks": ["polybench/gemm"],
-      "nodes": "64",
-      "threads": "2,4,8,16,32",
+      "nodes": "32",
+      "threads": "4,8,16,32,64",
       "debug": 1,
       "runs": 1,
       "perf": false,

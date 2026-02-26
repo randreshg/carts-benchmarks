@@ -369,12 +369,19 @@ def append_perf_to_main_csv(
     temp_perf_file.unlink(missing_ok=True)
 
 
+def _sanitize_config_token(value: str, fallback: str = "default") -> str:
+    """Create a filesystem-safe token for generated config names."""
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return token or fallback
+
+
 def generate_arts_config(
     base_path: Path,
     threads: int,
     counter_dir: Optional[Path] = None,
     launcher: str = "ssh",
     nodes_override: Optional[int] = None,
+    benchmark_name: Optional[str] = None,
 ) -> Path:
     """Generate temporary arts.cfg with specific configuration from a template.
 
@@ -456,12 +463,72 @@ def generate_arts_config(
         base_path, "nodeCount") or 1
 
     # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
-    # The carts-benchmarks directory is shared across all nodes via mounted volume
+    # The carts-benchmarks directory is shared across all nodes via mounted volume.
+    # Filename encodes the effective combination so configs are not overwritten
+    # when different benchmarks/launchers/templates are built in one run.
     generated_configs_dir = Path(__file__).parent / ".generated_configs"
     generated_configs_dir.mkdir(exist_ok=True)
-    temp_path = generated_configs_dir / f"arts_{threads}t_{node_count}n.cfg"
+    source_hash = hashlib.sha1(str(base_path.resolve()).encode("utf-8")).hexdigest()[:8]
+    counter_tag = (
+        hashlib.sha1(str(counter_dir.resolve()).encode("utf-8")).hexdigest()[:8]
+        if counter_dir is not None
+        else "nocounter"
+    )
+    bench_tag = _sanitize_config_token(benchmark_name or "global")
+    launcher_tag = _sanitize_config_token(launcher)
+    temp_path = (
+        generated_configs_dir
+        / f"arts_{bench_tag}_{launcher_tag}_{threads}t_{node_count}n_{source_hash}_{counter_tag}.cfg"
+    )
     temp_path.write_text(content)
     return temp_path
+
+
+def _resolve_effective_arts_config(
+    bench_path: Path,
+    override_config: Optional[Path] = None,
+) -> Path:
+    """Resolve the arts.cfg template for a benchmark."""
+    if override_config is not None:
+        return override_config.resolve()
+
+    for candidate in [
+        bench_path / "arts.cfg",
+        bench_path.parent / "arts.cfg",
+        BENCHMARKS_DIR / "arts.cfg",
+        DEFAULT_ARTS_CONFIG,
+    ]:
+        if candidate.exists():
+            return candidate.resolve()
+
+    return DEFAULT_ARTS_CONFIG.resolve()
+
+
+def _validate_thread_network_topology(
+    arts_cfg_path: Optional[Path],
+    threads: int,
+    node_count: int,
+    benchmark_name: str,
+) -> None:
+    """Validate that at least one worker thread remains after network threads."""
+    if node_count <= 1:
+        return
+
+    outgoing = get_arts_cfg_int(arts_cfg_path, "outgoing")
+    incoming = get_arts_cfg_int(arts_cfg_path, "incoming")
+    sender_threads = outgoing if outgoing is not None else 1
+    receiver_threads = incoming if incoming is not None else 1
+    min_threads = sender_threads + receiver_threads + 1
+
+    if threads < min_threads:
+        cfg_display = str(arts_cfg_path) if arts_cfg_path else "<default>"
+        raise ValueError(
+            f"Invalid thread topology for '{benchmark_name}' (nodes={node_count}): "
+            f"threads={threads}, outgoing={sender_threads}, incoming={receiver_threads}. "
+            f"Need threads >= {min_threads} so at least one worker thread remains "
+            f"(threads > outgoing + incoming). "
+            f"Adjust step threads or update outgoing/incoming in {cfg_display}."
+        )
 
 
 def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
@@ -945,20 +1012,7 @@ class BenchmarkRunner:
         verify_tolerance = self.get_verify_tolerance(bench_path)
 
         # Determine effective config template
-        # Search order: benchmark dir → suite dir → benchmarks root → carts-benchmarks/configs/local.cfg
-        effective_config = base_config
-        if effective_config is None:
-            for candidate in [
-                bench_path / "arts.cfg",
-                bench_path.parent / "arts.cfg",
-                self.benchmarks_dir / "arts.cfg",
-                DEFAULT_ARTS_CONFIG,
-            ]:
-                if candidate.exists():
-                    effective_config = candidate
-                    break
-            else:
-                effective_config = DEFAULT_ARTS_CONFIG
+        effective_config = _resolve_effective_arts_config(bench_path, base_config)
 
         base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
         base_threads = get_arts_cfg_int(effective_config, "threads") or 1
@@ -994,6 +1048,9 @@ class BenchmarkRunner:
                     omp_threads=actual_omp_threads,
                     launcher=desired_launcher,
                 )
+                _validate_thread_network_topology(
+                    effective_config, threads, desired_nodes, name
+                )
 
                 # Counter directory: artifact_manager path or explicit --counter-dir
                 run_counter_dir: Optional[Path] = None
@@ -1006,7 +1063,7 @@ class BenchmarkRunner:
                 # Generate arts.cfg with thread count, launcher, node count, counter dir
                 arts_cfg = generate_arts_config(
                     effective_config, threads, run_counter_dir,
-                    desired_launcher, desired_nodes
+                    desired_launcher, desired_nodes, benchmark_name=name
                 )
 
                 # Compute effective cflags (may include weak scaling size overrides)
@@ -1846,23 +1903,8 @@ class BenchmarkRunner:
         bench_path = self.benchmarks_dir / name
         suite = name.split("/")[0] if "/" in name else ""
 
-        # Determine effective config template:
-        # 1. Use explicitly provided arts_config (resolve to absolute path for make CWD)
-        # 2. Fall back to benchmark's own arts.cfg
-        # 3. Fall back to default carts-benchmarks config
-        effective_config = arts_config.resolve() if arts_config else None
-        if effective_config is None:
-            for candidate in [
-                bench_path / "arts.cfg",
-                bench_path.parent / "arts.cfg",
-                self.benchmarks_dir / "arts.cfg",
-                DEFAULT_ARTS_CONFIG,
-            ]:
-                if candidate.exists():
-                    effective_config = candidate
-                    break
-            else:
-                effective_config = DEFAULT_ARTS_CONFIG
+        # Determine effective config template.
+        effective_config = _resolve_effective_arts_config(bench_path, arts_config)
 
         base_threads = get_arts_cfg_int(effective_config, "threads") or 1
         base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
@@ -1881,6 +1923,9 @@ class BenchmarkRunner:
             arts_nodes=desired_nodes,
             omp_threads=actual_omp_threads,
             launcher=desired_launcher,
+        )
+        _validate_thread_network_topology(
+            effective_config, desired_threads, desired_nodes, name
         )
         am = self.artifact_manager  # shorthand (may be None)
 
@@ -1915,7 +1960,12 @@ class BenchmarkRunner:
         effective_arts_cfg: Path
         if need_generated:
             effective_arts_cfg = generate_arts_config(
-                effective_config, desired_threads, run_counter_dir, desired_launcher, nodes_override
+                effective_config,
+                desired_threads,
+                run_counter_dir,
+                desired_launcher,
+                nodes_override,
+                benchmark_name=name,
             )
         else:
             effective_arts_cfg = effective_config
@@ -4919,16 +4969,16 @@ def _execute_slurm_batch(
         print_error(f"Error parsing --nodes: {e}")
         raise typer.Exit(1)
 
-    # Determine base arts config (for threads and other settings)
-    # CRITICAL: Resolve to absolute path for SLURM jobs running from different directories
-    base_config = (arts_config.resolve() if arts_config else DEFAULT_ARTS_CONFIG.resolve())
-    if not base_config.exists():
-        print_error(f"arts.cfg not found: {base_config}")
+    # Determine explicit arts config override (if provided).
+    explicit_arts_config = arts_config.resolve() if arts_config else None
+    if explicit_arts_config is not None and not explicit_arts_config.exists():
+        print_error(f"arts.cfg not found: {explicit_arts_config}")
         raise typer.Exit(1)
 
-    # Get threads from config or default
+    # Get threads from explicit config or default config.
     if threads is None:
-        threads = get_arts_cfg_int(base_config, "threads") or 8
+        thread_source_cfg = explicit_arts_config or DEFAULT_ARTS_CONFIG.resolve()
+        threads = get_arts_cfg_int(thread_source_cfg, "threads") or 8
 
     # Format node counts for display
     if len(node_counts) == 1:
@@ -4938,8 +4988,13 @@ def _execute_slurm_batch(
     else:
         nodes_display = f"{node_counts[0]}-{node_counts[-1]} ({len(node_counts)} values)"
 
+    config_display = (
+        str(explicit_arts_config)
+        if explicit_arts_config is not None
+        else "benchmark-specific defaults (benchmark/suite/local.cfg)"
+    )
     subtitle_parts = [
-        f"Config: {base_config}",
+        f"Config: {config_display}",
         f"Nodes: {nodes_display}, Threads: {threads}",
         f"Runs per benchmark: {runs}, Size: {size}",
     ]
@@ -5057,6 +5112,10 @@ def _execute_slurm_batch(
         """Build all node_count variants for one benchmark (sequential within)."""
         safe_name = bench.replace("/", "_")
         bench_path = runner.benchmarks_dir / bench
+        effective_base_config = _resolve_effective_arts_config(
+            bench_path, explicit_arts_config
+        )
+        config_hash = hashlib.sha1(effective_base_config.read_bytes()).hexdigest()[:8]
         src_arts, src_omp = runner.get_executable_paths(bench_path)
         results = []
         compile_variant = "compile_none"
@@ -5076,6 +5135,7 @@ def _execute_slurm_batch(
                 / f"nodes_{node_count}"
                 / f"{threads}T"
                 / compile_variant
+                / f"cfg_{config_hash}"
             )
             build_node_dir.mkdir(parents=True, exist_ok=True)
 
@@ -5102,9 +5162,13 @@ def _execute_slurm_batch(
                     console.print(f"  {bench} (nodes={node_count}, threads={threads})... [red]MISSING (--no-build)[/]")
                 continue
 
+            _validate_thread_network_topology(
+                effective_base_config, threads, node_count, bench
+            )
+
             # Generate arts.cfg for compilation (counterFolder is placeholder)
             build_arts_cfg = slurm_batch.generate_arts_config_for_node(
-                base_config, build_node_dir, node_count, threads
+                effective_base_config, build_node_dir, node_count, threads
             )
 
             # Build ARTS with this node-specific arts.cfg
@@ -5248,7 +5312,11 @@ def _execute_slurm_batch(
         "total_jobs": len(job_configs),
         "partition": partition,
         "time_limit": time_limit,
-        "arts_config": str(base_config),
+        "arts_config": (
+            str(explicit_arts_config)
+            if explicit_arts_config is not None
+            else "benchmark-specific defaults"
+        ),
         "dry_run": dry_run,
         "profile": str(profile) if profile else None,
         "perf": perf,
