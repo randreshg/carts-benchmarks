@@ -2,31 +2,18 @@
 ################################################################################
 # carts-benchmarks - CARTS Benchmark Runner
 #
-# This script delegates to the Python benchmark_runner.py for all functionality.
-#
-# Usage:
-#   carts-benchmarks list [--suite SUITE] [--format FORMAT]
-#   carts-benchmarks run [BENCHMARKS...] [OPTIONS]
-#   carts-benchmarks build [BENCHMARKS...] [--size SIZE]
-#   carts-benchmarks clean [BENCHMARKS...] [--all]
-#
+# Uses the shared CARTS Python environment from tools/.
 ################################################################################
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_RUNNER="${SCRIPT_DIR}/scripts/benchmark_runner.py"
+CARTS_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+CARTS_BIN="${CARTS_ROOT}/tools/carts"
 
-# Check if Python runner exists
-if [ ! -f "$PYTHON_RUNNER" ]; then
-    echo "Error: benchmark_runner.py not found at $PYTHON_RUNNER" >&2
+if [[ ! -x "$CARTS_BIN" ]]; then
+    echo "Error: carts wrapper not found at $CARTS_BIN" >&2
     exit 1
 fi
 
-# Delegate to Python runner
-if command -v poetry &> /dev/null && [ -f "${SCRIPT_DIR}/pyproject.toml" ]; then
-    cd "$SCRIPT_DIR"
-    exec poetry run python scripts/benchmark_runner.py "$@"
-else
-    exec python3 "$PYTHON_RUNNER" "$@"
-fi
+exec "$CARTS_BIN" benchmarks "$@"
