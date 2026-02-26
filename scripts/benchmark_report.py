@@ -325,6 +325,73 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
     return row
 
 
+def _first_timing_value(payload: Any) -> Optional[float]:
+    if isinstance(payload, dict) and payload:
+        first = next(iter(payload.values()))
+        return _to_float(first)
+    return None
+
+
+def _flatten_result_serialized(result: Dict[str, Any]) -> Dict[str, Any]:
+    row = _empty_result_row()
+
+    benchmark = result.get("benchmark")
+    config = result.get("config") or {}
+    arts = result.get("arts") or {}
+    omp = result.get("omp") or {}
+
+    suite: Optional[str] = None
+    if isinstance(benchmark, str) and "/" in benchmark:
+        suite = benchmark.split("/", 1)[0]
+
+    row.update(
+        {
+            "benchmark": benchmark,
+            "suite": suite,
+            "size": result.get("size"),
+            "threads": result.get("threads") or config.get("arts_threads"),
+            "nodes": result.get("nodes") or config.get("arts_nodes"),
+            "run": result.get("run_number"),
+            "run_phase": _phase_name(result.get("run_phase")),
+            "status": _status_text(result.get("status")),
+            "speedup_basis": None,
+            "arts_e2e_sec": _to_float(arts.get("e2e_sec")) or _first_timing_value(arts.get("e2e_timings")),
+            "omp_e2e_sec": _to_float(omp.get("e2e_sec")) or _first_timing_value(omp.get("e2e_timings")),
+            "arts_kernel_sec": _first_timing_value(arts.get("kernel_timings")),
+            "omp_kernel_sec": _first_timing_value(omp.get("kernel_timings")),
+            "arts_init_sec": _to_float(arts.get("init_sec")) or _first_timing_value(arts.get("init_timings")),
+            "omp_init_sec": _first_timing_value(omp.get("init_timings")),
+            "arts_total_sec": _to_float(arts.get("duration_sec")),
+            "omp_total_sec": _to_float(omp.get("duration_sec")),
+            "speedup": _to_float(result.get("speedup")),
+        }
+    )
+
+    perf = _perf_dict(arts)
+    row["cache_references"] = perf.get("cache_references")
+    row["cache_misses"] = perf.get("cache_misses")
+    row["cache_miss_rate"] = perf.get("cache_miss_rate")
+    row["l1d_loads"] = perf.get("l1d_loads")
+    row["l1d_load_misses"] = perf.get("l1d_load_misses")
+    row["l1d_load_miss_rate"] = perf.get("l1d_load_miss_rate")
+
+    counter_dir: Optional[Path] = None
+    run_dir = result.get("_run_dir")
+    if isinstance(run_dir, str) and run_dir:
+        candidate = Path(run_dir) / "counters"
+        if candidate.exists():
+            counter_dir = candidate
+    if counter_dir is None:
+        counter_dir = _counter_dir_from_artifacts(result.get("artifacts"))
+
+    counters = parse_all_counters(counter_dir) if counter_dir else {}
+    for field, counter_key in COUNTER_FIELD_MAP.items():
+        row[field] = counters.get(counter_key)
+
+    _apply_derived_fields(row)
+    return row
+
+
 def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[Tuple[Any, Any, Any, Any, Any, Any], List[Dict[str, Any]]] = defaultdict(list)
     for row in result_rows:
@@ -1153,6 +1220,38 @@ def generate_report(
     command = "carts benchmarks " + " ".join(sys.argv[1:])
     return _write_report(
         result_rows,
+        Path(experiment_dir),
+        command=command,
+        steps=steps,
+    )
+
+
+def generate_report_from_rows(
+    result_rows: List[Dict[str, Any]],
+    experiment_dir: Path,
+    quiet: bool = False,
+    steps: Optional[List["ExperimentStep"]] = None,
+) -> Optional[Path]:
+    """Generate report.xlsx from already-serialized result rows."""
+    del quiet  # kept for compatibility with caller API
+
+    normalized_rows: List[Dict[str, Any]] = []
+    for result in result_rows:
+        if isinstance(result, dict) and "arts" in result:
+            normalized_rows.append(_flatten_result_serialized(result))
+            continue
+
+        row = _empty_result_row()
+        if isinstance(result, dict):
+            for key in RESULTS_COLUMNS:
+                if key in result:
+                    row[key] = result.get(key)
+        _apply_derived_fields(row)
+        normalized_rows.append(row)
+
+    command = "carts benchmarks " + " ".join(sys.argv[1:])
+    return _write_report(
+        normalized_rows,
         Path(experiment_dir),
         command=command,
         steps=steps,

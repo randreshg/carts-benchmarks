@@ -105,7 +105,7 @@ from benchmark_models import (
 
 # Artifact management
 from benchmark_artifacts import ArtifactManager
-from benchmark_report import generate_report
+from benchmark_report import generate_report, generate_report_from_rows
 
 # Reproducibility metadata
 from benchmark_metadata import (
@@ -5270,6 +5270,17 @@ def _execute_slurm_batch(
         experiment_dir, merged_results, metadata
     )
 
+    report_path: Optional[Path] = None
+    try:
+        report_path = generate_report_from_rows(
+            merged_results,
+            experiment_dir,
+            quiet=True,
+            steps=None,
+        )
+    except Exception as e:
+        print_warning(f"Failed to generate report.xlsx: {e}")
+
     # Write manifest.json (same schema as standard run)
     total_duration = time.time() - slurm_start_time
     slurm_command = "carts benchmarks " + " ".join(sys.argv[1:])
@@ -5290,6 +5301,8 @@ def _execute_slurm_batch(
         f"Results: {results_path}\n"
         f"Manifest: {slurm_manifest}"
     )
+    if report_path:
+        summary_content += f"\nReport: {report_path}"
     style = "green" if failed == 0 else "red"
     print_footer(f"Experiment Complete — {summary_content}", style=style)
 

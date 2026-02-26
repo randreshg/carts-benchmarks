@@ -845,6 +845,20 @@ def collect_results(
                     "elapsed": status.elapsed,
                     "nodelist": status.node_list,
                 })
+                result["_run_dir"] = str(status.run_dir)
+
+                run_config_file = status.run_dir / "run_config.json"
+                if run_config_file.exists():
+                    try:
+                        with open(run_config_file) as rc:
+                            run_config = json.load(rc)
+                        result["threads"] = run_config.get("threads")
+                        result["nodes"] = run_config.get("nodes")
+                        result["run_phase"] = run_config.get("run_phase")
+                        if "config" in run_config and isinstance(run_config["config"], dict):
+                            result["config"] = run_config["config"]
+                    except Exception:
+                        pass
                 results.append(result)
             except json.JSONDecodeError:
                 results.append({
