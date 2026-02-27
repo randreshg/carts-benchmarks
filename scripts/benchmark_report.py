@@ -37,7 +37,13 @@ RESULTS_COLUMNS = [
     "nodes",
     "run",
     "run_phase",
+    "compile_args",
     "status",
+    "slurm_job_id",
+    "slurm_state",
+    "slurm_exit_code",
+    "srun_error_count",
+    "broken_pipe_count",
     "speedup_basis",
     "arts_e2e_sec",
     "omp_e2e_sec",
@@ -56,6 +62,11 @@ RESULTS_COLUMNS = [
     "l1d_loads",
     "l1d_load_misses",
     "l1d_load_miss_rate",
+    "counter_source",
+    "counter_files_found",
+    "counter_files_valid",
+    "counter_expected_nodes",
+    "counter_complete",
     "num_edts_created",
     "num_edts_finished",
     "num_dbs_created",
@@ -78,6 +89,7 @@ SUMMARY_COLUMNS = [
     "threads",
     "nodes",
     "run_phase",
+    "compile_args",
     "num_runs",
     "arts_e2e_mean",
     "arts_e2e_std",
@@ -121,6 +133,11 @@ INT_FIELDS = {
     "num_edts_created",
     "num_edts_finished",
     "num_dbs_created",
+    "srun_error_count",
+    "broken_pipe_count",
+    "counter_files_found",
+    "counter_files_valid",
+    "counter_expected_nodes",
     "memory_footprint_bytes",
     "remote_bytes_sent",
     "remote_bytes_received",
@@ -221,6 +238,89 @@ def _counter_dir_from_artifacts(artifacts: Any) -> Optional[Path]:
     return path if path.exists() else None
 
 
+def _counter_value(entry: Any) -> Optional[float]:
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("value_ms")
+    if raw is None:
+        raw = entry.get("value")
+    return _to_float(raw)
+
+
+def _count_valid_node_counter_files(counter_dir: Path) -> Tuple[int, int]:
+    files = sorted(counter_dir.glob("n*.json"))
+    valid = 0
+    for path in files:
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            valid += 1
+    return len(files), valid
+
+
+def _aggregate_node_counter_files(counter_dir: Path) -> Tuple[Dict[str, float], int, int]:
+    aggregated: Dict[str, float] = {}
+    files = sorted(counter_dir.glob("n*.json"))
+    valid = 0
+    for path in files:
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        counters = payload.get("counters")
+        if not isinstance(counters, dict):
+            continue
+
+        valid += 1
+        for name, entry in counters.items():
+            value = _counter_value(entry)
+            if value is None:
+                continue
+            aggregated[name] = aggregated.get(name, 0.0) + value
+    return aggregated, len(files), valid
+
+
+def _collect_counters(
+    counter_dir: Optional[Path],
+    expected_nodes: Optional[int],
+) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    meta: Dict[str, Any] = {
+        "counter_source": None,
+        "counter_files_found": 0,
+        "counter_files_valid": 0,
+        "counter_expected_nodes": expected_nodes,
+        "counter_complete": None,
+    }
+    if counter_dir is None:
+        return {}, meta
+
+    cluster_counters = parse_all_counters(counter_dir)
+    found, valid = _count_valid_node_counter_files(counter_dir)
+    meta["counter_files_found"] = found
+    meta["counter_files_valid"] = valid
+
+    if cluster_counters:
+        meta["counter_source"] = "cluster"
+        if expected_nodes is not None:
+            meta["counter_complete"] = True
+        return cluster_counters, meta
+
+    node_counters, found, valid = _aggregate_node_counter_files(counter_dir)
+    meta["counter_files_found"] = found
+    meta["counter_files_valid"] = valid
+    if node_counters:
+        meta["counter_source"] = "node_fallback"
+    if expected_nodes is not None:
+        meta["counter_complete"] = valid >= expected_nodes
+    return node_counters, meta
+
+
 def _perf_dict(run: Any) -> Dict[str, Any]:
     if isinstance(run, dict):
         perf = run.get("perf_metrics")
@@ -294,7 +394,13 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "nodes": result.config.arts_nodes,
             "run": result.run_number,
             "run_phase": _phase_name(getattr(result, "run_phase", None)),
+            "compile_args": getattr(result, "compile_args", None),
             "status": _status_text(result.run_arts.status),
+            "slurm_job_id": None,
+            "slurm_state": None,
+            "slurm_exit_code": None,
+            "srun_error_count": None,
+            "broken_pipe_count": None,
             "speedup_basis": result.timing.speedup_basis,
             "arts_e2e_sec": result.timing.arts_e2e_sec,
             "omp_e2e_sec": result.timing.omp_e2e_sec,
@@ -316,10 +422,12 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
     row["l1d_load_misses"] = perf.get("l1d_load_misses")
     row["l1d_load_miss_rate"] = perf.get("l1d_load_miss_rate")
 
+    expected_nodes = int(result.config.arts_nodes) if result.config.arts_nodes else None
     counter_dir = _counter_dir_from_artifacts(result.artifacts)
-    counters = parse_all_counters(counter_dir) if counter_dir else {}
+    counters, counter_meta = _collect_counters(counter_dir, expected_nodes=expected_nodes)
     for field, counter_key in COUNTER_FIELD_MAP.items():
         row[field] = counters.get(counter_key)
+    row.update(counter_meta)
 
     _apply_derived_fields(row)
     return row
@@ -332,13 +440,21 @@ def _first_timing_value(payload: Any) -> Optional[float]:
     return None
 
 
-def _flatten_result_serialized(result: Dict[str, Any]) -> Dict[str, Any]:
+def _flatten_result_serialized(
+    result: Dict[str, Any],
+    experiment_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     row = _empty_result_row()
 
     benchmark = result.get("benchmark")
     config = result.get("config") or {}
     arts = result.get("arts") or {}
     omp = result.get("omp") or {}
+    slurm = result.get("slurm") or {}
+    diagnostics = result.get("diagnostics") or {}
+    slurm_stderr = diagnostics.get("slurm_stderr") if isinstance(diagnostics, dict) else {}
+    if not isinstance(slurm_stderr, dict):
+        slurm_stderr = {}
 
     suite: Optional[str] = None
     if isinstance(benchmark, str) and "/" in benchmark:
@@ -353,7 +469,13 @@ def _flatten_result_serialized(result: Dict[str, Any]) -> Dict[str, Any]:
             "nodes": result.get("nodes") or config.get("arts_nodes"),
             "run": result.get("run_number"),
             "run_phase": _phase_name(result.get("run_phase")),
+            "compile_args": result.get("compile_args"),
             "status": _status_text(result.get("status")),
+            "slurm_job_id": slurm.get("job_id"),
+            "slurm_state": slurm.get("state"),
+            "slurm_exit_code": slurm.get("exit_code"),
+            "srun_error_count": slurm_stderr.get("srun_error_count"),
+            "broken_pipe_count": slurm_stderr.get("broken_pipe_count"),
             "speedup_basis": None,
             "arts_e2e_sec": _to_float(arts.get("e2e_sec")) or _first_timing_value(arts.get("e2e_timings")),
             "omp_e2e_sec": _to_float(omp.get("e2e_sec")) or _first_timing_value(omp.get("e2e_timings")),
@@ -376,24 +498,58 @@ def _flatten_result_serialized(result: Dict[str, Any]) -> Dict[str, Any]:
     row["l1d_load_miss_rate"] = perf.get("l1d_load_miss_rate")
 
     counter_dir: Optional[Path] = None
+    candidate_dirs: List[Path] = []
     run_dir = result.get("_run_dir")
     if isinstance(run_dir, str) and run_dir:
-        candidate = Path(run_dir) / "counters"
+        candidate_dirs.append(Path(run_dir) / "counters")
+
+    artifact_counter_dir = _counter_dir_from_artifacts(result.get("artifacts"))
+    if artifact_counter_dir is not None:
+        candidate_dirs.append(artifact_counter_dir)
+
+    if experiment_dir is not None:
+        bench_name = result.get("benchmark")
+        threads_value = _to_float(result.get("threads") or config.get("arts_threads"))
+        nodes_value = _to_float(result.get("nodes") or config.get("arts_nodes"))
+        run_number_value = _to_float(result.get("run_number"))
+        if (
+            isinstance(bench_name, str)
+            and threads_value is not None
+            and nodes_value is not None
+            and run_number_value is not None
+        ):
+            phase = _phase_name(result.get("run_phase"))
+            local_counter_dir = (
+                Path(experiment_dir)
+                / phase
+                / bench_name
+                / f"{int(threads_value)}t_{int(nodes_value)}n"
+                / f"run_{int(run_number_value)}"
+                / "counters"
+            )
+            candidate_dirs.append(local_counter_dir)
+
+    for candidate in candidate_dirs:
         if candidate.exists():
             counter_dir = candidate
-    if counter_dir is None:
-        counter_dir = _counter_dir_from_artifacts(result.get("artifacts"))
+            break
 
-    counters = parse_all_counters(counter_dir) if counter_dir else {}
+    expected_nodes: Optional[int] = None
+    nodes_value = _to_float(row.get("nodes"))
+    if nodes_value is not None:
+        expected_nodes = int(nodes_value)
+
+    counters, counter_meta = _collect_counters(counter_dir, expected_nodes=expected_nodes)
     for field, counter_key in COUNTER_FIELD_MAP.items():
         row[field] = counters.get(counter_key)
+    row.update(counter_meta)
 
     _apply_derived_fields(row)
     return row
 
 
 def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    grouped: Dict[Tuple[Any, Any, Any, Any, Any, Any], List[Dict[str, Any]]] = defaultdict(list)
+    grouped: Dict[Tuple[Any, Any, Any, Any, Any, Any, Any], List[Dict[str, Any]]] = defaultdict(list)
     for row in result_rows:
         key = (
             row.get("benchmark"),
@@ -402,6 +558,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             row.get("threads"),
             row.get("nodes"),
             row.get("run_phase"),
+            row.get("compile_args"),
         )
         grouped[key].append(row)
 
@@ -415,9 +572,10 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             int(k[3] or 0),
             int(k[4] or 0),
             str(k[5] or ""),
+            str(k[6] or ""),
         ),
     ):
-        benchmark, suite, size, threads, nodes, run_phase = key
+        benchmark, suite, size, threads, nodes, run_phase, compile_args = key
         runs = grouped[key]
 
         def collect(field: str) -> List[float]:
@@ -462,6 +620,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "threads": threads,
                 "nodes": nodes,
                 "run_phase": run_phase,
+                "compile_args": compile_args,
                 "num_runs": len(runs),
                 "arts_e2e_mean": arts_e2e_mean,
                 "arts_e2e_std": arts_e2e_std,
@@ -555,8 +714,8 @@ def _build_comparison_sheet(
         "l1d_load_miss_rate",
     ]
 
-    grouped: Dict[Tuple[Any, Any, Any, Any, Any, str], List[Dict[str, Any]]] = defaultdict(list)
-    config_keys: Set[Tuple[Any, Any, Any, Any, Any]] = set()
+    grouped: Dict[Tuple[Any, Any, Any, Any, Any, Any, str], List[Dict[str, Any]]] = defaultdict(list)
+    config_keys: Set[Tuple[Any, Any, Any, Any, Any, Any]] = set()
     for row in result_rows:
         phase = _phase_name(row.get("run_phase"))
         config_key = (
@@ -565,6 +724,7 @@ def _build_comparison_sheet(
             row.get("size"),
             row.get("threads"),
             row.get("nodes"),
+            row.get("compile_args"),
         )
         config_keys.add(config_key)
         grouped[(*config_key, phase)].append(row)
@@ -580,7 +740,7 @@ def _build_comparison_sheet(
             phases_with_perf.add(phase)
 
     # Build dynamic column list.
-    columns: List[str] = ["benchmark", "suite", "size", "threads", "nodes"]
+    columns: List[str] = ["benchmark", "suite", "size", "threads", "nodes", "compile_args"]
     for phase in ordered_phases:
         columns.extend([
             f"{phase}_arts_e2e_mean",
@@ -610,10 +770,11 @@ def _build_comparison_sheet(
             str(k[2]),
             int(k[3] or 0),
             int(k[4] or 0),
+            str(k[5] or ""),
         ),
     ):
-        benchmark, suite, size, threads, nodes = config_key
-        row_values: List[Any] = [benchmark, suite, size, threads, nodes]
+        benchmark, suite, size, threads, nodes, compile_args = config_key
+        row_values: List[Any] = [benchmark, suite, size, threads, nodes, compile_args]
 
         # Timing columns for each phase.
         for phase in ordered_phases:
@@ -861,27 +1022,28 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
         _autosize_columns(ws)
         return
 
-    indexed: Dict[Tuple[str, str, str, str], Dict[Tuple[int, int], Dict[str, Any]]] = defaultdict(dict)
+    indexed: Dict[Tuple[str, str, str, str, str], Dict[Tuple[int, int], Dict[str, Any]]] = defaultdict(dict)
     for row in data_rows:
         benchmark = str(row.get("benchmark") or "")
         suite = str(row.get("suite") or "")
         size = str(row.get("size") or "")
         run_phase = _phase_name(row.get("run_phase"))
+        compile_args = str(row.get("compile_args") or "")
         threads_value = int(row.get("threads") or 0)
         nodes_value = int(row.get("nodes") or 0)
-        indexed[(benchmark, suite, size, run_phase)][(threads_value, nodes_value)] = row
+        indexed[(benchmark, suite, size, run_phase, compile_args)][(threads_value, nodes_value)] = row
 
     headers: List[str]
     matrix_rows: List[List[Any]] = []
 
     if has_thread_sweep and not has_node_sweep:
-        headers = ["benchmark", "suite", "run_phase"]
+        headers = ["benchmark", "suite", "run_phase", "compile_args"]
         for t in threads:
             headers.extend([f"T{t}_arts_e2e", f"T{t}_speedup", f"T{t}_efficiency"])
         headers.extend(["peak_speedup", "peak_threads", "arts_self_scaling"])
 
-        for (benchmark, suite, _size, run_phase), configs in sorted(indexed.items()):
-            row_values: List[Any] = [benchmark, suite, run_phase]
+        for (benchmark, suite, _size, run_phase, compile_args), configs in sorted(indexed.items()):
+            row_values: List[Any] = [benchmark, suite, run_phase, compile_args]
             speedup_candidates: List[Tuple[float, int]] = []
             phase_nodes = sorted({n for (_t, n) in configs.keys()})
             fixed_node = phase_nodes[0] if phase_nodes else nodes[0]
@@ -908,15 +1070,15 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
             matrix_rows.append(row_values)
 
     elif has_node_sweep and not has_thread_sweep:
-        headers = ["benchmark", "suite", "run_phase"]
+        headers = ["benchmark", "suite", "run_phase", "compile_args"]
         for n in nodes:
             headers.extend([f"N{n}_arts_e2e", f"N{n}_speedup"])
             if n != 1:
                 headers.append(f"N{n}_scaling_vs_N1")
         headers.extend(["peak_speedup", "peak_nodes"])
 
-        for (benchmark, suite, _size, run_phase), configs in sorted(indexed.items()):
-            row_values = [benchmark, suite, run_phase]
+        for (benchmark, suite, _size, run_phase, compile_args), configs in sorted(indexed.items()):
+            row_values = [benchmark, suite, run_phase, compile_args]
             speedup_candidates: List[Tuple[float, int]] = []
             phase_threads = sorted({t for (t, _n) in configs.keys()})
             fixed_thread = phase_threads[0] if phase_threads else threads[0]
@@ -942,7 +1104,7 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
             matrix_rows.append(row_values)
 
     else:
-        headers = ["benchmark", "suite", "run_phase"]
+        headers = ["benchmark", "suite", "run_phase", "compile_args"]
         for t in threads:
             for n in nodes:
                 prefix = f"T{t}N{n}"
@@ -955,8 +1117,8 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
                 )
         headers.extend(["peak_speedup", "peak_threads", "peak_nodes"])
 
-        for (benchmark, suite, _size, run_phase), configs in sorted(indexed.items()):
-            row_values = [benchmark, suite, run_phase]
+        for (benchmark, suite, _size, run_phase, compile_args), configs in sorted(indexed.items()):
+            row_values = [benchmark, suite, run_phase, compile_args]
             peak_tuple: Optional[Tuple[float, int, int]] = None
 
             for t in threads:
@@ -994,8 +1156,8 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
 
         for phase in sorted(phase_groups.keys()):
             rows = phase_groups[phase]
-            geomean_row: List[Any] = ["GEOMEAN", "", phase]
-            for idx, header in enumerate(headers[3:], start=3):
+            geomean_row: List[Any] = ["GEOMEAN", "", phase, ""]
+            for idx, header in enumerate(headers[4:], start=4):
                 if header.startswith("peak_"):
                     geomean_row.append(None)
                     continue
@@ -1094,6 +1256,9 @@ def _metadata_rows(
         add("report_skipped_count", report_summary.get("skip_count"))
         add("report_geomean_speedup", report_summary.get("geomean_speedup"))
         add("report_rows_with_counters", report_summary.get("rows_with_counters"))
+        add("report_rows_with_complete_counters", report_summary.get("rows_with_complete_counters"))
+        add("report_rows_with_partial_counters", report_summary.get("rows_with_partial_counters"))
+        add("report_rows_with_unknown_slurm_state", report_summary.get("rows_with_unknown_slurm_state"))
         add("report_rows_with_perf", report_summary.get("rows_with_perf"))
 
     add("command", command)
@@ -1141,6 +1306,13 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         for r in result_rows
         if any(r.get(field) is not None for field in COUNTER_FIELD_MAP.keys())
     )
+    rows_with_complete_counters = sum(1 for r in result_rows if r.get("counter_complete") is True)
+    rows_with_partial_counters = sum(1 for r in result_rows if r.get("counter_source") == "node_fallback")
+    rows_with_unknown_slurm_state = sum(
+        1
+        for r in result_rows
+        if str(r.get("slurm_state") or "").upper() == "UNKNOWN"
+    )
     rows_with_perf = sum(
         1
         for r in result_rows
@@ -1165,6 +1337,9 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "skip_count": skip_count,
         "geomean_speedup": geomean_speedup,
         "rows_with_counters": rows_with_counters,
+        "rows_with_complete_counters": rows_with_complete_counters,
+        "rows_with_partial_counters": rows_with_partial_counters,
+        "rows_with_unknown_slurm_state": rows_with_unknown_slurm_state,
         "rows_with_perf": rows_with_perf,
     }
 
@@ -1236,9 +1411,12 @@ def generate_report_from_rows(
     del quiet  # kept for compatibility with caller API
 
     normalized_rows: List[Dict[str, Any]] = []
+    experiment_dir_path = Path(experiment_dir)
     for result in result_rows:
         if isinstance(result, dict) and "arts" in result:
-            normalized_rows.append(_flatten_result_serialized(result))
+            normalized_rows.append(
+                _flatten_result_serialized(result, experiment_dir=experiment_dir_path)
+            )
             continue
 
         row = _empty_result_row()
@@ -1252,7 +1430,7 @@ def generate_report_from_rows(
     command = "carts benchmarks " + " ".join(sys.argv[1:])
     return _write_report(
         normalized_rows,
-        Path(experiment_dir),
+        experiment_dir_path,
         command=command,
         steps=steps,
     )
