@@ -1,6 +1,6 @@
 {
   "name": "gemm-node-2v64-distributed-compare",
-  "description": "GEMM single-node reference + multi-node strong-scaling + 64-node thread-sensitivity with and without --distributed-db",
+  "description": "GEMM single-node reference + multi-node scaling + explicit ARTS log-level comparison (debug=1 info vs debug=2 full debug) on the problematic 32-node thread cases",
   "arts_config": "arts-4T.cfg",
   "setup_commands": [
     "carts update --force"
@@ -38,21 +38,42 @@
       "compile_args": "--distributed-db"
     },
     {
-      "name": "n32-thread-sweep-baseline",
+      "name": "n32-32x64t-baseline-info",
       "benchmarks": ["polybench/gemm"],
       "nodes": "32",
-      "threads": "4,8,16,32,64",
+      "threads": "32,64",
       "debug": 1,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg"
     },
     {
-      "name": "n32-thread-sweep-distributed-db",
+      "name": "n32-32x64t-baseline-debug",
       "benchmarks": ["polybench/gemm"],
       "nodes": "32",
-      "threads": "4,8,16,32,64",
+      "threads": "32,64",
+      "debug": 2,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "n32-32x64t-distributed-db-info",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "32",
+      "threads": "32,64",
       "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg",
+      "compile_args": "--distributed-db"
+    },
+    {
+      "name": "n32-32x64t-distributed-db-debug",
+      "benchmarks": ["polybench/gemm"],
+      "nodes": "32",
+      "threads": "32,64",
+      "debug": 2,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg",
