@@ -1,0 +1,46 @@
+{
+  "name": "gemm-full-large",
+  "description": "GEMM large validation: thread sweep, counters, node sweep (2..48) baseline vs distributed-db",
+  "steps": [
+    {
+      "name": "thread-sweep",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "1,2,4,8,16,32,64",
+      "nodes": "1",
+      "debug": 0,
+      "runs": 1,
+      "perf": false
+    },
+    {
+      "name": "debug-counters",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "64",
+      "nodes": "1",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "node-sweep-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "64",
+      "nodes": "2,4,8,16,32,48",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg"
+    },
+    {
+      "name": "node-sweep-distributed-db",
+      "benchmarks": ["polybench/gemm"],
+      "threads": "64",
+      "nodes": "2,4,8,16,32,48",
+      "debug": 1,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-workload.cfg",
+      "compile_args": "--distributed-db"
+    }
+  ]
+}

@@ -144,6 +144,22 @@ BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = BENCHMARKS_DIR / "configs"
 PROFILES_DIR = CONFIGS_DIR / "profiles"
 DEFAULT_ARTS_CONFIG = CONFIGS_DIR / "local.cfg"
+SUPPORTED_SIZES: Tuple[str, ...] = (
+    "small",
+    "medium",
+    "large",
+    "extralarge",
+    "mini",
+    "standard",
+)
+SIZE_ALIASES: Dict[str, str] = {
+    "extra-large": "extralarge",
+    "extra_large": "extralarge",
+    "xlarge": "extralarge",
+}
+SIZE_HELP = (
+    "Dataset size: small, medium, large, extralarge, mini, standard"
+)
 
 
 def get_benchmarks_dir() -> Path:
@@ -181,6 +197,20 @@ def parse_threads(spec: str) -> List[int]:
     if any(v < 1 for v in values):
         raise ValueError(f"Thread counts must be >= 1: {spec}")
     return values
+
+
+def parse_size(value: str, field_name: str = "size") -> str:
+    """Normalize and validate dataset size tokens."""
+    raw = str(value).strip().lower()
+    if not raw:
+        raise ValueError(f"{field_name} cannot be empty")
+    normalized = SIZE_ALIASES.get(raw, raw)
+    if normalized not in SUPPORTED_SIZES:
+        allowed = ", ".join(SUPPORTED_SIZES)
+        raise ValueError(
+            f"Invalid {field_name}: '{value}'. Supported sizes: {allowed}"
+        )
+    return normalized
 
 
 def normalize_requested_benchmarks(
@@ -822,6 +852,15 @@ class BenchmarkRunner:
         compile_args: Optional[str] = None,
     ) -> BuildResult:
         """Build a single benchmark using make."""
+        try:
+            size = parse_size(size, "size")
+        except ValueError as e:
+            return BuildResult(
+                status=Status.FAIL,
+                duration_sec=0.0,
+                output=str(e),
+            )
+
         bench_path = self.benchmarks_dir / name
 
         if not bench_path.exists():
@@ -841,34 +880,19 @@ class BenchmarkRunner:
             )
 
         # Map size parameter to make target
-        size_targets = {
-            "small": "small",
-            "medium": "medium",
-            "large": "large",
-            "extralarge": "extralarge",
-            "mini": "mini",
-            "standard": "standard",
-        }
-
         # Build command using make
         # Use granular targets ({size}-arts, {size}-openmp) defined in common/carts.mk
         # CRITICAL: Provide explicit path to carts executable (not in PATH during non-interactive shells)
         carts_exe = self.carts_dir / "tools" / "carts"
         if variant == "openmp":
             # Build only OpenMP variant using granular target
-            if size in size_targets:
-                cmd = ["make", f"{size}-openmp", f"CARTS={carts_exe}"]
-            else:
-                cmd = ["make", "openmp", f"CARTS={carts_exe}"]
+            cmd = ["make", f"{size}-openmp", f"CARTS={carts_exe}"]
             if cflags:
                 cmd.append(f"CFLAGS={cflags}")
         else:
             # Build ARTS variant (full pipeline)
-            if size in size_targets:
-                # Use granular size-arts target for ARTS-only builds
-                cmd = ["make", f"{size}-arts", f"CARTS={carts_exe}"]
-            else:
-                cmd = ["make", "all", f"CARTS={carts_exe}"]
+            # Use granular size-arts target for ARTS-only builds
+            cmd = ["make", f"{size}-arts", f"CARTS={carts_exe}"]
             if cflags:
                 cmd.append(f"CFLAGS={cflags}")
 
@@ -3680,6 +3704,7 @@ KNOWN_STEP_KEYS = {
     "runs",
     "perf",
     "perf_interval",
+    "size",
     "threads",
     "nodes",
     "timeout",
@@ -3691,35 +3716,6 @@ KNOWN_STEP_KEYS = {
 }
 
 
-def _parse_command_list(raw: Any, field_name: str) -> Optional[List[str]]:
-    """Parse command hook value into a normalized command list."""
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        value = raw.strip()
-        return [value] if value else None
-    if isinstance(raw, list):
-        commands = [str(item).strip() for item in raw if str(item).strip()]
-        return commands or None
-    raise ValueError(f"Field `{field_name}` must be a string or list")
-
-
-def _run_hook_commands(commands: Optional[List[str]], hook_name: str) -> None:
-    """Run pre-configured shell commands for experiment/step hooks."""
-    if not commands:
-        return
-    carts_dir = get_carts_dir()
-    for idx, command in enumerate(commands, start=1):
-        print_step(f"{hook_name} ({idx}/{len(commands)}): {command}")
-        result = subprocess.run(
-            ["bash", "-lc", command],
-            cwd=carts_dir,
-        )
-        if result.returncode != 0:
-            print_error(f"{hook_name} failed with exit code {result.returncode}")
-            raise typer.Exit(1)
-
-
 def _make_experiment_step(
     data: Dict[str, Any],
     default_name: str,
@@ -3727,6 +3723,7 @@ def _make_experiment_step(
 ) -> ExperimentStep:
     """Create an ExperimentStep from a dictionary payload."""
     normalized = {str(k).replace("-", "_"): v for k, v in data.items()}
+    step_name = str(normalized.get("name", default_name))
 
     def _resolve_path(raw: Any, field: str) -> Optional[str]:
         if raw is None or str(raw).strip() == "":
@@ -3763,13 +3760,15 @@ def _make_experiment_step(
         )
 
     step = ExperimentStep(
-        name=str(normalized.get("name", default_name)),
+        name=step_name,
         benchmarks=_parse_step_benchmarks(normalized.get("benchmarks")),
         profile=_resolve_path(normalized.get("profile"), "profile"),
         debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
         perf=_parse_bool_flag(normalized.get("perf", False)),
         perf_interval=float(normalized.get("perf_interval", 0.1) or 0.1),
+        size=parse_size(str(normalized["size"]), f"step '{step_name}' size")
+        if normalized.get("size") is not None else None,
         threads=str(normalized["threads"]) if normalized.get("threads") is not None else None,
         nodes=str(normalized["nodes"]) if normalized.get("nodes") is not None else None,
         timeout=int(normalized["timeout"]) if normalized.get("timeout") is not None else None,
@@ -3785,6 +3784,7 @@ def _make_experiment_step(
         "_has_perf_interval",
         "perf_interval" in normalized and normalized.get("perf_interval") is not None,
     )
+    setattr(step, "_has_size", "size" in normalized and normalized.get("size") is not None)
     setattr(step, "_has_threads", "threads" in normalized and normalized.get("threads") is not None)
     setattr(step, "_has_nodes", "nodes" in normalized and normalized.get("nodes") is not None)
     setattr(step, "_has_timeout", "timeout" in normalized and normalized.get("timeout") is not None)
@@ -3855,8 +3855,8 @@ def _rebuild_arts(
 def _load_experiment(
     experiment: str,
     configs_dir: Path,
-) -> Tuple[List[ExperimentStep], List[str]]:
-    """Load experiment step definitions and setup commands from JSON config."""
+) -> List[ExperimentStep]:
+    """Load experiment step definitions from a JSON config."""
     exp_path: Optional[Path] = None
     exp_arg = Path(experiment)
     if exp_arg.exists():
@@ -3874,9 +3874,12 @@ def _load_experiment(
     with open(exp_path, "r") as f:
         payload = json.load(f)
 
-    setup_commands: List[str] = []
     if isinstance(payload, dict):
-        known_top_keys = {"name", "description", "steps", "setup_commands"} | KNOWN_STEP_KEYS
+        if "setup_commands" in payload:
+            raise ValueError(
+                "Experiment field `setup_commands` is no longer supported."
+            )
+        known_top_keys = {"name", "description", "steps"} | KNOWN_STEP_KEYS
         unknown_top = sorted(set(payload.keys()) - known_top_keys)
         if unknown_top:
             console.print(
@@ -3884,9 +3887,6 @@ def _load_experiment(
             )
         raw_steps = payload.get("steps")
         defaults = {k: v for k, v in payload.items() if k in KNOWN_STEP_KEYS}
-        parsed_setup = _parse_command_list(payload.get("setup_commands"), "setup_commands")
-        if parsed_setup:
-            setup_commands = parsed_setup
     elif isinstance(payload, list):
         raw_steps = payload
         defaults = {}
@@ -3908,7 +3908,7 @@ def _load_experiment(
                 base_dir=exp_path.parent,
             )
         )
-    return steps, setup_commands
+    return steps
 
 
 def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
@@ -4171,12 +4171,40 @@ def _run_step_slurm(
         )
 
 
+def _is_option_from_cli(
+    ctx: typer.Context,
+    parameter_name: str,
+    long_opt: str,
+    short_opt: Optional[str] = None,
+) -> bool:
+    """Return whether an option was explicitly provided on the command line."""
+    get_source = getattr(ctx, "get_parameter_source", None)
+    if callable(get_source):
+        try:
+            source = get_source(parameter_name)
+            if source is not None and str(source).lower().endswith("commandline"):
+                return True
+        except Exception:
+            pass
+
+    for token in sys.argv[1:]:
+        if token == long_opt or token.startswith(f"{long_opt}="):
+            return True
+        if short_opt:
+            if token == short_opt:
+                return True
+            if token.startswith(short_opt) and len(token) > len(short_opt) and not token.startswith("--"):
+                return True
+    return False
+
+
 @app.command()
 def run(
+    ctx: typer.Context,
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to run"),
     size: str = typer.Option(DEFAULT_SIZE, "--size",
-                             "-s", help="Dataset size: small, medium, large, extralarge"),
+                             "-s", help=SIZE_HELP),
     timeout: int = typer.Option(
         DEFAULT_TIMEOUT, "--timeout", "-t", help="Execution timeout in seconds"),
     no_verify: bool = typer.Option(
@@ -4239,8 +4267,15 @@ def run(
         help="Benchmarks to exclude (substring match, repeatable)"),
 ):
     """Run benchmarks with verification and timing."""
+    try:
+        size = parse_size(size, "--size")
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(2)
+
     verify = not no_verify
     clean = not no_clean
+    size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -4304,13 +4339,12 @@ def run(
         raise typer.Exit(2)
 
     explicit_step_mode = bool(experiment or step)
-    experiment_setup_commands: List[str] = []
     configs_dir = CONFIGS_DIR
     try:
         if step:
             steps = _parse_inline_steps(step)
         elif experiment:
-            steps, experiment_setup_commands = _load_experiment(experiment, configs_dir)
+            steps = _load_experiment(experiment, configs_dir)
         else:
             implicit_step = ExperimentStep(
                 name="default",
@@ -4319,6 +4353,7 @@ def run(
                 runs=runs,
                 perf=perf,
                 perf_interval=perf_interval,
+                size=size,
                 threads=threads,
                 nodes=nodes,
                 timeout=timeout,
@@ -4330,6 +4365,7 @@ def run(
             setattr(implicit_step, "_has_runs", True)
             setattr(implicit_step, "_has_perf", True)
             setattr(implicit_step, "_has_perf_interval", True)
+            setattr(implicit_step, "_has_size", True)
             setattr(implicit_step, "_has_threads", threads is not None)
             setattr(implicit_step, "_has_nodes", nodes is not None)
             setattr(implicit_step, "_has_timeout", True)
@@ -4362,7 +4398,19 @@ def run(
             print_error(f"Step '{s.name}': profile not found: {s.profile}")
             raise typer.Exit(1)
 
-    _run_hook_commands(experiment_setup_commands, "Experiment setup")
+    step_sizes = [
+        s.size for s in steps
+        if getattr(s, "_has_size", False) and s.size
+    ]
+    if size_from_cli:
+        effective_size_label = size
+    elif step_sizes:
+        unique_step_sizes = sorted(set(step_sizes))
+        effective_size_label = (
+            unique_step_sizes[0] if len(unique_step_sizes) == 1 else "mixed"
+        )
+    else:
+        effective_size_label = size
 
     # Reject simultaneous thread + node sweeps early (per-step checks also exist).
     has_thread_sweep = bool(base_threads_list and len(base_threads_list) > 1)
@@ -4413,6 +4461,7 @@ def run(
                 use_step_perf_interval = (
                     getattr(step_def, "_has_perf_interval", False) or not explicit_step_mode
                 )
+                use_step_size = getattr(step_def, "_has_size", False) and not size_from_cli
                 use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
                 use_step_compile_args = (
                     getattr(step_def, "_has_compile_args", False) or not explicit_step_mode
@@ -4428,6 +4477,7 @@ def run(
                 step_perf_interval = (
                     step_def.perf_interval if use_step_perf_interval else perf_interval
                 )
+                step_size = step_def.size if (use_step_size and step_def.size) else size
                 step_cflags = step_def.cflags if use_step_cflags else cflags
                 step_compile_args = step_def.compile_args if use_step_compile_args else compile_args
 
@@ -4446,7 +4496,7 @@ def run(
 
                 _run_step_slurm(
                     bench_list=step_bench_list,
-                    size=size,
+                    size=step_size,
                     node_counts=step_node_counts,
                     runs=step_runs,
                     partition=partition,
@@ -4469,7 +4519,7 @@ def run(
 
     # Print header
     if not quiet:
-        config_items = [f"size={size}", f"timeout={timeout}s",
+        config_items = [f"size={effective_size_label}", f"timeout={timeout}s",
                         f"verify={verify}", f"clean={clean}"]
         if base_threads_list:
             config_items.append(f"threads={threads}")
@@ -4586,6 +4636,7 @@ def run(
             use_step_threads = getattr(step_def, "_has_threads", False) or not explicit_step_mode
             use_step_nodes = getattr(step_def, "_has_nodes", False) or not explicit_step_mode
             use_step_timeout = getattr(step_def, "_has_timeout", False) or not explicit_step_mode
+            use_step_size = getattr(step_def, "_has_size", False) and not size_from_cli
             use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
             use_step_compile_args = (
                 getattr(step_def, "_has_compile_args", False) or not explicit_step_mode
@@ -4605,6 +4656,7 @@ def run(
             step_timeout = (
                 step_def.timeout if (use_step_timeout and step_def.timeout is not None) else timeout
             )
+            step_size = step_def.size if (use_step_size and step_def.size) else size
             step_cflags = step_def.cflags if use_step_cflags else cflags
             step_compile_args = step_def.compile_args if use_step_compile_args else compile_args
             step_runs = step_def.runs if use_step_runs else runs
@@ -4629,7 +4681,7 @@ def run(
             step_results = _run_step(
                 runner=runner,
                 bench_list=step_bench_list,
-                size=size,
+                size=step_size,
                 timeout=step_timeout,
                 verify=verify,
                 arts_config=step_arts_config,
@@ -4668,7 +4720,7 @@ def run(
     export_json(
         results,
         am.results_json_path,
-        size,
+        effective_size_label,
         total_duration,
         thread_sweep_meta,
         node_sweep_meta,
@@ -4723,7 +4775,7 @@ def build(
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to build"),
     size: str = typer.Option(DEFAULT_SIZE, "--size",
-                             "-s", help="Dataset size: small, medium, large, extralarge"),
+                             "-s", help=SIZE_HELP),
     openmp: bool = typer.Option(
         False, "--openmp", help="Build OpenMP version only"),
     arts: bool = typer.Option(False, "--arts", help="Build ARTS version only"),
@@ -4733,6 +4785,12 @@ def build(
         None, "--arts-config", help="Custom arts.cfg file"),
 ):
     """Build benchmarks without running."""
+    try:
+        size = parse_size(size, "--size")
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(2)
+
     runner = BenchmarkRunner(console)
 
     # Discover or use provided benchmarks
@@ -4884,7 +4942,7 @@ def _execute_slurm_batch(
         help="Node counts: single (4), range (1-15), or list (1,2,4,8,16)"),
     size: str = typer.Option(
         DEFAULT_SIZE, "--size", "-s",
-        help="Dataset size: small, medium, large, extralarge"),
+        help=SIZE_HELP),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of runs per benchmark"),
     partition: Optional[str] = typer.Option(
@@ -4959,6 +5017,12 @@ def _execute_slurm_batch(
     - Sweep across multiple node counts with --nodes=1-15
     """
     # Initialize
+    try:
+        size = parse_size(size, "--size")
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(2)
+
     slurm_start_time = time.time()
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
 

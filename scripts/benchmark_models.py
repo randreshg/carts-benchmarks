@@ -202,6 +202,7 @@ class ExperimentStep:
     runs: int = 1
     perf: bool = False
     perf_interval: float = 0.1
+    size: Optional[str] = None
     threads: Optional[str] = None
     nodes: Optional[str] = None
     timeout: Optional[int] = None
