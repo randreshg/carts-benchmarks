@@ -12,11 +12,11 @@
       "perf": false
     },
     {
-      "name": "debug-counters",
+      "name": "counters",
       "benchmarks": ["polybench/gemm"],
       "threads": "64",
       "nodes": "1",
-      "debug": 1,
+      "debug": 0,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg"

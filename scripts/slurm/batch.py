@@ -65,6 +65,7 @@ class SlurmJobConfig:
     perf: bool = False  # Enable perf stat profiling for cache metrics
     perf_interval: float = 0.1  # Perf sampling interval in seconds
     exclude_nodes: Optional[str] = None  # SLURM nodes to exclude (e.g. "j006,j007")
+    job_label: Optional[str] = None  # Optional phase/step label to disambiguate job names
 
 
 @dataclass
@@ -213,6 +214,11 @@ fi
 """
 
 
+def _sanitize_job_token(value: str) -> str:
+    """Sanitize free-form text for SLURM job names."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
+
+
 def generate_sbatch_script(
     config: SlurmJobConfig,
     script_path: Path,
@@ -290,9 +296,14 @@ def generate_sbatch_script(
     else:
         omp_section = '# OpenMP skipped (executable not specified)'
 
-    # Safe job name (SLURM limits to 64 chars)
-    safe_name = config.benchmark_name.replace("/", "_").replace(" ", "_")
-    job_name = f"{safe_name}_n{config.node_count}_r{config.run_number}"[:64]
+    # Safe, collision-resistant job name (SLURM limits to 64 chars).
+    safe_name = _sanitize_job_token(config.benchmark_name.replace("/", "_")) or "bench"
+    safe_label = _sanitize_job_token(config.job_label or "")
+    job_suffix = f"_n{config.node_count}_r{config.run_number}"
+    prefix_parts = [p for p in (safe_label, safe_name) if p]
+    job_prefix = "__".join(prefix_parts) if prefix_parts else "job"
+    max_prefix_len = max(1, 64 - len(job_suffix))
+    job_name = f"{job_prefix[:max_prefix_len]}{job_suffix}"
 
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     if config.gdb:
@@ -992,7 +1003,48 @@ def collect_results(
             summary["counter_timeout_warnings"] = len(
                 re.findall(r"Could not read counter file", text)
             )
+            summary["remote_send_hard_timeout_count"] = len(
+                re.findall(r"Remote send hard-timeout", text)
+            )
+            summary["connection_refused_count"] = len(
+                re.findall(r"Connection refused", text)
+            )
         return summary
+
+    def _slurm_err_summary(diagnostics: Any) -> Dict[str, Any]:
+        if not isinstance(diagnostics, dict):
+            return {}
+        slurm_stderr = diagnostics.get("slurm_stderr")
+        if isinstance(slurm_stderr, dict):
+            return slurm_stderr
+        slurm_err = diagnostics.get("slurm_err")
+        if isinstance(slurm_err, dict):
+            return slurm_err
+        return {}
+
+    def _runtime_warning_reasons(diagnostics: Any) -> List[str]:
+        slurm_err = _slurm_err_summary(diagnostics)
+        reasons: List[str] = []
+        if not slurm_err:
+            return reasons
+
+        srun_errors = int(slurm_err.get("srun_error_count") or 0)
+        broken_pipes = int(slurm_err.get("broken_pipe_count") or 0)
+        counter_timeouts = int(slurm_err.get("counter_timeout_warnings") or 0)
+        remote_send_timeouts = int(slurm_err.get("remote_send_hard_timeout_count") or 0)
+        connection_refused = int(slurm_err.get("connection_refused_count") or 0)
+
+        if srun_errors > 0:
+            reasons.append(f"srun_error_count={srun_errors}")
+        if broken_pipes > 0:
+            reasons.append(f"broken_pipe_count={broken_pipes}")
+        if counter_timeouts > 0:
+            reasons.append(f"counter_timeout_warnings={counter_timeouts}")
+        if remote_send_timeouts > 0:
+            reasons.append(f"remote_send_hard_timeout_count={remote_send_timeouts}")
+        if connection_refused > 0:
+            reasons.append(f"connection_refused_count={connection_refused}")
+        return reasons
 
     def _build_failure_result(
         status: SlurmJobStatus,
@@ -1027,6 +1079,12 @@ def collect_results(
             },
         }
         _apply_run_config(failure, run_config)
+        warning_reasons = _runtime_warning_reasons(failure.get("diagnostics"))
+        if warning_reasons:
+            failure.setdefault("diagnostics", {})["runtime_warning"] = {
+                "has_warning": True,
+                "reasons": warning_reasons,
+            }
         return failure
 
     for job_id, status in job_statuses.items():
@@ -1073,7 +1131,21 @@ def collect_results(
                     "slurm_out": str(status.run_dir / "slurm.out"),
                     "slurm_err": str(status.run_dir / "slurm.err"),
                 })
+                warning_reasons = _runtime_warning_reasons(result.get("diagnostics"))
+                if warning_reasons:
+                    diagnostics = result.setdefault("diagnostics", {})
+                    diagnostics["runtime_warning"] = {
+                        "has_warning": True,
+                        "reasons": warning_reasons,
+                    }
+                    if str(result.get("status", "")).upper() == "PASS":
+                        result["status_detail"] = "WARN"
                 if result.get("status") != "PASS":
+                    result.setdefault("diagnostics", {}).setdefault(
+                        "slurm_snapshot",
+                        _collect_slurm_snapshot(status.job_id),
+                    )
+                elif warning_reasons:
                     result.setdefault("diagnostics", {}).setdefault(
                         "slurm_snapshot",
                         _collect_slurm_snapshot(status.job_id),
@@ -1116,8 +1188,14 @@ def write_job_manifest(
     Returns:
         Path to the manifest file
     """
+    manifest_metadata = dict(metadata)
+    requested_total_jobs = manifest_metadata.get("total_jobs")
+    manifest_metadata["total_jobs"] = len(job_statuses)
+    if requested_total_jobs is not None and requested_total_jobs != len(job_statuses):
+        manifest_metadata["requested_total_jobs"] = requested_total_jobs
+
     manifest = {
-        "metadata": metadata,
+        "metadata": manifest_metadata,
         "jobs": {
             job_id: asdict(status)
             for job_id, status in job_statuses.items()

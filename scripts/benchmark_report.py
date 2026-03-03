@@ -39,11 +39,16 @@ RESULTS_COLUMNS = [
     "run_phase",
     "compile_args",
     "status",
+    "status_detail",
+    "runtime_warning",
     "slurm_job_id",
     "slurm_state",
     "slurm_exit_code",
     "srun_error_count",
     "broken_pipe_count",
+    "counter_timeout_warnings",
+    "remote_send_hard_timeout_count",
+    "connection_refused_count",
     "speedup_basis",
     "arts_e2e_sec",
     "omp_e2e_sec",
@@ -108,6 +113,7 @@ SUMMARY_COLUMNS = [
     "init_overhead_pct_mean",
     "pass_count",
     "fail_count",
+    "warn_count",
 ]
 
 COUNTER_FIELD_MAP = {
@@ -135,6 +141,9 @@ INT_FIELDS = {
     "num_dbs_created",
     "srun_error_count",
     "broken_pipe_count",
+    "counter_timeout_warnings",
+    "remote_send_hard_timeout_count",
+    "connection_refused_count",
     "counter_files_found",
     "counter_files_valid",
     "counter_expected_nodes",
@@ -144,6 +153,7 @@ INT_FIELDS = {
     "num_runs",
     "pass_count",
     "fail_count",
+    "warn_count",
 }
 
 RATIO_FIELDS = {
@@ -396,11 +406,16 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "run_phase": _phase_name(getattr(result, "run_phase", None)),
             "compile_args": getattr(result, "compile_args", None),
             "status": _status_text(result.run_arts.status),
+            "status_detail": _status_text(result.run_arts.status),
+            "runtime_warning": False,
             "slurm_job_id": None,
             "slurm_state": None,
             "slurm_exit_code": None,
             "srun_error_count": None,
             "broken_pipe_count": None,
+            "counter_timeout_warnings": None,
+            "remote_send_hard_timeout_count": None,
+            "connection_refused_count": None,
             "speedup_basis": result.timing.speedup_basis,
             "arts_e2e_sec": result.timing.arts_e2e_sec,
             "omp_e2e_sec": result.timing.omp_e2e_sec,
@@ -455,10 +470,30 @@ def _flatten_result_serialized(
     slurm_stderr = diagnostics.get("slurm_stderr") if isinstance(diagnostics, dict) else {}
     if not isinstance(slurm_stderr, dict):
         slurm_stderr = {}
+    runtime_warning = diagnostics.get("runtime_warning") if isinstance(diagnostics, dict) else {}
+    if not isinstance(runtime_warning, dict):
+        runtime_warning = {}
 
     suite: Optional[str] = None
     if isinstance(benchmark, str) and "/" in benchmark:
         suite = benchmark.split("/", 1)[0]
+
+    status = _status_text(result.get("status"))
+    status_detail = _status_text(result.get("status_detail")) or status
+    detected_runtime_warning = bool(runtime_warning.get("has_warning"))
+    if not detected_runtime_warning:
+        detected_runtime_warning = any(
+            int(slurm_stderr.get(key) or 0) > 0
+            for key in (
+                "srun_error_count",
+                "broken_pipe_count",
+                "counter_timeout_warnings",
+                "remote_send_hard_timeout_count",
+                "connection_refused_count",
+            )
+        )
+    if status == "PASS" and detected_runtime_warning and status_detail == "PASS":
+        status_detail = "WARN"
 
     row.update(
         {
@@ -470,12 +505,17 @@ def _flatten_result_serialized(
             "run": result.get("run_number"),
             "run_phase": _phase_name(result.get("run_phase")),
             "compile_args": result.get("compile_args"),
-            "status": _status_text(result.get("status")),
+            "status": status,
+            "status_detail": status_detail,
+            "runtime_warning": detected_runtime_warning,
             "slurm_job_id": slurm.get("job_id"),
             "slurm_state": slurm.get("state"),
             "slurm_exit_code": slurm.get("exit_code"),
             "srun_error_count": slurm_stderr.get("srun_error_count"),
             "broken_pipe_count": slurm_stderr.get("broken_pipe_count"),
+            "counter_timeout_warnings": slurm_stderr.get("counter_timeout_warnings"),
+            "remote_send_hard_timeout_count": slurm_stderr.get("remote_send_hard_timeout_count"),
+            "connection_refused_count": slurm_stderr.get("connection_refused_count"),
             "speedup_basis": None,
             "arts_e2e_sec": _to_float(arts.get("e2e_sec")) or _first_timing_value(arts.get("e2e_timings")),
             "omp_e2e_sec": _to_float(omp.get("e2e_sec")) or _first_timing_value(omp.get("e2e_timings")),
@@ -611,6 +651,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
 
         pass_count = sum(1 for r in runs if str(r.get("status", "")).upper() == "PASS")
         fail_count = len(runs) - pass_count
+        warn_count = sum(1 for r in runs if r.get("runtime_warning") is True)
 
         summary_rows.append(
             {
@@ -639,6 +680,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "init_overhead_pct_mean": init_overhead_mean,
                 "pass_count": pass_count,
                 "fail_count": fail_count,
+                "warn_count": warn_count,
             }
         )
 
@@ -1253,6 +1295,7 @@ def _metadata_rows(
         add("report_total_rows", report_summary.get("total_rows"))
         add("report_pass_count", report_summary.get("pass_count"))
         add("report_fail_count", report_summary.get("fail_count"))
+        add("report_warn_count", report_summary.get("warn_count"))
         add("report_skipped_count", report_summary.get("skip_count"))
         add("report_geomean_speedup", report_summary.get("geomean_speedup"))
         add("report_rows_with_counters", report_summary.get("rows_with_counters"))
@@ -1288,6 +1331,7 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     pass_count = sum(1 for s in statuses if s == "PASS")
     fail_count = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
     skip_count = sum(1 for s in statuses if s == "SKIP")
+    warn_count = sum(1 for r in result_rows if r.get("runtime_warning") is True)
 
     phases = sorted({_phase_name(r.get("run_phase")) for r in result_rows})
     geomean_speedup: Dict[str, Optional[float]] = {}
@@ -1334,6 +1378,7 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "total_rows": len(result_rows),
         "pass_count": pass_count,
         "fail_count": fail_count,
+        "warn_count": warn_count,
         "skip_count": skip_count,
         "geomean_speedup": geomean_speedup,
         "rows_with_counters": rows_with_counters,

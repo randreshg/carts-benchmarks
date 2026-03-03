@@ -139,19 +139,46 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
     stdout_lines = stdout.splitlines()
     stderr_lines = stderr.splitlines()
 
+    slurm_stderr_summary: Dict[str, Any] = {
+        "line_count": len(stderr_lines),
+        "srun_error_count": len(re.findall(r"^srun: error:", stderr, flags=re.MULTILINE)),
+        "broken_pipe_count": len(re.findall(r"Broken pipe", stderr)),
+        "counter_timeout_warnings": len(re.findall(r"Could not read counter file", stderr)),
+        "remote_send_hard_timeout_count": len(re.findall(r"Remote send hard-timeout", stderr)),
+        "connection_refused_count": len(re.findall(r"Connection refused", stderr)),
+    }
+
+    warning_reasons: List[str] = []
+    if slurm_stderr_summary["srun_error_count"] > 0:
+        warning_reasons.append(f"srun_error_count={slurm_stderr_summary['srun_error_count']}")
+    if slurm_stderr_summary["broken_pipe_count"] > 0:
+        warning_reasons.append(f"broken_pipe_count={slurm_stderr_summary['broken_pipe_count']}")
+    if slurm_stderr_summary["counter_timeout_warnings"] > 0:
+        warning_reasons.append(
+            f"counter_timeout_warnings={slurm_stderr_summary['counter_timeout_warnings']}"
+        )
+    if slurm_stderr_summary["remote_send_hard_timeout_count"] > 0:
+        warning_reasons.append(
+            "remote_send_hard_timeout_count="
+            f"{slurm_stderr_summary['remote_send_hard_timeout_count']}"
+        )
+    if slurm_stderr_summary["connection_refused_count"] > 0:
+        warning_reasons.append(
+            f"connection_refused_count={slurm_stderr_summary['connection_refused_count']}"
+        )
+
     summary: Dict[str, Any] = {
         "slurm_stdout": {
             "line_count": len(stdout_lines),
         },
-        "slurm_stderr": {
-            "line_count": len(stderr_lines),
-            "srun_error_count": len(re.findall(r"^srun: error:", stderr, flags=re.MULTILINE)),
-            "broken_pipe_count": len(re.findall(r"Broken pipe", stderr)),
-            "counter_timeout_warnings": len(re.findall(r"Could not read counter file", stderr)),
+        "slurm_stderr": slurm_stderr_summary,
+        "runtime_warning": {
+            "has_warning": bool(warning_reasons),
+            "reasons": warning_reasons,
         },
     }
 
-    if include_tails:
+    if include_tails or warning_reasons:
         summary["slurm_stdout"]["tail"] = stdout_lines[-40:]
         summary["slurm_stderr"]["tail"] = stderr_lines[-40:]
 
@@ -273,6 +300,9 @@ def generate_result(
         },
         "diagnostics": diagnostics,
     }
+
+    if status == "PASS" and diagnostics.get("runtime_warning", {}).get("has_warning"):
+        result["status_detail"] = "WARN"
 
     # Compute speedup if both ran
     if omp_exit != -1 and omp_duration > 0 and arts_duration > 0:

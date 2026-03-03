@@ -3852,6 +3852,22 @@ def _rebuild_arts(
     print_success("ARTS rebuild complete")
 
 
+def _current_arts_build_hash() -> str:
+    """Return the active ARTS build configuration hash used by Makefile caching."""
+    carts_dir = get_carts_dir()
+    hash_file = carts_dir / "external" / "arts" / "build" / ".arts-build-config"
+    if not hash_file.exists():
+        return "nohash"
+    try:
+        value = hash_file.read_text().strip()
+    except OSError:
+        return "nohash"
+    if not value:
+        return "nohash"
+    safe = re.sub(r"[^A-Za-z0-9]", "", value)
+    return safe[:12] if safe else "nohash"
+
+
 def _load_experiment(
     experiment: str,
     configs_dir: Path,
@@ -4115,6 +4131,56 @@ def _resolve_step_bench_list(
         seen.add(bench)
         ordered.append(bench)
     return ordered
+
+
+def _resolve_step_name(step: ExperimentStep, idx: int) -> str:
+    """Return a canonical, non-empty step name."""
+    resolved = (step.name or f"step_{idx}").strip()
+    return resolved if resolved else f"step_{idx}"
+
+
+def _step_name_to_token(step_name: str) -> str:
+    """Sanitize a step name for filesystem/script-safe identifiers."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", step_name).strip("_") or "default"
+
+
+def _validate_step_name_collisions(steps: List[ExperimentStep]) -> None:
+    """Fail fast on step-name collisions that would overwrite artifacts/scripts."""
+    names_to_indices: Dict[str, List[int]] = {}
+    token_to_names: Dict[str, set[str]] = {}
+
+    for idx, step in enumerate(steps, start=1):
+        step_name = _resolve_step_name(step, idx)
+        names_to_indices.setdefault(step_name, []).append(idx)
+        token = _step_name_to_token(step_name)
+        token_to_names.setdefault(token, set()).add(step_name)
+
+    duplicate_names = {
+        name: indices for name, indices in names_to_indices.items() if len(indices) > 1
+    }
+    if duplicate_names:
+        detail = "; ".join(
+            f"'{name}' at steps {indices}" for name, indices in duplicate_names.items()
+        )
+        raise ValueError(
+            f"Duplicate step names detected ({detail}). "
+            "Step names must be unique to avoid artifact collisions."
+        )
+
+    token_collisions = {
+        token: sorted(names)
+        for token, names in token_to_names.items()
+        if len(names) > 1
+    }
+    if token_collisions:
+        detail = "; ".join(
+            f"token '{token}' from names {names}"
+            for token, names in token_collisions.items()
+        )
+        raise ValueError(
+            f"Step-name token collisions detected ({detail}). "
+            "Rename steps to produce unique script-safe names."
+        )
 
 
 def _run_step_slurm(
@@ -4398,6 +4464,12 @@ def run(
             print_error(f"Step '{s.name}': profile not found: {s.profile}")
             raise typer.Exit(1)
 
+    try:
+        _validate_step_name_collisions(steps)
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(2)
+
     step_sizes = [
         s.size for s in steps
         if getattr(s, "_has_size", False) and s.size
@@ -4426,7 +4498,7 @@ def run(
 
         try:
             for idx, step_def in enumerate(steps, start=1):
-                step_name = step_def.name or f"step_{idx}"
+                step_name = _resolve_step_name(step_def, idx)
                 if not quiet and len(steps) > 1:
                     console.print(f"\n[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
 
@@ -4598,7 +4670,7 @@ def run(
     all_results: List[BenchmarkResult] = []
     try:
         for idx, step_def in enumerate(steps, start=1):
-            step_name = step_def.name or f"step_{idx}"
+            step_name = _resolve_step_name(step_def, idx)
 
             if not quiet and len(steps) > 1:
                 console.print(f"[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
@@ -5138,8 +5210,11 @@ def _execute_slurm_batch(
     scripts_dir = experiment_dir / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
+    arts_build_hash = _current_arts_build_hash()
+
     console.print(f"Build directory: {build_dir} (shared)")
     console.print(f"Experiment directory: {experiment_dir}")
+    console.print(f"ARTS build hash: {arts_build_hash}")
 
     # Handle custom counter profile (triggers ARTS rebuild)
     if profile:
@@ -5191,11 +5266,14 @@ def _execute_slurm_batch(
             if node_count > 1 and bench in multinode_disabled:
                 continue
 
-            # Build directory: build/{benchmark}/nodes_{N}/{T}T/{compile_variant}/ (shared, reusable)
+            # Build directory:
+            # build/{benchmark}/arts_{H}/nodes_{N}/{T}T/{compile_variant}/ (shared, reusable)
+            # Hash H ties executable cache to the active ARTS build config.
             # compile_variant ensures different compile_args do not reuse stale executables.
             build_node_dir = (
                 build_dir
                 / safe_name
+                / f"arts_{arts_build_hash}"
                 / f"nodes_{node_count}"
                 / f"{threads}T"
                 / compile_variant
@@ -5298,6 +5376,10 @@ def _execute_slurm_batch(
 
     job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
 
+    step_token = _step_name_to_token(step_name or "default")
+    seen_run_dirs: set[Path] = set()
+    seen_script_paths: set[Path] = set()
+
     for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
         safe_name = bench.replace("/", "_")
 
@@ -5309,6 +5391,13 @@ def _execute_slurm_batch(
                 launcher="slurm",
             )
             run_dir = am.get_run_dir(bench, bench_config, run_num)
+            run_dir_resolved = run_dir.resolve()
+            if run_dir_resolved in seen_run_dirs:
+                raise ValueError(
+                    f"Collision detected: duplicate run directory '{run_dir_resolved}'. "
+                    "Ensure step names and benchmark/config combinations are unique."
+                )
+            seen_run_dirs.add(run_dir_resolved)
             am.save_run_config(
                 bench,
                 bench_config,
@@ -5342,10 +5431,21 @@ def _execute_slurm_batch(
                 perf=perf,
                 perf_interval=perf_interval,
                 exclude_nodes=exclude_nodes,
+                job_label=step_token,
             )
 
             # Generate sbatch script in experiment scripts/ directory
-            script_path = scripts_dir / f"{safe_name}_{threads}t_{node_count}n_run{run_num}.sbatch"
+            script_path = (
+                scripts_dir
+                / f"{step_token}__{safe_name}_{threads}t_{node_count}n_run{run_num}.sbatch"
+            )
+            script_path_resolved = script_path.resolve()
+            if script_path_resolved in seen_script_paths:
+                raise ValueError(
+                    f"Collision detected: duplicate script path '{script_path_resolved}'. "
+                    "Ensure step names and benchmark/config combinations are unique."
+                )
+            seen_script_paths.add(script_path_resolved)
             slurm_batch.generate_sbatch_script(
                 config, script_path, slurm_job_result_script
             )
