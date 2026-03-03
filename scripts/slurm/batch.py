@@ -770,7 +770,7 @@ def wait_for_jobs_completion(
     console.print("[dim]Press Ctrl+C to stop monitoring (jobs will continue running)[/]\n")
 
     try:
-        with Live(create_status_table(), console=console, refresh_per_second=1) as live:
+        with Live(create_status_table(), console=console, refresh_per_second=1, transient=True) as live:
             while True:
                 # Poll current states
                 current_states = poll_jobs(job_ids)

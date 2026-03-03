@@ -1,14 +1,14 @@
 {
   "name": "gemm-multinode-extralarge",
-  "description": "GEMM multinode-only node sweep (2..48) baseline vs distributed-db. Run with --size extralarge.",
+  "description": "GEMM multinode-only node sweep (2..32) baseline vs distributed-db. Run with --size extralarge.",
   "steps": [
     {
       "name": "node-sweep-without-distributed-db",
       "benchmarks": ["polybench/gemm"],
       "size": "extralarge",
       "threads": "64",
-      "nodes": "1,2,4,8,16,32,48",
-      "debug": 1,
+      "nodes": "2,4,8,16,32",
+      "debug": 0,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg"
@@ -18,8 +18,8 @@
       "benchmarks": ["polybench/gemm"],
       "size": "extralarge",
       "threads": "64",
-      "nodes": "1,2,4,8,16,32,48",
-      "debug": 1,
+      "nodes": "2,4,8,16,32",
+      "debug": 0,
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg",
