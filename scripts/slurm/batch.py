@@ -1115,13 +1115,17 @@ def collect_results(
             try:
                 with open(result_file) as f:
                     result = json.load(f)
-                # Merge SLURM status info into existing slurm.* namespace
-                result.setdefault("slurm", {}).update({
-                    "state": status.state,
-                    "exit_code": status.exit_code,
-                    "elapsed": status.elapsed,
-                    "nodelist": status.node_list,
-                })
+                # Merge SLURM status info without erasing richer per-run fields
+                # from job_result.py (for example, nodelist captured from
+                # SLURM_JOB_NODELIST in the batch script environment).
+                slurm_info = result.setdefault("slurm", {})
+                slurm_info["state"] = status.state
+                if status.exit_code is not None:
+                    slurm_info["exit_code"] = status.exit_code
+                if status.elapsed is not None:
+                    slurm_info["elapsed"] = status.elapsed
+                if status.node_list:
+                    slurm_info["nodelist"] = status.node_list
                 result["_run_dir"] = str(status.run_dir)
                 _apply_run_config(result, run_config)
                 result.setdefault("artifacts", {}).update({

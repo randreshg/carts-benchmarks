@@ -208,6 +208,7 @@ class ExperimentStep:
     timeout: Optional[int] = None
     cflags: Optional[str] = None
     compile_args: Optional[str] = None
+    exclude_nodes: Optional[str] = None
     arts_config: Optional[str] = None
     launcher: Optional[str] = None
 

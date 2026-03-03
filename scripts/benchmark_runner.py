@@ -3710,6 +3710,7 @@ KNOWN_STEP_KEYS = {
     "timeout",
     "cflags",
     "compile_args",
+    "exclude_nodes",
     "arts_config",
     "launcher",
     "description",
@@ -3774,6 +3775,7 @@ def _make_experiment_step(
         timeout=int(normalized["timeout"]) if normalized.get("timeout") is not None else None,
         cflags=str(normalized["cflags"]) if normalized.get("cflags") is not None else None,
         compile_args=str(normalized["compile_args"]) if normalized.get("compile_args") is not None else None,
+        exclude_nodes=str(normalized["exclude_nodes"]) if normalized.get("exclude_nodes") is not None else None,
         arts_config=_resolve_path(normalized.get("arts_config"), "arts_config"),
         launcher=str(normalized["launcher"]) if normalized.get("launcher") is not None else None,
     )
@@ -3793,6 +3795,11 @@ def _make_experiment_step(
         step,
         "_has_compile_args",
         "compile_args" in normalized and normalized.get("compile_args") is not None,
+    )
+    setattr(
+        step,
+        "_has_exclude_nodes",
+        "exclude_nodes" in normalized and normalized.get("exclude_nodes") is not None,
     )
     setattr(
         step,
@@ -4196,6 +4203,7 @@ def _run_step_slurm(
     verbose: bool,
     cflags: Optional[str],
     compile_args: Optional[str],
+    exclude_nodes: Optional[str],
     perf: bool,
     perf_interval: float,
     artifact_manager: Optional[ArtifactManager] = None,
@@ -4230,7 +4238,7 @@ def _run_step_slurm(
             profile=None,
             perf=perf,
             perf_interval=perf_interval,
-            exclude_nodes=None,
+            exclude_nodes=exclude_nodes,
             exclude=None,
             artifact_manager=artifact_manager,
             step_name=step_name,
@@ -4328,6 +4336,9 @@ def run(
         None, "--partition", "-p", help="SLURM partition (only with --slurm)"),
     time_limit: str = typer.Option(
         "01:00:00", "--time-limit", help="SLURM time limit per job (only with --slurm)"),
+    exclude_nodes: Optional[str] = typer.Option(
+        None, "--exclude-nodes", "-X",
+        help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -4425,6 +4436,7 @@ def run(
                 timeout=timeout,
                 cflags=cflags,
                 compile_args=compile_args,
+                exclude_nodes=exclude_nodes,
                 arts_config=str(arts_config.resolve()) if arts_config else None,
                 launcher=launcher,
             )
@@ -4437,6 +4449,7 @@ def run(
             setattr(implicit_step, "_has_timeout", True)
             setattr(implicit_step, "_has_cflags", cflags is not None)
             setattr(implicit_step, "_has_compile_args", compile_args is not None)
+            setattr(implicit_step, "_has_exclude_nodes", exclude_nodes is not None)
             setattr(implicit_step, "_has_arts_config", arts_config is not None)
             setattr(implicit_step, "_has_profile", profile is not None)
             setattr(implicit_step, "_has_benchmarks", False)
@@ -4538,6 +4551,9 @@ def run(
                 use_step_compile_args = (
                     getattr(step_def, "_has_compile_args", False) or not explicit_step_mode
                 )
+                use_step_exclude_nodes = (
+                    getattr(step_def, "_has_exclude_nodes", False) or not explicit_step_mode
+                )
                 use_step_arts_config = (
                     getattr(step_def, "_has_arts_config", False) or not explicit_step_mode
                 )
@@ -4552,6 +4568,9 @@ def run(
                 step_size = step_def.size if (use_step_size and step_def.size) else size
                 step_cflags = step_def.cflags if use_step_cflags else cflags
                 step_compile_args = step_def.compile_args if use_step_compile_args else compile_args
+                step_exclude_nodes = (
+                    step_def.exclude_nodes if use_step_exclude_nodes else exclude_nodes
+                )
 
                 if not step_nodes_spec:
                     raise ValueError("--slurm requires --nodes (or step nodes override)")
@@ -4579,6 +4598,7 @@ def run(
                     verbose=verbose,
                     cflags=step_cflags,
                     compile_args=step_compile_args,
+                    exclude_nodes=step_exclude_nodes,
                     perf=step_perf,
                     perf_interval=step_perf_interval,
                     artifact_manager=am,
@@ -4588,6 +4608,9 @@ def run(
             console.print(f"\n[red]Error:[/] {e}")
             raise typer.Exit(1)
         return
+
+    if exclude_nodes:
+        print_warning("Ignoring --exclude-nodes because --slurm is not enabled.")
 
     # Print header
     if not quiet:
