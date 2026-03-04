@@ -46,6 +46,7 @@ BENCHMARK_CLEAN_DIR_NAMES = [
 
 BENCHMARK_CLEAN_DIR_GLOBS = [
     "counters.prev.*",
+    "counters_*",
 ]
 
 BENCHMARK_CLEAN_FILE_GLOBS = [
@@ -67,6 +68,7 @@ BENCHMARK_CLEAN_FILE_GLOBS = [
 ]
 
 BENCHMARK_SHARED_CLEAN_DIR_NAMES = [
+    "build",
     "results",
     "counters",
     "perfs",

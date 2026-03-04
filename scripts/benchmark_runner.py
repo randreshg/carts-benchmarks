@@ -850,6 +850,7 @@ class BenchmarkRunner:
         arts_config: Optional[Path] = None,
         cflags: str = "",
         compile_args: Optional[str] = None,
+        build_output_dir: Optional[Path] = None,
     ) -> BuildResult:
         """Build a single benchmark using make."""
         try:
@@ -884,46 +885,93 @@ class BenchmarkRunner:
         # Use granular targets ({size}-arts, {size}-openmp) defined in common/carts.mk
         # CRITICAL: Provide explicit path to carts executable (not in PATH during non-interactive shells)
         carts_exe = self.carts_dir / "tools" / "carts"
+        arts_exe_default, omp_exe_default = self.get_executable_paths(bench_path)
+        output_root = build_output_dir.resolve() if build_output_dir else bench_path
+        build_dir_override = output_root / "build"
+        logs_dir_override = output_root / "logs"
+        output_root.mkdir(parents=True, exist_ok=True)
+        build_dir_override.mkdir(parents=True, exist_ok=True)
+        logs_dir_override.mkdir(parents=True, exist_ok=True)
+        arts_output_path = output_root / arts_exe_default.name
+        omp_output_path = build_dir_override / omp_exe_default.name
+
+        env_overrides: Dict[str, str] = {}
+        effective_arts_config = arts_config
+        if variant != "openmp" and effective_arts_config is None:
+            # Keep build behavior independent of current working directory.
+            effective_arts_config = _resolve_effective_arts_config(bench_path)
+        if variant != "openmp" and effective_arts_config is not None:
+            effective_arts_config = effective_arts_config.resolve()
+            if build_output_dir is not None:
+                # Keep the exact compile-time config alongside the build artifacts.
+                local_cfg = output_root / "arts.cfg"
+                if effective_arts_config != local_cfg.resolve():
+                    shutil.copy2(effective_arts_config, local_cfg)
+                effective_arts_config = local_cfg
+
         if variant == "openmp":
             # Build only OpenMP variant using granular target
-            cmd = ["make", f"{size}-openmp", f"CARTS={carts_exe}"]
+            cmd = [
+                "make",
+                f"{size}-openmp",
+                f"CARTS={carts_exe}",
+                f"BUILD_DIR={build_dir_override}",
+                f"LOG_DIR={logs_dir_override}",
+                f"OMP_BINARY={omp_output_path}",
+            ]
             if cflags:
                 cmd.append(f"CFLAGS={cflags}")
         else:
             # Build ARTS variant (full pipeline)
             # Use granular size-arts target for ARTS-only builds
-            cmd = ["make", f"{size}-arts", f"CARTS={carts_exe}"]
+            cmd = [
+                "make",
+                f"{size}-arts",
+                f"CARTS={carts_exe}",
+                f"BUILD_DIR={build_dir_override}",
+                f"LOG_DIR={logs_dir_override}",
+                f"ARTS_BINARY={arts_output_path}",
+            ]
             if cflags:
                 cmd.append(f"CFLAGS={cflags}")
+            # Keep compiler intermediates out of source benchmark directories.
+            env_overrides["CARTS_COMPILE_WORKDIR"] = str(output_root)
 
         # Add ARTS config override if provided
-        if arts_config and variant != "openmp":
-            cmd.append(f"ARTS_CFG={arts_config}")
+        if effective_arts_config and variant != "openmp":
+            cmd.append(f"ARTS_CFG={effective_arts_config.resolve()}")
         if compile_args and variant != "openmp":
             escaped_args = compile_args.replace("\\", "\\\\").replace(" ", "\\ ")
             cmd.append(f"COMPILE_ARGS={escaped_args}")
 
         # Debug output level 1: show commands
         if self.debug >= 1:
-            self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
+            env_prefix = " ".join(f"{k}={v}" for k, v in env_overrides.items())
+            if env_prefix:
+                self.console.print(
+                    f"[dim]$ cd {bench_path} && {env_prefix} {' '.join(cmd)}[/]"
+                )
+            else:
+                self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
 
         start = time.time()
 
         try:
+            env = os.environ.copy()
+            env.update(env_overrides)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,
                 cwd=bench_path,
+                env=env,
             )
             duration = time.time() - start
 
             # Debug output level 2: write build log to file
             if self.debug >= 2:
-                logs_dir = bench_path / "logs"
-                logs_dir.mkdir(parents=True, exist_ok=True)
-                log_file = logs_dir / f"build_{variant}.log"
+                log_file = logs_dir_override / f"build_{variant}.log"
                 with open(log_file, "w") as f:
                     f.write(f"# Command: {' '.join(cmd)}\n")
                     f.write(f"# Duration: {duration:.3f}s\n")
@@ -936,7 +984,12 @@ class BenchmarkRunner:
                 self.console.print(f"[dim]  Log: {log_file}[/]")
 
             if result.returncode == 0:
-                executable = self._find_executable(bench_path, variant)
+                expected_exe = arts_output_path if variant != "openmp" else omp_output_path
+                executable = None
+                if expected_exe.is_file() and os.access(expected_exe, os.X_OK):
+                    executable = str(expected_exe)
+                else:
+                    executable = self._find_executable(bench_path, variant)
                 return BuildResult(
                     status=Status.PASS,
                     duration_sec=duration,
@@ -996,6 +1049,40 @@ class BenchmarkRunner:
                     return str(exe)
 
         return None
+
+    def _index_build_artifacts(
+        self,
+        artifacts_dir: Path,
+        arts_cfg_used: Optional[Path] = None,
+    ) -> Dict[str, Optional[str]]:
+        """Return discovered build artifact paths from an already-built directory."""
+        paths: Dict[str, Optional[str]] = {}
+
+        cfg_src = artifacts_dir / "arts.cfg"
+        if not cfg_src.exists() and arts_cfg_used is not None and arts_cfg_used.exists():
+            cfg_src = arts_cfg_used
+        if cfg_src.exists():
+            paths["arts_config"] = str(cfg_src.resolve())
+
+        metadata = artifacts_dir / ".carts-metadata.json"
+        if metadata.exists():
+            paths["carts_metadata"] = str(metadata.resolve())
+
+        arts_metadata_files = sorted(artifacts_dir.glob("*_arts_metadata.mlir"))
+        if arts_metadata_files:
+            paths["arts_metadata_mlir"] = str(arts_metadata_files[0].resolve())
+
+        arts_bins = [p for p in sorted(artifacts_dir.glob("*_arts")) if p.is_file()]
+        if arts_bins:
+            paths["executable_arts"] = str(arts_bins[0].resolve())
+
+        omp_bins = [p for p in sorted(artifacts_dir.glob("*_omp")) if p.is_file()]
+        if not omp_bins:
+            omp_bins = [p for p in sorted((artifacts_dir / "build").glob("*_omp")) if p.is_file()]
+        if omp_bins:
+            paths["executable_omp"] = str(omp_bins[0].resolve())
+
+        return paths
 
     def run_with_thread_sweep(
         self,
@@ -1105,19 +1192,30 @@ class BenchmarkRunner:
                 if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
                     env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
 
+                build_output_dir: Optional[Path] = None
+                if am:
+                    # Build directly in artifacts directory to keep outputs self-contained.
+                    build_output_dir = am.get_artifacts_dir(name, config)
+                    build_output_dir.mkdir(parents=True, exist_ok=True)
+
                 # Build ARTS variant
                 build_arts = self.build_benchmark(
-                    name, size, "arts", arts_cfg, effective_cflags, compile_args)
+                    name, size, "arts", arts_cfg, effective_cflags, compile_args,
+                    build_output_dir=build_output_dir,
+                )
 
                 # Build OpenMP variant (single-node reference for correctness).
                 build_omp = self.build_benchmark(
-                    name, size, "openmp", None, effective_cflags)
+                    name, size, "openmp", None, effective_cflags,
+                    build_output_dir=build_output_dir,
+                )
 
-                # Copy build artifacts ONCE per config (via artifact manager)
+                # Index build artifacts ONCE per config (build already happens in artifacts dir).
                 artifact_paths: Dict[str, Optional[str]] = {}
-                if am:
-                    artifact_paths = am.copy_build_artifacts(
-                        bench_path, name, config, arts_cfg_used=arts_cfg)
+                if am and build_output_dir is not None:
+                    artifact_paths = self._index_build_artifacts(
+                        build_output_dir, arts_cfg_used=arts_cfg
+                    )
 
                 # Run multiple times per configuration
                 for run_num in range(1, runs + 1):
@@ -1239,9 +1337,14 @@ class BenchmarkRunner:
                                       has_counters=has_counters, has_perf=has_perf)
 
                         # Save effective arts.cfg and run_config.json per-run
+                        run_cfg_path = (
+                            Path(artifact_paths["arts_config"])
+                            if artifact_paths.get("arts_config")
+                            else arts_cfg
+                        )
                         am.save_run_config(
                             name, config, run_num,
-                            arts_cfg_path=arts_cfg,
+                            arts_cfg_path=run_cfg_path,
                             env_overrides=env if env else None,
                             size=size,
                             cflags=effective_cflags or None,
@@ -1998,26 +2101,38 @@ class BenchmarkRunner:
         if self.clean:
             self.clean_benchmark(name)
 
+        build_output_dir: Optional[Path] = None
+        if am:
+            # Build directly in artifacts directory to keep outputs self-contained.
+            build_output_dir = am.get_artifacts_dir(name, config)
+            build_output_dir.mkdir(parents=True, exist_ok=True)
+
         # Build ARTS version
         if phase_callback:
             phase_callback(Phase.BUILD_ARTS)
         build_arts = self.build_benchmark(
-            name, size, "arts", effective_arts_cfg, cflags, compile_args)
+            name, size, "arts", effective_arts_cfg, cflags, compile_args,
+            build_output_dir=build_output_dir,
+        )
         if partial_results is not None:
             partial_results["build_arts"] = build_arts
 
         # Build OpenMP version (single-node reference for correctness).
         if phase_callback:
             phase_callback(Phase.BUILD_OMP)
-        build_omp = self.build_benchmark(name, size, "openmp", None, cflags)
+        build_omp = self.build_benchmark(
+            name, size, "openmp", None, cflags,
+            build_output_dir=build_output_dir,
+        )
         if partial_results is not None:
             partial_results["build_omp"] = build_omp
 
-        # Copy build artifacts via artifact manager (ONCE per config)
+        # Index build artifacts (build already happens in artifacts dir).
         artifact_paths: Dict[str, Optional[str]] = {}
-        if am:
-            artifact_paths = am.copy_build_artifacts(
-                bench_path, name, config, arts_cfg_used=effective_arts_cfg)
+        if am and build_output_dir is not None:
+            artifact_paths = self._index_build_artifacts(
+                build_output_dir, arts_cfg_used=effective_arts_cfg
+            )
 
         # Setup log files
         arts_log: Optional[Path] = None
@@ -2218,9 +2333,14 @@ class BenchmarkRunner:
                           has_counters=has_counters, has_perf=has_perf)
 
             # Save effective arts.cfg and run_config.json per-run
+            run_cfg_path = (
+                Path(artifact_paths["arts_config"])
+                if artifact_paths.get("arts_config")
+                else effective_arts_cfg
+            )
             am.save_run_config(
                 name, config, run_number,
-                arts_cfg_path=effective_arts_cfg,
+                arts_cfg_path=run_cfg_path,
                 env_overrides=common_env if common_env else None,
                 size=size,
                 cflags=cflags or None,
@@ -3858,23 +3978,6 @@ def _rebuild_arts(
         raise typer.Exit(1)
     print_success("ARTS rebuild complete")
 
-
-def _current_arts_build_hash() -> str:
-    """Return the active ARTS build configuration hash used by Makefile caching."""
-    carts_dir = get_carts_dir()
-    hash_file = carts_dir / "external" / "arts" / "build" / ".arts-build-config"
-    if not hash_file.exists():
-        return "nohash"
-    try:
-        value = hash_file.read_text().strip()
-    except OSError:
-        return "nohash"
-    if not value:
-        return "nohash"
-    safe = re.sub(r"[^A-Za-z0-9]", "", value)
-    return safe[:12] if safe else "nohash"
-
-
 def _load_experiment(
     experiment: str,
     configs_dir: Path,
@@ -4937,8 +5040,17 @@ def build(
             for variant in variants:
                 progress.update(
                     task, description=f"[cyan]{bench}[/] ({variant})")
+                build_output_dir = (
+                    runner.benchmarks_dir
+                    / "build"
+                    / bench.replace("/", "_")
+                    / f"size_{size}"
+                    / f"variant_{variant}"
+                )
                 result = runner.build_benchmark(
-                    bench, size, variant, arts_config)
+                    bench, size, variant, arts_config,
+                    build_output_dir=build_output_dir,
+                )
                 status = status_symbol(result.status)
                 if result.status != Status.PASS:
                     console.print(
@@ -5121,6 +5233,18 @@ def _execute_slurm_batch(
     slurm_start_time = time.time()
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
 
+    required_slurm_cmds = ["sbatch"]
+    if not dry_run:
+        required_slurm_cmds.extend(["squeue", "sacct", "scontrol"])
+    missing_slurm_cmds = [cmd for cmd in required_slurm_cmds if shutil.which(cmd) is None]
+    if missing_slurm_cmds:
+        print_error(
+            "Missing required SLURM command(s): "
+            + ", ".join(missing_slurm_cmds)
+            + ". Run this on a SLURM login node or add SLURM tools to PATH."
+        )
+        raise typer.Exit(1)
+
     # Parse node counts from --nodes parameter
     try:
         node_counts = parse_node_spec(nodes)
@@ -5220,24 +5344,17 @@ def _execute_slurm_batch(
     if multinode_disabled and max(node_counts) > 1:
         console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
 
-    # Create directories:
-    # - build/: shared across experiments (reusable executables)
-    # - results/{timestamp}/: experiment-specific (runs, scripts, results)
+    # Create experiment directories (all artifacts stay under this experiment root).
     am = artifact_manager
     if am is None:
         am = ArtifactManager(output_dir, datetime.now().strftime("%Y%m%d_%H%M%S"))
     am.set_phase(step_name or "default")
 
-    build_dir = output_dir / "build"  # Shared, reusable
     experiment_dir = am.experiment_dir
     scripts_dir = experiment_dir / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
-    arts_build_hash = _current_arts_build_hash()
-
-    console.print(f"Build directory: {build_dir} (shared)")
     console.print(f"Experiment directory: {experiment_dir}")
-    console.print(f"ARTS build hash: {arts_build_hash}")
 
     # Handle custom counter profile (triggers ARTS rebuild)
     if profile:
@@ -5256,76 +5373,53 @@ def _execute_slurm_batch(
             raise typer.Exit(1)
         print_success("ARTS rebuild complete")
 
-    # Phase 1: Build per (benchmark, node_count) into shared build/ directory
-    # CRITICAL: ARTS executable embeds nodeCount at compile time via arts.cfg
-    # So we must build separately for each node_count
-    # Executables are REUSABLE across experiments (same binary for same benchmark+node_count)
-    import shutil
-
+    # Phase 1: Build per (benchmark, node_count) into per-step artifacts directories.
+    # ARTS executable embeds nodeCount at compile time via arts.cfg, so each node count
+    # has a distinct binary.
     num_workers = min(os.cpu_count() or 1, len(bench_list))
     console.print(f"\n[bold]Phase 1: Building benchmarks per node count ({num_workers} workers)...[/]")
 
     # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
-    # Note: build_arts_cfg is the compile-time config in build/ directory
+    # Note: build_arts_cfg is the compile-time config in artifacts/ directory.
     build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
     print_lock = threading.Lock()
 
     def _build_one_bench(bench: str) -> List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]]:
         """Build all node_count variants for one benchmark (sequential within)."""
-        safe_name = bench.replace("/", "_")
         bench_path = runner.benchmarks_dir / bench
         effective_base_config = _resolve_effective_arts_config(
             bench_path, explicit_arts_config
         )
-        config_hash = hashlib.sha1(effective_base_config.read_bytes()).hexdigest()[:8]
         src_arts, src_omp = runner.get_executable_paths(bench_path)
         results = []
-        size_variant = f"size_{size}"
-        cflags_variant = "cflags_none"
-        if cflags:
-            cflags_hash = hashlib.sha1(cflags.encode("utf-8")).hexdigest()[:8]
-            cflags_variant = f"cflags_{cflags_hash}"
-        compile_variant = "compile_none"
-        if compile_args:
-            compile_hash = hashlib.sha1(compile_args.encode("utf-8")).hexdigest()[:8]
-            compile_variant = f"compile_{compile_hash}"
 
         for node_count in node_counts:
             if node_count > 1 and bench in multinode_disabled:
                 continue
 
-            # Build directory:
-            # build/{benchmark}/arts_{H}/{size_variant}/{cflags_variant}/nodes_{N}/{T}T/{compile_variant}/
-            # Hash H ties executable cache to the active ARTS build config.
-            # size/cflags/compile_variant ensure distinct compile inputs do not reuse stale executables.
-            build_node_dir = (
-                build_dir
-                / safe_name
-                / f"arts_{arts_build_hash}"
-                / size_variant
-                / cflags_variant
-                / f"nodes_{node_count}"
-                / f"{threads}T"
-                / compile_variant
-                / f"cfg_{config_hash}"
+            bench_config = BenchmarkConfig(
+                arts_threads=threads,
+                arts_nodes=node_count,
+                omp_threads=threads,
+                launcher="slurm",
             )
+            build_node_dir = am.get_artifacts_dir(bench, bench_config)
             build_node_dir.mkdir(parents=True, exist_ok=True)
 
             dst_arts = build_node_dir / src_arts.name
-            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
+            dst_omp = build_node_dir / "build" / src_omp.name if node_count == 1 else None
             build_arts_cfg = build_node_dir / "arts.cfg"
 
-            # Skip if ARTS executable already exists (reuse from previous experiment)
+            # Skip if ARTS executable already exists in this step/config artifact directory.
             if dst_arts.exists() and build_arts_cfg.exists():
                 with print_lock:
                     console.print(f"  {bench} (nodes={node_count}, threads={threads})... [cyan]SKIP (exists)[/]")
                 if node_count == 1 and dst_omp and not dst_omp.exists():
-                    build_omp = runner.build_benchmark(
+                    runner.build_benchmark(
                         bench, size, variant="openmp",
                         cflags=cflags or "",
+                        build_output_dir=build_node_dir,
                     )
-                    if build_omp.status == Status.PASS and src_omp.exists():
-                        shutil.copy2(src_omp, dst_omp)
                 results.append(((bench, node_count), (dst_arts, dst_omp if dst_omp and dst_omp.exists() else None, build_arts_cfg)))
                 continue
 
@@ -5349,6 +5443,7 @@ def _execute_slurm_batch(
                 arts_config=build_arts_cfg,
                 cflags=cflags or "",
                 compile_args=compile_args,
+                build_output_dir=build_node_dir,
             )
 
             if build_arts.status != Status.PASS:
@@ -5357,27 +5452,25 @@ def _execute_slurm_batch(
                     if verbose:
                         console.print(f"    {build_arts.output[:200]}...")
                 continue
+            if not dst_arts.exists():
+                with print_lock:
+                    console.print(
+                        f"  {bench} (nodes={node_count}, threads={threads})... "
+                        "[red]FAILED (missing ARTS executable in artifacts dir)[/]"
+                    )
+                continue
 
-            # Copy ARTS executable and LLVM IR to build directory
-            shutil.copy2(src_arts, dst_arts)
-            for ll_file in bench_path.glob("*-arts.ll"):
-                shutil.copy2(ll_file, build_node_dir / ll_file.name)
-            metadata_file = bench_path / ".carts-metadata.json"
-            if metadata_file.exists():
-                shutil.copy2(metadata_file, build_node_dir / metadata_file.name)
-            for mlir_file in bench_path.glob("*_arts_metadata.mlir"):
-                shutil.copy2(mlir_file, build_node_dir / mlir_file.name)
-
-            # Build and copy OMP (only for node_count=1)
+            # Build OMP variant (only for node_count=1).
             dst_omp = None
             if node_count == 1:
                 build_omp = runner.build_benchmark(
                     bench, size, variant="openmp",
                     cflags=cflags or "",
+                    build_output_dir=build_node_dir,
                 )
-                if build_omp.status == Status.PASS and src_omp.exists():
-                    dst_omp = build_node_dir / src_omp.name
-                    shutil.copy2(src_omp, dst_omp)
+                cached_omp = build_node_dir / "build" / src_omp.name
+                if build_omp.status == Status.PASS and cached_omp.exists():
+                    dst_omp = cached_omp
 
             with print_lock:
                 console.print(f"  {bench} (nodes={node_count}, threads={threads})... [green]OK[/]")
@@ -5391,25 +5484,10 @@ def _execute_slurm_batch(
             for key, value in future.result():
                 build_results[key] = value
 
-    # Copy build artifacts into results for reproducibility
-    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
-        bench_config = BenchmarkConfig(
-            arts_threads=threads, arts_nodes=node_count,
-            omp_threads=threads, launcher="slurm",
-        )
-        bench_path = runner.benchmarks_dir / bench
-        am.copy_build_artifacts(
-            bench_path,
-            bench,
-            bench_config,
-            build_arts_cfg,
-            build_source_dir=build_arts_cfg.parent,
-        )
-
     # Phase 2: Generate sbatch scripts
     # Directory structure:
-    #   build/{benchmark}/arts_{H}/{size}/{cflags}/nodes_{N}/{T}T/{compile}/cfg_{C}/ <- shared, reusable build cache
-    #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/run_{R}/ <- run outputs
+    #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/artifacts/ <- build outputs
+    #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/run_{R}/   <- run outputs
     #   results/{timestamp}/scripts/*.sbatch     <- generated scripts
     console.print("\n[bold]Phase 2: Generating job scripts...[/]")
 

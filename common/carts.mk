@@ -93,7 +93,7 @@ $(LOG_DIR):
 # Run ARTS executable
 run-arts: all
 	@echo "[$(EXAMPLE_NAME)] Running ARTS..."
-	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 
 # Run OpenMP executable with OMP_WAIT_POLICY=ACTIVE for fair comparison
 # (ACTIVE makes idle OMP threads spin-wait, matching ARTS worker behavior)
@@ -174,24 +174,24 @@ extralarge-openmp:
 # Build and run both variants with size
 run-small: small
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (SMALL)..."
-	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (SMALL, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-medium: medium
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (MEDIUM)..."
-	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (MEDIUM, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-large: large
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (LARGE)..."
-	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (LARGE, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-extralarge: extralarge
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (EXTRALARGE)..."
-	$(ARTS_RUNTIME_ENV) ./$(ARTS_BINARY)
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (EXTRALARGE, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
