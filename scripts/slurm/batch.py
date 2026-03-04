@@ -976,8 +976,12 @@ def collect_results(
         result["threads"] = run_config.get("threads")
         result["nodes"] = run_config.get("nodes")
         result["run_phase"] = run_config.get("run_phase")
+        if "size" in run_config:
+            result["size"] = run_config.get("size")
         if "compile_args" in run_config:
             result["compile_args"] = run_config.get("compile_args")
+        if "cflags" in run_config:
+            result["cflags"] = run_config.get("cflags")
         if "config" in run_config and isinstance(run_config["config"], dict):
             result["config"] = run_config["config"]
 
@@ -1052,6 +1056,10 @@ def collect_results(
         run_dir: Path,
         run_config: Dict[str, Any],
     ) -> Dict[str, Any]:
+        snapshot = _collect_slurm_snapshot(status.job_id)
+        parsed = snapshot.get("scontrol", {}).get("parsed", {})
+        snapshot_nodelist = parsed.get("NodeList")
+        resolved_nodelist = status.node_list or snapshot_nodelist
         failure: Dict[str, Any] = {
             "benchmark": status.benchmark_name,
             "run_number": status.run_number,
@@ -1061,7 +1069,7 @@ def collect_results(
                 "state": status.state,
                 "exit_code": status.exit_code,
                 "elapsed": status.elapsed,
-                "nodelist": status.node_list,
+                "nodelist": resolved_nodelist,
             },
             "error": error,
             "_run_dir": str(run_dir),
@@ -1075,7 +1083,7 @@ def collect_results(
             "diagnostics": {
                 "slurm_out": _summarize_log(run_dir / "slurm.out"),
                 "slurm_err": _summarize_log(run_dir / "slurm.err"),
-                "slurm_snapshot": _collect_slurm_snapshot(status.job_id),
+                "slurm_snapshot": snapshot,
             },
         }
         _apply_run_config(failure, run_config)

@@ -5280,6 +5280,11 @@ def _execute_slurm_batch(
         config_hash = hashlib.sha1(effective_base_config.read_bytes()).hexdigest()[:8]
         src_arts, src_omp = runner.get_executable_paths(bench_path)
         results = []
+        size_variant = f"size_{size}"
+        cflags_variant = "cflags_none"
+        if cflags:
+            cflags_hash = hashlib.sha1(cflags.encode("utf-8")).hexdigest()[:8]
+            cflags_variant = f"cflags_{cflags_hash}"
         compile_variant = "compile_none"
         if compile_args:
             compile_hash = hashlib.sha1(compile_args.encode("utf-8")).hexdigest()[:8]
@@ -5290,13 +5295,15 @@ def _execute_slurm_batch(
                 continue
 
             # Build directory:
-            # build/{benchmark}/arts_{H}/nodes_{N}/{T}T/{compile_variant}/ (shared, reusable)
+            # build/{benchmark}/arts_{H}/{size_variant}/{cflags_variant}/nodes_{N}/{T}T/{compile_variant}/
             # Hash H ties executable cache to the active ARTS build config.
-            # compile_variant ensures different compile_args do not reuse stale executables.
+            # size/cflags/compile_variant ensure distinct compile inputs do not reuse stale executables.
             build_node_dir = (
                 build_dir
                 / safe_name
                 / f"arts_{arts_build_hash}"
+                / size_variant
+                / cflags_variant
                 / f"nodes_{node_count}"
                 / f"{threads}T"
                 / compile_variant
@@ -5355,6 +5362,11 @@ def _execute_slurm_batch(
             shutil.copy2(src_arts, dst_arts)
             for ll_file in bench_path.glob("*-arts.ll"):
                 shutil.copy2(ll_file, build_node_dir / ll_file.name)
+            metadata_file = bench_path / ".carts-metadata.json"
+            if metadata_file.exists():
+                shutil.copy2(metadata_file, build_node_dir / metadata_file.name)
+            for mlir_file in bench_path.glob("*_arts_metadata.mlir"):
+                shutil.copy2(mlir_file, build_node_dir / mlir_file.name)
 
             # Build and copy OMP (only for node_count=1)
             dst_omp = None
@@ -5386,11 +5398,17 @@ def _execute_slurm_batch(
             omp_threads=threads, launcher="slurm",
         )
         bench_path = runner.benchmarks_dir / bench
-        am.copy_build_artifacts(bench_path, bench, bench_config, build_arts_cfg)
+        am.copy_build_artifacts(
+            bench_path,
+            bench,
+            bench_config,
+            build_arts_cfg,
+            build_source_dir=build_arts_cfg.parent,
+        )
 
     # Phase 2: Generate sbatch scripts
     # Directory structure:
-    #   build/{benchmark}/nodes_{N}/{T}T/       <- shared, reusable build cache
+    #   build/{benchmark}/arts_{H}/{size}/{cflags}/nodes_{N}/{T}T/{compile}/cfg_{C}/ <- shared, reusable build cache
     #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/run_{R}/ <- run outputs
     #   results/{timestamp}/scripts/*.sbatch     <- generated scripts
     console.print("\n[bold]Phase 2: Generating job scripts...[/]")

@@ -165,15 +165,21 @@ class ArtifactManager:
         benchmark_name: str,
         config: BenchmarkConfig,
         arts_cfg_used: Optional[Path] = None,
+        build_source_dir: Optional[Path] = None,
     ) -> Dict[str, Optional[str]]:
         """Copy build artifacts into the experiment's ``artifacts/`` directory."""
         artifacts_dir = self.get_artifacts_dir(benchmark_name, config)
         paths: Dict[str, Optional[str]] = {}
+        source_dir = (
+            build_source_dir
+            if build_source_dir is not None and build_source_dir.exists()
+            else bench_path
+        )
 
         # arts.cfg (build INPUT)
         cfg_src = (
             arts_cfg_used if arts_cfg_used and arts_cfg_used.exists()
-            else (bench_path / "arts.cfg")
+            else (source_dir / "arts.cfg")
         )
         if cfg_src.exists():
             dest = artifacts_dir / "arts.cfg"
@@ -181,35 +187,35 @@ class ArtifactManager:
             paths["arts_config"] = str(dest)
 
         # .carts-metadata.json (compiler metadata)
-        metadata = bench_path / ".carts-metadata.json"
+        metadata = source_dir / ".carts-metadata.json"
         if metadata.exists():
             dest = artifacts_dir / ".carts-metadata.json"
             shutil.copy2(metadata, dest)
             paths["carts_metadata"] = str(dest)
 
         # *_arts_metadata.mlir
-        for mlir in bench_path.glob("*_arts_metadata.mlir"):
+        for mlir in source_dir.glob("*_arts_metadata.mlir"):
             dest = artifacts_dir / mlir.name
             shutil.copy2(mlir, dest)
             paths["arts_metadata_mlir"] = str(dest)
 
         # Other MLIR files
-        for mlir in bench_path.glob("*.mlir"):
+        for mlir in source_dir.glob("*.mlir"):
             if "_metadata" not in mlir.name:
                 shutil.copy2(mlir, artifacts_dir / mlir.name)
 
         # LLVM IR
-        for ll in bench_path.glob("*-arts.ll"):
+        for ll in source_dir.glob("*-arts.ll"):
             shutil.copy2(ll, artifacts_dir / ll.name)
 
         # Executables
-        for exe in bench_path.glob("*_arts"):
+        for exe in source_dir.glob("*_arts"):
             if exe.is_file():
                 dest = artifacts_dir / exe.name
                 shutil.copy2(exe, dest)
                 paths["executable_arts"] = str(dest)
-        for exe in list(bench_path.glob("*_omp")) + list(
-            (bench_path / "build").glob("*_omp")
+        for exe in list(source_dir.glob("*_omp")) + list(
+            (source_dir / "build").glob("*_omp")
         ):
             if exe.is_file():
                 dest = artifacts_dir / exe.name
@@ -217,7 +223,9 @@ class ArtifactManager:
                 paths["executable_omp"] = str(dest)
 
         # Build logs
-        logs_dir = bench_path / "logs"
+        logs_dir = source_dir / "logs"
+        if not logs_dir.exists():
+            logs_dir = bench_path / "logs"
         if logs_dir.exists():
             for log in ["build_arts.log", "build_openmp.log"]:
                 log_file = logs_dir / log

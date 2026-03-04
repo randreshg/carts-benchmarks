@@ -5,6 +5,7 @@
     {
       "name": "thread-sweep",
       "benchmarks": ["polybench/gemm"],
+      "size": "large",
       "threads": "1,2,4,8,16,32,64",
       "nodes": "1",
       "debug": 0,
@@ -14,32 +15,35 @@
     {
       "name": "counters",
       "benchmarks": ["polybench/gemm"],
+      "size": "large",
       "threads": "64",
       "nodes": "1",
       "debug": 0,
       "runs": 1,
       "perf": false,
-      "profile": "profile-workload.cfg"
+      "profile": "profile-thread-edt.cfg"
     },
     {
       "name": "node-sweep-baseline",
       "benchmarks": ["polybench/gemm"],
+      "size": "large",
       "threads": "64",
       "nodes": "2,4,8,16,32",
       "debug": 0,
       "runs": 1,
       "perf": false,
-      "profile": "profile-workload.cfg"
+      "profile": "profile-overhead.cfg"
     },
     {
       "name": "node-sweep-distributed-db",
       "benchmarks": ["polybench/gemm"],
+      "size": "large",
       "threads": "64",
       "nodes": "2,4,8,16,32",
       "debug": 0,
       "runs": 1,
       "perf": false,
-      "profile": "profile-workload.cfg",
+      "profile": "profile-overhead.cfg",
       "compile_args": "--distributed-db"
     }
   ]
