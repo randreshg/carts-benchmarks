@@ -816,9 +816,12 @@ class BenchmarkRunner:
     def get_executable_paths(self, bench_path: Path) -> Tuple[Path, Path]:
         """Get the ARTS and OpenMP executable paths for a benchmark.
 
-        Based on carts.mk:
+        Based on carts.mk defaults:
             ARTS_BINARY := $(EXAMPLE_NAME)_arts       # in benchmark root
             OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp  # in build/
+
+        Note: artifact-managed builds may override OMP_BINARY to place
+        executable directly in artifacts/ (no nested build/).
 
         Args:
             bench_path: Path to the benchmark directory
@@ -887,13 +890,14 @@ class BenchmarkRunner:
         carts_exe = self.carts_dir / "tools" / "carts"
         arts_exe_default, omp_exe_default = self.get_executable_paths(bench_path)
         output_root = build_output_dir.resolve() if build_output_dir else bench_path
-        build_dir_override = output_root / "build"
+        # Keep build outputs flat under the selected output root.
+        build_dir_override = output_root
         logs_dir_override = output_root / "logs"
         output_root.mkdir(parents=True, exist_ok=True)
         build_dir_override.mkdir(parents=True, exist_ok=True)
         logs_dir_override.mkdir(parents=True, exist_ok=True)
         arts_output_path = output_root / arts_exe_default.name
-        omp_output_path = build_dir_override / omp_exe_default.name
+        omp_output_path = output_root / omp_exe_default.name
 
         env_overrides: Dict[str, str] = {}
         effective_arts_config = arts_config
@@ -1077,8 +1081,6 @@ class BenchmarkRunner:
             paths["executable_arts"] = str(arts_bins[0].resolve())
 
         omp_bins = [p for p in sorted(artifacts_dir.glob("*_omp")) if p.is_file()]
-        if not omp_bins:
-            omp_bins = [p for p in sorted((artifacts_dir / "build").glob("*_omp")) if p.is_file()]
         if omp_bins:
             paths["executable_omp"] = str(omp_bins[0].resolve())
 
@@ -2203,7 +2205,7 @@ class BenchmarkRunner:
                 perf_output_dir=perf_output_dir,
                 counter_dir=run_counter_dir,
             )
-            # Append temp perf data to main CSV (legacy path, not used with artifact_manager)
+            # Append temp perf data to main CSV (non-artifact-manager mode).
             if perf_enabled and arts_perf_temp and arts_perf_main:
                 append_perf_to_main_csv(arts_perf_temp, arts_perf_main, run_number)
         else:
@@ -2240,7 +2242,7 @@ class BenchmarkRunner:
                 perf_output_name=omp_perf_name or "perf_cache_omp.csv",
                 perf_output_dir=perf_output_dir,
             )
-            # Append temp perf data to main CSV (legacy path)
+            # Append temp perf data to main CSV (non-artifact-manager mode).
             if perf_enabled and omp_perf_temp and omp_perf_main:
                 append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
         else:
@@ -5407,7 +5409,7 @@ def _execute_slurm_batch(
             build_node_dir.mkdir(parents=True, exist_ok=True)
 
             dst_arts = build_node_dir / src_arts.name
-            dst_omp = build_node_dir / "build" / src_omp.name if node_count == 1 else None
+            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
             build_arts_cfg = build_node_dir / "arts.cfg"
 
             # Skip if ARTS executable already exists in this step/config artifact directory.
@@ -5468,7 +5470,7 @@ def _execute_slurm_batch(
                     cflags=cflags or "",
                     build_output_dir=build_node_dir,
                 )
-                cached_omp = build_node_dir / "build" / src_omp.name
+                cached_omp = build_node_dir / src_omp.name
                 if build_omp.status == Status.PASS and cached_omp.exists():
                     dst_omp = cached_omp
 
@@ -5540,9 +5542,9 @@ def _execute_slurm_batch(
                 time_limit=time_limit,
                 partition=partition,
                 account=account,
-                executable_arts=arts_exe,           # From build/ (shared)
-                executable_omp=omp_exe,             # From build/ (shared)
-                arts_config_path=build_arts_cfg,    # From build/ (template for runtime cfg)
+                executable_arts=arts_exe,           # From artifacts/ (shared per config)
+                executable_omp=omp_exe,             # From artifacts/ (single-node only)
+                arts_config_path=build_arts_cfg,    # From artifacts/ (template for runtime cfg)
                 run_dir=run_dir,
                 size=size,
                 threads=threads,

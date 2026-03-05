@@ -985,6 +985,34 @@ def collect_results(
         if "config" in run_config and isinstance(run_config["config"], dict):
             result["config"] = run_config["config"]
 
+    def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, Any]) -> None:
+        """Attach compile-time artifact locations from run_config when available."""
+        if not run_config:
+            return
+
+        arts_cfg_source = run_config.get("arts_cfg_source")
+        if not arts_cfg_source:
+            return
+
+        try:
+            arts_cfg_path = Path(str(arts_cfg_source)).resolve()
+        except Exception:
+            return
+
+        artifacts = result.setdefault("artifacts", {})
+        artifacts.setdefault("arts_config", str(arts_cfg_path))
+        artifacts.setdefault("build_dir", str(arts_cfg_path.parent))
+
+        benchmark_name = str(run_config.get("benchmark") or "")
+        example_name = benchmark_name.split("/")[-1] if benchmark_name else ""
+        if example_name:
+            arts_exe = arts_cfg_path.parent / f"{example_name}_arts"
+            omp_exe = arts_cfg_path.parent / f"{example_name}_omp"
+            if arts_exe.exists():
+                artifacts.setdefault("executable_arts", str(arts_exe))
+            if omp_exe.exists():
+                artifacts.setdefault("executable_omp", str(omp_exe))
+
     def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
         summary: Dict[str, Any] = {
             "path": str(log_path),
@@ -1060,10 +1088,17 @@ def collect_results(
         parsed = snapshot.get("scontrol", {}).get("parsed", {})
         snapshot_nodelist = parsed.get("NodeList")
         resolved_nodelist = status.node_list or snapshot_nodelist
+        result_status = "TIMEOUT" if status.state == "TIMEOUT" else "FAIL"
+        failure_error = error
+        if status.state == "TIMEOUT" and error.startswith("No result.json found"):
+            failure_error = (
+                f"SLURM job timed out before result.json was written: {run_dir} "
+                "(increase --time-limit or reduce workload)."
+            )
         failure: Dict[str, Any] = {
             "benchmark": status.benchmark_name,
             "run_number": status.run_number,
-            "status": "FAIL",
+            "status": result_status,
             "slurm": {
                 "job_id": status.job_id,
                 "state": status.state,
@@ -1071,7 +1106,7 @@ def collect_results(
                 "elapsed": status.elapsed,
                 "nodelist": resolved_nodelist,
             },
-            "error": error,
+            "error": failure_error,
             "_run_dir": str(run_dir),
             "artifacts": {
                 "run_dir": str(run_dir),
@@ -1087,6 +1122,7 @@ def collect_results(
             },
         }
         _apply_run_config(failure, run_config)
+        _apply_compile_artifact_paths(failure, run_config)
         warning_reasons = _runtime_warning_reasons(failure.get("diagnostics"))
         if warning_reasons:
             failure.setdefault("diagnostics", {})["runtime_warning"] = {
@@ -1143,6 +1179,7 @@ def collect_results(
                     "slurm_out": str(status.run_dir / "slurm.out"),
                     "slurm_err": str(status.run_dir / "slurm.err"),
                 })
+                _apply_compile_artifact_paths(result, run_config)
                 warning_reasons = _runtime_warning_reasons(result.get("diagnostics"))
                 if warning_reasons:
                     diagnostics = result.setdefault("diagnostics", {})
