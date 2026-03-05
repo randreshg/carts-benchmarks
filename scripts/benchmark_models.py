@@ -159,6 +159,21 @@ class VerificationResult:
     omp_checksum: Optional[str]
     tolerance_used: float
     note: str
+    reference_checksum: Optional[str] = None
+    reference_source: Optional[str] = None
+
+
+@dataclass
+class ReferenceChecksum:
+    """Trusted checksum reference for a benchmark input configuration."""
+    status: Status
+    checksum: Optional[str]
+    omp_threads: int
+    note: str
+    source: str
+    executable_omp: Optional[str] = None
+    log_path: Optional[str] = None
+    run_dir: Optional[str] = None
 
 
 @dataclass

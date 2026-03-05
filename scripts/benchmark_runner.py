@@ -99,7 +99,7 @@ from benchmark_common import (
 from benchmark_models import (
     Status, Phase,
     BuildResult, WorkerTiming, ParallelTaskTiming, PerfCacheMetrics,
-    RunResult, TimingResult, VerificationResult, ExperimentStep,
+    RunResult, TimingResult, VerificationResult, ReferenceChecksum, ExperimentStep,
     Artifacts, BenchmarkConfig, BenchmarkResult,
 )
 
@@ -211,6 +211,15 @@ def parse_size(value: str, field_name: str = "size") -> str:
             f"Invalid {field_name}: '{value}'. Supported sizes: {allowed}"
         )
     return normalized
+
+
+def parse_slurm_time_limit_seconds(value: str) -> int:
+    """Convert a SLURM HH:MM:SS time limit into seconds."""
+    parts = [part.strip() for part in str(value).split(":")]
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise ValueError(f"Invalid SLURM time limit: {value}")
+    hours, minutes, seconds = (int(part) for part in parts)
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def normalize_requested_benchmarks(
@@ -569,6 +578,94 @@ def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
     return _shared_parse_arts_cfg(path)
 
 
+_EMBEDDED_ARTS_CFG_KEYS = (
+    "threads",
+    "incoming",
+    "outgoing",
+    "nodeCount",
+    "launcher",
+    "protocol",
+    "port",
+    "counterFolder",
+)
+
+
+def _read_text_lossy(path: Path) -> str:
+    """Read a text or binary artifact into a string for inspection."""
+    try:
+        return path.read_text(errors="replace")
+    except Exception:
+        try:
+            return path.read_bytes().decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+
+def _extract_embedded_arts_cfg(artifacts_dir: Path) -> Dict[str, str]:
+    """Extract embedded ARTS config values from LLVM IR or executable output."""
+    candidates = sorted(artifacts_dir.glob("*-arts.ll"))
+    if not candidates:
+        candidates = sorted(artifacts_dir.glob("*_arts"))
+
+    for candidate in candidates:
+        text = _read_text_lossy(candidate)
+        if not text:
+            continue
+
+        embedded: Dict[str, str] = {}
+        for key in _EMBEDDED_ARTS_CFG_KEYS:
+            match = re.search(
+                rf"{re.escape(key)}=(.*?)(?:\\0A|\x00|\r|\n|\")",
+                text,
+            )
+            if match:
+                embedded[key] = match.group(1)
+        if embedded:
+            return embedded
+
+    return {}
+
+
+def _validate_embedded_arts_cfg(
+    artifacts_dir: Path,
+    expected_cfg: Optional[Path],
+) -> Optional[str]:
+    """Return an error string if the built artifact embeds the wrong config."""
+    if expected_cfg is None or not expected_cfg.exists():
+        return None
+
+    expected = parse_arts_cfg(expected_cfg)
+    if not expected:
+        return f"Failed to parse expected arts.cfg: {expected_cfg}"
+
+    embedded = _extract_embedded_arts_cfg(artifacts_dir)
+    if not embedded:
+        return (
+            "Failed to inspect generated ARTS artifact for embedded config "
+            f"in {artifacts_dir}"
+        )
+
+    mismatches: List[str] = []
+    for key in _EMBEDDED_ARTS_CFG_KEYS:
+        expected_value = expected.get(key)
+        if expected_value is None:
+            continue
+        embedded_value = embedded.get(key)
+        if embedded_value != expected_value:
+            mismatches.append(
+                f"{key}: expected '{expected_value}', embedded '{embedded_value}'"
+            )
+
+    if not mismatches:
+        return None
+
+    return (
+        "Generated ARTS artifact embeds a different config than the compile-time "
+        f"arts.cfg. cfg={expected_cfg}, artifacts={artifacts_dir}. "
+        + "; ".join(mismatches)
+    )
+
+
 def get_arts_cfg_int(path: Optional[Path], key: str) -> Optional[int]:
     vals = parse_arts_cfg(path)
     if key not in vals:
@@ -671,6 +768,147 @@ class BenchmarkRunner:
         self.carts_dir = get_carts_dir()
         self.benchmarks_dir = get_benchmarks_dir()
         self.results: List[BenchmarkResult] = []
+        self._reference_cache: Dict[Tuple[str, str, str, int], ReferenceChecksum] = {}
+
+    def _reference_cache_key(
+        self,
+        name: str,
+        size: str,
+        cflags: str,
+        omp_threads: int,
+    ) -> Tuple[str, str, str, int]:
+        return (name, size, cflags.strip(), omp_threads)
+
+    def ensure_omp_reference(
+        self,
+        name: str,
+        size: str,
+        cflags: str,
+        omp_threads: int,
+        timeout: int,
+    ) -> ReferenceChecksum:
+        """Build and run a stored OpenMP reference for multi-node checksum verification."""
+        key = self._reference_cache_key(name, size, cflags, omp_threads)
+        cached = self._reference_cache.get(key)
+        if cached is not None:
+            return cached
+
+        am = self.artifact_manager
+        if am is not None:
+            persisted = am.load_reference_result(name, size, omp_threads, cflags)
+            if persisted:
+                try:
+                    reference = ReferenceChecksum(
+                        status=Status(str(persisted.get("status", Status.FAIL))),
+                        checksum=(
+                            str(persisted["checksum"])
+                            if persisted.get("checksum") is not None
+                            else None
+                        ),
+                        omp_threads=int(persisted.get("omp_threads", omp_threads)),
+                        note=str(persisted.get("note", "")),
+                        source=str(persisted.get("source", "")),
+                        executable_omp=(
+                            str(persisted["executable_omp"])
+                            if persisted.get("executable_omp") is not None
+                            else None
+                        ),
+                        log_path=(
+                            str(persisted["log_path"])
+                            if persisted.get("log_path") is not None
+                            else None
+                        ),
+                        run_dir=(
+                            str(persisted["run_dir"])
+                            if persisted.get("run_dir") is not None
+                            else None
+                        ),
+                    )
+                    self._reference_cache[key] = reference
+                    return reference
+                except Exception:
+                    pass
+
+        bench_path = self.benchmarks_dir / name
+        run_args = self.get_run_args(bench_path, size)
+
+        reference_artifacts_dir: Optional[Path] = None
+        reference_run_dir: Optional[Path] = None
+        reference_log: Optional[Path] = None
+        reference_source = "multinode_omp_reference"
+        if am is not None:
+            reference_artifacts_dir = am.get_reference_artifacts_dir(
+                name, size, omp_threads, cflags
+            )
+            reference_run_dir = am.get_reference_run_dir(
+                name, size, omp_threads, cflags
+            )
+            reference_log = reference_run_dir / "omp_reference.log"
+            reference_source = str(reference_run_dir / "reference.json")
+        else:
+            tmp_root = Path(tempfile.mkdtemp(prefix="carts_bench_reference_"))
+            reference_artifacts_dir = tmp_root / "artifacts"
+            reference_run_dir = tmp_root / "run_1"
+            reference_artifacts_dir.mkdir(parents=True, exist_ok=True)
+            reference_run_dir.mkdir(parents=True, exist_ok=True)
+            reference_log = reference_run_dir / "omp_reference.log"
+
+        build_omp = self.build_benchmark(
+            name,
+            size,
+            variant="openmp",
+            cflags=cflags,
+            build_output_dir=reference_artifacts_dir,
+        )
+        if build_omp.status != Status.PASS or not build_omp.executable:
+            reference = ReferenceChecksum(
+                status=Status.FAIL,
+                checksum=None,
+                omp_threads=omp_threads,
+                note="Failed to build multi-node OpenMP reference",
+                source=reference_source,
+                executable_omp=build_omp.executable,
+                log_path=str(reference_log) if reference_log else None,
+                run_dir=str(reference_run_dir) if reference_run_dir else None,
+            )
+        else:
+            reference_env = {
+                "OMP_NUM_THREADS": str(omp_threads),
+                "OMP_WAIT_POLICY": "ACTIVE",
+                "CARTS_BENCHMARKS_REPORT_INIT": "1",
+            }
+            run_omp = self.run_benchmark(
+                build_omp.executable,
+                timeout,
+                env=reference_env,
+                args=run_args,
+                log_file=reference_log,
+            )
+            if run_omp.status == Status.PASS and run_omp.checksum is not None:
+                note = "Stored multi-node OpenMP reference checksum captured"
+                ref_status = Status.PASS
+            elif run_omp.status == Status.PASS:
+                note = "Stored multi-node OpenMP reference completed without checksum"
+                ref_status = Status.FAIL
+            else:
+                note = f"Stored multi-node OpenMP reference failed ({run_omp.status.value})"
+                ref_status = run_omp.status
+            reference = ReferenceChecksum(
+                status=ref_status,
+                checksum=run_omp.checksum,
+                omp_threads=omp_threads,
+                note=note,
+                source=reference_source,
+                executable_omp=build_omp.executable,
+                log_path=str(reference_log) if reference_log else None,
+                run_dir=str(reference_run_dir) if reference_run_dir else None,
+            )
+
+        if am is not None:
+            am.save_reference_result(name, size, omp_threads, cflags, asdict(reference))
+
+        self._reference_cache[key] = reference
+        return reference
 
     def discover_benchmarks(self, suite: Optional[str] = None) -> List[str]:
         """Find all benchmarks by looking for Makefiles with source files."""
@@ -994,6 +1232,22 @@ class BenchmarkRunner:
                     executable = str(expected_exe)
                 else:
                     executable = self._find_executable(bench_path, variant)
+                if variant != "openmp":
+                    config_error = _validate_embedded_arts_cfg(
+                        output_root, effective_arts_config
+                    )
+                    if config_error is not None:
+                        combined_output = (result.stdout + result.stderr).strip()
+                        output = (
+                            f"{combined_output}\n{config_error}".strip()
+                            if combined_output
+                            else config_error
+                        )
+                        return BuildResult(
+                            status=Status.FAIL,
+                            duration_sec=duration,
+                            output=output,
+                        )
                 return BuildResult(
                     status=Status.PASS,
                     duration_sec=duration,
@@ -2185,8 +2439,9 @@ class BenchmarkRunner:
         # Clean up stale ARTS port before run
         self._cleanup_port()
 
-        # Run ARTS version (config is embedded at compile time;
-        # counter_dir overrides embedded counterFolder via env var)
+        # Run ARTS version. Modern CARTS binaries embed the compile-time
+        # arts.cfg directly; the run-specific cfg we save alongside the run is
+        # for traceability and path-based fallback binaries.
         if phase_callback:
             phase_callback(Phase.RUN_ARTS)
         if build_arts.status == Status.PASS and build_arts.executable:
@@ -4300,6 +4555,7 @@ def _run_step_slurm(
     size: str,
     node_counts: List[int],
     runs: int,
+    verify: bool,
     partition: Optional[str],
     time_limit: str,
     arts_config: Optional[Path],
@@ -4327,6 +4583,7 @@ def _run_step_slurm(
             nodes=nodes_arg,
             size=size,
             runs=runs,
+            verify=verify,
             partition=partition,
             time_limit=time_limit,
             account=None,
@@ -4695,6 +4952,7 @@ def run(
                     size=step_size,
                     node_counts=step_node_counts,
                     runs=step_runs,
+                    verify=verify,
                     partition=partition,
                     time_limit=time_limit,
                     arts_config=step_arts_config,
@@ -5154,6 +5412,7 @@ def _execute_slurm_batch(
         help=SIZE_HELP),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of runs per benchmark"),
+    verify: bool = True,
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p",
         help="SLURM partition (uses cluster default if not specified)"),
@@ -5351,6 +5610,7 @@ def _execute_slurm_batch(
     if am is None:
         am = ArtifactManager(output_dir, datetime.now().strftime("%Y%m%d_%H%M%S"))
     am.set_phase(step_name or "default")
+    runner.artifact_manager = am
 
     experiment_dir = am.experiment_dir
     scripts_dir = experiment_dir / "scripts"
@@ -5384,6 +5644,7 @@ def _execute_slurm_batch(
     # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
     # Note: build_arts_cfg is the compile-time config in artifacts/ directory.
     build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
+    reference_checksums: Dict[str, ReferenceChecksum] = {}
     print_lock = threading.Lock()
 
     def _build_one_bench(bench: str) -> List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]]:
@@ -5394,6 +5655,30 @@ def _execute_slurm_batch(
         )
         src_arts, src_omp = runner.get_executable_paths(bench_path)
         results = []
+
+        needs_multinode_reference = verify and any(
+            node_count > 1 and bench not in multinode_disabled
+            for node_count in node_counts
+        )
+        if needs_multinode_reference:
+            reference_timeout = parse_slurm_time_limit_seconds(time_limit)
+            reference = runner.ensure_omp_reference(
+                bench,
+                size,
+                cflags or "",
+                threads,
+                timeout=reference_timeout,
+            )
+            if reference.status != Status.PASS or reference.checksum is None:
+                raise RuntimeError(
+                    f"Failed to establish OpenMP reference for {bench}: {reference.note}"
+                )
+            with print_lock:
+                console.print(
+                    f"  {bench} multinode reference checksum... [green]OK[/] "
+                    f"[dim]({reference.checksum}, {threads} OMP threads)[/]"
+                )
+            reference_checksums[bench] = reference
 
         for node_count in node_counts:
             if node_count > 1 and bench in multinode_disabled:
@@ -5528,6 +5813,21 @@ def _execute_slurm_batch(
                 cflags=cflags,
                 compile_args=compile_args,
                 run_phase=step_name or "default",
+                reference_checksum=(
+                    reference_checksums.get(bench).checksum
+                    if verify and node_count > 1 and bench in reference_checksums
+                    else None
+                ),
+                reference_source=(
+                    reference_checksums.get(bench).source
+                    if verify and node_count > 1 and bench in reference_checksums
+                    else None
+                ),
+                reference_threads=(
+                    reference_checksums.get(bench).omp_threads
+                    if verify and node_count > 1 and bench in reference_checksums
+                    else None
+                ),
             )
             am.record_run(
                 bench, bench_config, run_num,

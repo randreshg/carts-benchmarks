@@ -85,6 +85,7 @@ def determine_status(
     omp_exit: int,
     arts_checksum: Optional[str],
     omp_checksum: Optional[str],
+    reference_checksum: Optional[str] = None,
     tolerance: float = 0.01,
 ) -> Tuple[str, str]:
     """Determine overall status and verification result.
@@ -103,10 +104,23 @@ def determine_status(
     if arts_exit != 0:
         return "FAIL", f"ARTS exited with code {arts_exit}"
 
-    # If OMP was skipped, just check ARTS ran successfully
+    # If OMP was skipped, compare against a stored multi-node reference checksum
+    # when available.
     if omp_exit == -1:
+        if arts_checksum and reference_checksum:
+            try:
+                arts_val = float(arts_checksum)
+                ref_val = float(reference_checksum)
+
+                if abs(arts_val - ref_val) / max(abs(ref_val), 1e-10) <= tolerance:
+                    return "PASS", f"Checksum matches stored OMP reference within {tolerance*100:.1f}% tolerance"
+                return "FAIL", f"Checksum mismatch: ARTS={arts_checksum}, stored OMP reference={reference_checksum}"
+            except ValueError:
+                if arts_checksum == reference_checksum:
+                    return "PASS", "Checksum matches stored OMP reference exactly"
+                return "FAIL", f"Checksum mismatch: ARTS={arts_checksum}, stored OMP reference={reference_checksum}"
         if arts_checksum:
-            return "PASS", "ARTS completed (OpenMP skipped for multi-node)"
+            return "PASS", "ARTS completed (OpenMP skipped; no stored OMP reference checksum)"
         else:
             return "PASS", "ARTS completed, no checksum found"
 
@@ -216,6 +230,22 @@ def generate_result(
     Returns:
         Result dictionary
     """
+    run_config: Dict[str, Any] = {}
+    run_config_file = output_dir / "run_config.json"
+    if run_config_file.exists():
+        try:
+            payload = json.loads(run_config_file.read_text())
+            if isinstance(payload, dict):
+                run_config = payload
+        except Exception:
+            run_config = {}
+
+    reference_payload = run_config.get("reference")
+    if not isinstance(reference_payload, dict):
+        reference_payload = {}
+    reference_checksum = reference_payload.get("checksum")
+    reference_source = reference_payload.get("source")
+
     # Read SLURM output for parsing
     stdout, stderr = read_slurm_output(output_dir, slurm_job_id)
 
@@ -253,7 +283,13 @@ def generate_result(
 
     # Determine status
     status, verification_note = determine_status(
-        arts_exit, omp_exit, arts_checksum, omp_checksum
+        arts_exit,
+        omp_exit,
+        arts_checksum,
+        omp_checksum,
+        reference_checksum=(
+            str(reference_checksum) if reference_checksum is not None else None
+        ),
     )
     diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != "PASS"))
 
@@ -268,6 +304,12 @@ def generate_result(
             "note": verification_note,
             "arts_checksum": arts_checksum,
             "omp_checksum": omp_checksum,
+            "reference_checksum": (
+                str(reference_checksum) if reference_checksum is not None else None
+            ),
+            "reference_source": (
+                str(reference_source) if reference_source is not None else None
+            ),
         },
         "arts": {
             "exit_code": arts_exit,

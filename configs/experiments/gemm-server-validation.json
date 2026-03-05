@@ -1,0 +1,37 @@
+{
+  "name": "gemm-server-validation",
+  "description": "Server validation for GEMM extralarge: direct single-node ARTS vs OMP, then multi-node baseline vs distributed-db.",
+  "steps": [
+    {
+      "name": "n1-direct",
+      "benchmarks": ["polybench/gemm"],
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "1",
+      "debug": 0,
+      "runs": 1,
+      "perf": false
+    },
+    {
+      "name": "multinode-baseline",
+      "benchmarks": ["polybench/gemm"],
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "2,4,8,16,32",
+      "debug": 0,
+      "runs": 1,
+      "perf": false
+    },
+    {
+      "name": "multinode-distributed-db",
+      "benchmarks": ["polybench/gemm"],
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "2,4,8,16,32",
+      "debug": 0,
+      "runs": 1,
+      "perf": false,
+      "compile_args": "--distributed-db"
+    }
+  ]
+}

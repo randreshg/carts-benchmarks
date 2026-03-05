@@ -292,7 +292,10 @@ def generate_sbatch_script(
             omp_run_command=omp_run_command,
         )
     elif config.node_count > 1:
-        omp_section = '# OpenMP skipped (multi-node run - not a fair comparison)'
+        omp_section = (
+            '# OpenMP skipped (multi-node run - verification uses the stored '
+            'matching OMP reference when available)'
+        )
     else:
         omp_section = '# OpenMP skipped (executable not specified)'
 
@@ -984,6 +987,13 @@ def collect_results(
             result["cflags"] = run_config.get("cflags")
         if "config" in run_config and isinstance(run_config["config"], dict):
             result["config"] = run_config["config"]
+        if "reference" in run_config and isinstance(run_config["reference"], dict):
+            verification = result.setdefault("verification", {})
+            reference = run_config["reference"]
+            if "checksum" in reference:
+                verification.setdefault("reference_checksum", reference.get("checksum"))
+            if "source" in reference:
+                verification.setdefault("reference_source", reference.get("source"))
 
     def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, Any]) -> None:
         """Attach compile-time artifact locations from run_config when available."""

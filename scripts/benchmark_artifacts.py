@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from benchmark_models import BenchmarkConfig, BenchmarkResult, Status
 from benchmark_metadata import get_reproducibility_metadata
@@ -96,6 +97,85 @@ class ArtifactManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _reference_key_token(
+        self,
+        size: str,
+        omp_threads: int,
+        cflags: Optional[str],
+    ) -> str:
+        cflags_token = hashlib.sha1((cflags or "").encode()).hexdigest()[:8]
+        return f"size_{size}/{omp_threads}t_{cflags_token}"
+
+    def get_reference_root(
+        self,
+        benchmark_name: str,
+        size: str,
+        omp_threads: int,
+        cflags: Optional[str] = None,
+    ) -> Path:
+        d = (
+            self.experiment_dir
+            / "references"
+            / Path(benchmark_name)
+            / self._reference_key_token(size, omp_threads, cflags)
+        )
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def get_reference_artifacts_dir(
+        self,
+        benchmark_name: str,
+        size: str,
+        omp_threads: int,
+        cflags: Optional[str] = None,
+    ) -> Path:
+        d = self.get_reference_root(benchmark_name, size, omp_threads, cflags) / "artifacts"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def get_reference_run_dir(
+        self,
+        benchmark_name: str,
+        size: str,
+        omp_threads: int,
+        cflags: Optional[str] = None,
+    ) -> Path:
+        d = self.get_reference_root(benchmark_name, size, omp_threads, cflags) / "run_1"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def load_reference_result(
+        self,
+        benchmark_name: str,
+        size: str,
+        omp_threads: int,
+        cflags: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        ref_file = self.get_reference_root(
+            benchmark_name, size, omp_threads, cflags
+        ) / "reference.json"
+        if not ref_file.exists():
+            return None
+        try:
+            payload = json.loads(ref_file.read_text())
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None
+
+    def save_reference_result(
+        self,
+        benchmark_name: str,
+        size: str,
+        omp_threads: int,
+        cflags: Optional[str],
+        payload: Dict[str, Any],
+    ) -> Path:
+        ref_dir = self.get_reference_root(benchmark_name, size, omp_threads, cflags)
+        ref_file = ref_dir / "reference.json"
+        with open(ref_file, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        return ref_file
+
     def save_run_config(
         self,
         benchmark_name: str,
@@ -109,6 +189,9 @@ class ArtifactManager:
         cflags: Optional[str] = None,
         compile_args: Optional[str] = None,
         run_phase: Optional[str] = None,
+        reference_checksum: Optional[str] = None,
+        reference_source: Optional[str] = None,
+        reference_threads: Optional[int] = None,
     ) -> Path:
         """Save the effective arts.cfg and a run_config.json into the run directory.
 
@@ -149,6 +232,19 @@ class ArtifactManager:
             run_config["env_overrides"] = env_overrides
         if arts_cfg_path:
             run_config["arts_cfg_source"] = str(arts_cfg_path)
+        if (
+            reference_checksum is not None
+            or reference_source is not None
+            or reference_threads is not None
+        ):
+            reference: Dict[str, object] = {}
+            if reference_checksum is not None:
+                reference["checksum"] = reference_checksum
+            if reference_source is not None:
+                reference["source"] = reference_source
+            if reference_threads is not None:
+                reference["omp_threads"] = reference_threads
+            run_config["reference"] = reference
         run_config["timestamp"] = datetime.now().isoformat()
 
         config_path = run_dir / "run_config.json"

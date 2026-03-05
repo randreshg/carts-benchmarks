@@ -423,6 +423,12 @@ context — everything needed to reproduce that specific run:
 
 6. **Compiler metadata**: `.carts-metadata.json` contains loop and memory reference analysis from the CARTS compiler.
 
+### Verification Behavior
+
+- `nodes=1`: the runner executes both ARTS and OpenMP and verifies checksums directly.
+- `nodes>1` with `--slurm`: the job skips OpenMP execution and verifies ARTS against one stored OpenMP reference built for the same benchmark, size, and `cflags`.
+- The stored reference is only used for multi-node verification; single-node runs always compare against the OpenMP run from that same configuration.
+
 ### Custom Results Directory
 
 ```bash
