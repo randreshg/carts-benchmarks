@@ -660,7 +660,7 @@ def _submit_jobs_throttled(
                 # Poll current states
                 job_ids = list(job_statuses.keys())
                 if job_ids:
-                    current_states = poll_jobs(job_ids)
+                    current_states = poll_jobs(job_statuses)
                     for job_id, state in current_states.items():
                         if job_id in job_statuses:
                             job_statuses[job_id].state = state
@@ -679,6 +679,7 @@ def _submit_jobs_throttled(
                         active_count=_active_count(),
                         queued_count=len(pending_configs),
                         failed_submissions=len(submission_failures),
+                        last_poll_label=datetime.now().strftime("%H:%M:%S"),
                     )
                 )
 
@@ -715,15 +716,16 @@ def _submit_jobs_throttled(
 # ============================================================================
 
 
-def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
+def poll_jobs(job_statuses: Dict[str, SlurmJobStatus]) -> Dict[str, str]:
     """Query squeue for current job states.
 
     Args:
-        job_ids: List of SLURM job IDs
+        job_statuses: Current in-memory statuses keyed by job id
 
     Returns:
         Dict mapping job_id -> state (PENDING, RUNNING, COMPLETED, etc.)
     """
+    job_ids = list(job_statuses.keys())
     if not job_ids:
         return {}
 
@@ -740,26 +742,34 @@ def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
             timeout=30,
         )
         if result.returncode != 0:
-            return {}
+            return {job_id: status.state for job_id, status in job_statuses.items()}
 
         states = {}
         for line in result.stdout.strip().split("\n"):
             if "|" in line:
                 parts = line.strip().split("|")
                 if len(parts) >= 2:
-                    job_id, state = parts[0], parts[1]
+                    job_id, state = parts[0].strip(), parts[1].strip()
                     states[job_id] = state
 
         # Jobs not in squeue are finished — use scontrol to get real state
         for job_id in job_ids:
             if job_id not in states:
-                states[job_id] = _get_scontrol_status(job_id).state
+                fallback_state = _get_scontrol_status(job_id).state
+                if fallback_state == "UNKNOWN":
+                    existing_status = job_statuses[job_id]
+                    if _has_completed_run_artifact(existing_status):
+                        states[job_id] = "UNKNOWN"
+                    else:
+                        states[job_id] = existing_status.state
+                else:
+                    states[job_id] = fallback_state
 
         return states
 
     except subprocess.TimeoutExpired:
         # Keep the previous in-memory state on transient scheduler query failures.
-        return {}
+        return {job_id: status.state for job_id, status in job_statuses.items()}
 
 
 def _query_sacct_statuses(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
@@ -912,6 +922,7 @@ def _build_job_state_table(
     active_count: Optional[int] = None,
     queued_count: Optional[int] = None,
     failed_submissions: int = 0,
+    last_poll_label: Optional[str] = None,
 ) -> Table:
     """Create the standard SLURM job-state table used by live displays."""
     table = Table(title=title, box=None)
@@ -946,6 +957,8 @@ def _build_job_state_table(
                 f"[{Colors.FAIL}]Submit failures[/{Colors.FAIL}]",
                 str(failed_submissions),
             )
+        if last_poll_label is not None:
+            table.add_row("[bold]Last poll[/bold]", last_poll_label)
 
     return table
 
@@ -1010,14 +1023,18 @@ def wait_for_jobs_completion(
 
     try:
         with Live(
-            _build_job_state_table(job_statuses, title="SLURM Job Status"),
+            _build_job_state_table(
+                job_statuses,
+                title="SLURM Job Status",
+                last_poll_label="starting",
+            ),
             console=console,
             refresh_per_second=1,
             transient=True,
         ) as live:
             while True:
                 # Poll current states
-                current_states = poll_jobs(job_ids)
+                current_states = poll_jobs(job_statuses)
 
                 # Update statuses
                 for job_id, state in current_states.items():
@@ -1025,7 +1042,13 @@ def wait_for_jobs_completion(
                         job_statuses[job_id].state = state
 
                 # Update display
-                live.update(_build_job_state_table(job_statuses, title="SLURM Job Status"))
+                live.update(
+                    _build_job_state_table(
+                        job_statuses,
+                        title="SLURM Job Status",
+                        last_poll_label=datetime.now().strftime("%H:%M:%S"),
+                    )
+                )
 
                 # Check if all jobs are done
                 all_done = all(_is_effectively_terminal(status) for status in job_statuses.values())
