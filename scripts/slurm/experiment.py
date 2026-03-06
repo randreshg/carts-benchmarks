@@ -47,6 +47,7 @@ class SlurmBatchRequest:
     explicit_arts_config: Optional[Path]
     threads: int
     output_dir: Path
+    max_jobs: int
     dry_run: bool
     no_build: bool
     verbose: bool
@@ -698,6 +699,7 @@ class SlurmBatchExecutor:
                 if self.request.explicit_arts_config is not None
                 else "benchmark-specific defaults"
             ),
+            "max_jobs": self.request.max_jobs,
             "dry_run": self.request.dry_run,
             "profile": str(self.request.profile) if self.request.profile else None,
             "perf": self.request.perf,
