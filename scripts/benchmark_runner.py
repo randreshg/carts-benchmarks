@@ -4935,6 +4935,7 @@ def _execute_slurm_batch(
         explicit_arts_config=explicit_arts_config,
         threads=threads,
         output_dir=output_dir,
+        max_jobs=max_jobs,
         dry_run=dry_run,
         no_build=no_build,
         verbose=verbose,
