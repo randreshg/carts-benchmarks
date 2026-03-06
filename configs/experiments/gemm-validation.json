@@ -1,6 +1,6 @@
 {
   "name": "gemm-server-validation",
-  "description": "Server validation for GEMM extralarge: direct single-node ARTS vs OMP, then multi-node baseline vs distributed-db.",
+  "description": "GEMM extralarge: direct single-node ARTS vs OMP, then multi-node baseline vs distributed-db.",
   "steps": [
     {
       "name": "n1-direct",
