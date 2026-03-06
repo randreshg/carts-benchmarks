@@ -88,6 +88,7 @@ from benchmark_common import (
     parse_e2e_timings,
     parse_init_timings,
     parse_counter_json,
+    parse_perf_csv as _shared_parse_perf_csv,
     filter_benchmark_output,
 )
 
@@ -837,6 +838,9 @@ class BenchmarkRunner:
         reference_log: Optional[Path] = None
         reference_source = "multinode_omp_reference"
         if am is not None:
+            reference_root = am.get_reference_root(
+                name, size, omp_threads, cflags
+            )
             reference_artifacts_dir = am.get_reference_artifacts_dir(
                 name, size, omp_threads, cflags
             )
@@ -844,7 +848,7 @@ class BenchmarkRunner:
                 name, size, omp_threads, cflags
             )
             reference_log = reference_run_dir / "omp_reference.log"
-            reference_source = str(reference_run_dir / "reference.json")
+            reference_source = str(reference_root / "reference.json")
         else:
             tmp_root = Path(tempfile.mkdtemp(prefix="carts_bench_reference_"))
             reference_artifacts_dir = tmp_root / "artifacts"
@@ -1605,6 +1609,7 @@ class BenchmarkRunner:
                             size=size,
                             cflags=effective_cflags or None,
                             compile_args=compile_args or None,
+                            perf=perf_enabled,
                         )
 
                     result = BenchmarkResult(
@@ -1994,72 +1999,18 @@ class BenchmarkRunner:
         return result if found_any else None
 
     def parse_perf_csv(self, perf_output: Path) -> Optional[PerfCacheMetrics]:
-        """Parse perf stat CSV output and return aggregated cache metrics.
-
-        perf stat -x, -I <ms> format outputs lines like:
-            <interval>,<value>,<unit>,<event>,<variance>,...
-        For aggregate (final) stats, interval is empty or shows total.
-
-        We aggregate all interval values into totals.
-        """
-        if not perf_output.exists():
+        """Parse perf stat CSV output and return aggregated cache metrics."""
+        parsed = _shared_parse_perf_csv(perf_output)
+        if parsed is None:
             return None
-
-        metrics = PerfCacheMetrics()
-        event_totals: Dict[str, int] = {}
-
-        try:
-            with open(perf_output, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    # Skip comment lines and empty lines
-                    if not line or line.startswith("#"):
-                        continue
-
-                    parts = line.split(",")
-                    if len(parts) < 4:
-                        continue
-
-                    # Format: interval,value,unit,event,...
-                    # or for some perf versions: value,unit,event,...
-                    try:
-                        # Try interval format first (perf stat -I)
-                        if parts[0] and parts[0].replace(".", "").isdigit():
-                            # Has interval timestamp
-                            value_str = parts[1]
-                            event_name = parts[3] if len(parts) > 3 else parts[2]
-                        else:
-                            # No interval or empty interval
-                            value_str = parts[0]
-                            event_name = parts[2] if len(parts) > 2 else ""
-
-                        # Skip if value is not a number or is <not counted>
-                        if not value_str or value_str.startswith("<"):
-                            continue
-
-                        value = int(float(value_str))
-                        event_name = event_name.strip()
-
-                        if event_name:
-                            event_totals[event_name] = event_totals.get(event_name, 0) + value
-                    except (ValueError, IndexError):
-                        continue
-
-            # Map event totals to metrics
-            metrics.cache_references = event_totals.get("cache-references", 0)
-            metrics.cache_misses = event_totals.get("cache-misses", 0)
-            metrics.l1d_loads = event_totals.get("L1-dcache-loads", 0)
-            metrics.l1d_load_misses = event_totals.get("L1-dcache-load-misses", 0)
-
-            if metrics.cache_references > 0:
-                metrics.cache_miss_rate = metrics.cache_misses / metrics.cache_references
-            if metrics.l1d_loads > 0:
-                metrics.l1d_load_miss_rate = metrics.l1d_load_misses / metrics.l1d_loads
-
-            return metrics
-
-        except Exception:
-            return None
+        return PerfCacheMetrics(
+            cache_references=int(parsed.get("cache_references", 0)),
+            cache_misses=int(parsed.get("cache_misses", 0)),
+            l1d_loads=int(parsed.get("l1d_loads", 0)),
+            l1d_load_misses=int(parsed.get("l1d_load_misses", 0)),
+            cache_miss_rate=float(parsed.get("cache_miss_rate", 0.0)),
+            l1d_load_miss_rate=float(parsed.get("l1d_load_miss_rate", 0.0)),
+        )
 
     def verify_correctness(
         self,
@@ -2602,6 +2553,7 @@ class BenchmarkRunner:
                 size=size,
                 cflags=cflags or None,
                 compile_args=compile_args or None,
+                perf=perf_enabled,
             )
         else:
             if effective_arts_cfg:
@@ -4875,7 +4827,7 @@ def run(
             for idx, step_def in enumerate(steps, start=1):
                 step_name = _resolve_step_name(step_def, idx)
                 if not quiet and len(steps) > 1:
-                    console.print(f"\n[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
+                    print_step(step_name, idx, len(steps))
 
                 step_bench_list = _resolve_step_bench_list(
                     step_name,
@@ -5059,7 +5011,7 @@ def run(
             step_name = _resolve_step_name(step_def, idx)
 
             if not quiet and len(steps) > 1:
-                console.print(f"[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
+                print_step(step_name, idx, len(steps))
 
             step_bench_list = _resolve_step_bench_list(
                 step_name,
@@ -5208,7 +5160,7 @@ def run(
             print_warning(f"Failed to generate report.xlsx: {e}")
 
     if not quiet and report_path:
-        console.print(f"  [dim]Report: {report_path.name}[/]")
+        print_info(f"Report: {report_path.name}")
     elif not quiet:
         print_warning("Report not generated (openpyxl may be unavailable in this environment).")
 
@@ -5578,7 +5530,7 @@ def _execute_slurm_batch(
                       if not any(ex in b for ex in exclude)]
         excluded_count = before - len(bench_list)
         if excluded_count:
-            console.print(f"[{Colors.DIM}]  ({excluded_count} benchmarks excluded via --exclude)[/{Colors.DIM}]")
+            print_info(f"{excluded_count} benchmarks excluded via --exclude")
 
     if not bench_list:
         print_warning("No benchmarks to run.")
@@ -5601,9 +5553,11 @@ def _execute_slurm_batch(
             valid_benchmarks = len(bench_list) - len(multinode_disabled)
             total_jobs += valid_benchmarks * runs
 
-    console.print(f"\n[bold]Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs[/]")
+    print_info(
+        f"Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs"
+    )
     if multinode_disabled and max(node_counts) > 1:
-        console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
+        print_info(f"{len(multinode_disabled)} benchmarks disabled for multi-node")
 
     # Create experiment directories (all artifacts stay under this experiment root).
     am = artifact_manager
@@ -5616,7 +5570,7 @@ def _execute_slurm_batch(
     scripts_dir = experiment_dir / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
-    console.print(f"Experiment directory: {experiment_dir}")
+    print_info(f"Experiment directory: {experiment_dir}")
 
     # Handle custom counter profile (triggers ARTS rebuild)
     if profile:
@@ -5639,7 +5593,11 @@ def _execute_slurm_batch(
     # ARTS executable embeds nodeCount at compile time via arts.cfg, so each node count
     # has a distinct binary.
     num_workers = min(os.cpu_count() or 1, len(bench_list))
-    console.print(f"\n[bold]Phase 1: Building benchmarks per node count ({num_workers} workers)...[/]")
+    print_step(
+        f"Building benchmarks per node count ({num_workers} workers)",
+        1,
+        5,
+    )
 
     # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
     # Note: build_arts_cfg is the compile-time config in artifacts/ directory.
@@ -5776,7 +5734,7 @@ def _execute_slurm_batch(
     #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/artifacts/ <- build outputs
     #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/run_{R}/   <- run outputs
     #   results/{timestamp}/scripts/*.sbatch     <- generated scripts
-    console.print("\n[bold]Phase 2: Generating job scripts...[/]")
+    print_step("Generating job scripts", 2, 5)
 
     slurm_job_result_script = Path(__file__).parent / "slurm" / "job_result.py"
 
@@ -5813,6 +5771,9 @@ def _execute_slurm_batch(
                 cflags=cflags,
                 compile_args=compile_args,
                 run_phase=step_name or "default",
+                profile=str(profile) if profile else None,
+                perf=perf,
+                perf_interval=perf_interval if perf else None,
                 reference_checksum=(
                     reference_checksums.get(bench).checksum
                     if verify and node_count > 1 and bench in reference_checksums
@@ -5873,19 +5834,15 @@ def _execute_slurm_batch(
 
             job_configs.append((config, script_path))
 
-    console.print(f"  Generated {len(job_configs)} job scripts")
+    print_info(f"Generated {len(job_configs)} job scripts")
 
     # Phase 3: Submit jobs
-    console.print("\n[bold]Phase 3: Submitting jobs...[/]")
+    print_step("Submitting jobs", 3, 5)
 
-    job_statuses = slurm_batch.submit_all_jobs(job_configs, console, dry_run)
-    failed_submissions = len(job_configs) - len(job_statuses)
-    if failed_submissions > 0:
-        print_error(
-            f"SLURM submission failed for {failed_submissions}/{len(job_configs)} jobs. "
-            "Fix submission errors and retry."
-        )
-        raise typer.Exit(1)
+    job_statuses, submission_failures = slurm_batch.submit_all_jobs(
+        job_configs, console, dry_run
+    )
+    failed_submissions = len(submission_failures)
 
     # Write job manifest
     metadata = {
@@ -5895,6 +5852,8 @@ def _execute_slurm_batch(
         "threads": threads,
         "runs_per_benchmark": runs,
         "total_jobs": len(job_configs),
+        "submitted_jobs": len(job_statuses),
+        "failed_submissions": failed_submissions,
         "partition": partition,
         "time_limit": time_limit,
         "arts_config": (
@@ -5914,29 +5873,36 @@ def _execute_slurm_batch(
     manifest_path = slurm_batch.write_job_manifest(
         experiment_dir, existing_job_statuses, metadata
     )
-    console.print(f"  Job manifest: {manifest_path}")
+    print_info(f"Job manifest: {manifest_path}")
 
     if dry_run:
-        console.print("\n[yellow]Dry run complete. Scripts generated but not submitted.[/]")
-        console.print(f"To submit manually, run sbatch on scripts in: {scripts_dir}")
+        print_warning("Dry run complete. Scripts generated but not submitted.")
+        print_info(f"To submit manually, run sbatch on scripts in: {scripts_dir}")
         raise typer.Exit(0)
 
-    # Phase 4: Monitor jobs
-    console.print("\n[bold]Phase 4: Monitoring jobs...[/]")
+    current_results: List[Dict[str, Any]] = []
+    if job_statuses:
+        # Phase 4: Monitor jobs
+        print_step("Monitoring jobs", 4, 5)
 
-    job_statuses = slurm_batch.wait_for_jobs_completion(
-        job_statuses, console, poll_interval=10
+        job_statuses = slurm_batch.wait_for_jobs_completion(
+            job_statuses, console, poll_interval=10
+        )
+
+        # Update manifest with final job states
+        existing_job_statuses = _load_existing_job_statuses(manifest_file)
+        existing_job_statuses.update(job_statuses)
+        slurm_batch.write_job_manifest(experiment_dir, existing_job_statuses, metadata)
+
+        # Phase 5: Collect results
+        print_step("Collecting results", 5, 5)
+        current_results = slurm_batch.collect_results(job_statuses, experiment_dir)
+    else:
+        print_warning("Phase 4/5 skipped: no jobs were submitted successfully.")
+
+    submission_failure_results = slurm_batch.build_submission_failure_results(
+        submission_failures
     )
-
-    # Update manifest with final job states
-    existing_job_statuses = _load_existing_job_statuses(manifest_file)
-    existing_job_statuses.update(job_statuses)
-    slurm_batch.write_job_manifest(experiment_dir, existing_job_statuses, metadata)
-
-    # Phase 5: Collect results
-    console.print("\n[bold]Phase 5: Collecting results...[/]")
-
-    current_results = slurm_batch.collect_results(job_statuses, experiment_dir)
     existing_results: List[Dict[str, Any]] = []
     if am.results_json_path.exists():
         try:
@@ -5949,13 +5915,16 @@ def _execute_slurm_batch(
 
     merged_results: List[Dict[str, Any]] = []
     seen_job_ids: set[str] = set()
-    for result in existing_results + current_results:
+    for result in existing_results + submission_failure_results + current_results:
         slurm_data = result.get("slurm", {})
         job_id = str(slurm_data.get("job_id", "")).strip()
-        if job_id and job_id in seen_job_ids:
+        result_key = job_id
+        if not result_key:
+            result_key = str((result.get("artifacts") or {}).get("run_dir") or "")
+        if result_key and result_key in seen_job_ids:
             continue
-        if job_id:
-            seen_job_ids.add(job_id)
+        if result_key:
+            seen_job_ids.add(result_key)
         merged_results.append(result)
 
     results_path = slurm_batch.write_aggregated_results(
@@ -5964,11 +5933,12 @@ def _execute_slurm_batch(
 
     report_path: Optional[Path] = None
     try:
+        report_steps = steps if (explicit_step_mode or len(steps) > 1) else None
         report_path = generate_report_from_rows(
             merged_results,
             experiment_dir,
             quiet=True,
-            steps=None,
+            steps=report_steps,
         )
     except Exception as e:
         print_warning(f"Failed to generate report.xlsx: {e}")
@@ -5997,6 +5967,13 @@ def _execute_slurm_batch(
         summary_content += f"\nReport: {report_path}"
     style = "green" if failed == 0 else "red"
     print_footer(f"Experiment Complete — {summary_content}", style=style)
+
+    if failed_submissions > 0:
+        print_error(
+            f"SLURM submission failed for {failed_submissions}/{len(job_configs)} jobs. "
+            "Report artifacts were still generated."
+        )
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

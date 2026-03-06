@@ -189,6 +189,9 @@ class ArtifactManager:
         cflags: Optional[str] = None,
         compile_args: Optional[str] = None,
         run_phase: Optional[str] = None,
+        profile: Optional[str] = None,
+        perf: Optional[bool] = None,
+        perf_interval: Optional[float] = None,
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
@@ -226,6 +229,12 @@ class ArtifactManager:
             run_config["compile_args"] = compile_args
         if run_phase:
             run_config["run_phase"] = run_phase
+        if profile:
+            run_config["profile"] = profile
+        if perf is not None:
+            run_config["perf"] = perf
+        if perf_interval is not None:
+            run_config["perf_interval"] = perf_interval
         if command:
             run_config["command"] = command
         if env_overrides:

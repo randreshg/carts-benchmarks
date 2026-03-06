@@ -37,7 +37,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from benchmark_common import PERF_CACHE_EVENTS
+from benchmark_common import PERF_CACHE_EVENTS, parse_perf_csv, aggregate_perf_csvs
 
 
 # ============================================================================
@@ -105,6 +105,17 @@ class SlurmBatchResult:
     jobs_timeout: int
     total_duration_sec: float
     job_statuses: Dict[str, SlurmJobStatus] = field(default_factory=dict)
+
+
+@dataclass
+class SubmissionFailure:
+    """Metadata for an sbatch submission failure."""
+    benchmark_name: str
+    run_number: int
+    node_count: int
+    run_dir: Path
+    script_path: Path
+    error: str
 
 
 # ============================================================================
@@ -516,7 +527,7 @@ def submit_all_jobs(
     job_configs: List[Tuple[SlurmJobConfig, Path]],
     console: Console,
     dry_run: bool = False,
-) -> Dict[str, SlurmJobStatus]:
+) -> Tuple[Dict[str, SlurmJobStatus], List[SubmissionFailure]]:
     """Submit all sbatch scripts and return job statuses.
 
     Args:
@@ -528,9 +539,10 @@ def submit_all_jobs(
         Dict mapping job_id -> SlurmJobStatus
     """
     job_statuses: Dict[str, SlurmJobStatus] = {}
+    submission_failures: List[SubmissionFailure] = []
 
     if dry_run:
-        console.print(f"[{Colors.WARNING}]Dry run mode - scripts generated but not submitted[/{Colors.WARNING}]")
+        print_warning("Dry run mode - scripts generated but not submitted")
         for config, script_path in job_configs:
             # Use fake job ID for dry run
             fake_id = f"DRY_{config.benchmark_name}_{config.run_number}"
@@ -542,7 +554,7 @@ def submit_all_jobs(
                 state="DRY_RUN",
                 run_dir=config.run_dir,
             )
-        return job_statuses
+        return job_statuses, submission_failures
 
     print_step(f"Submitting {len(job_configs)} jobs to SLURM...")
 
@@ -564,12 +576,22 @@ def submit_all_jobs(
         except subprocess.CalledProcessError as e:
             print_error(f"Failed to submit {config.benchmark_name} run {config.run_number}: {e.stderr}")
             failed += 1
+            submission_failures.append(
+                SubmissionFailure(
+                    benchmark_name=config.benchmark_name,
+                    run_number=config.run_number,
+                    node_count=config.node_count,
+                    run_dir=config.run_dir,
+                    script_path=script_path,
+                    error=(e.stderr or e.stdout or str(e)).strip(),
+                )
+            )
 
     print_success(f"Submitted {submitted} jobs")
     if failed > 0:
         print_error(f"{failed} submissions failed")
 
-    return job_statuses
+    return job_statuses, submission_failures
 
 
 # ============================================================================
@@ -836,8 +858,8 @@ def wait_for_jobs_completion(
 
         return table
 
-    console.print(f"\n[bold]Monitoring {len(job_ids)} jobs (poll every {poll_interval}s)...[/]")
-    console.print("[dim]Press Ctrl+C to stop monitoring (jobs will continue running)[/]\n")
+    print_step(f"Monitoring {len(job_ids)} jobs (poll every {poll_interval}s)")
+    print_info("Press Ctrl+C to stop monitoring (jobs will continue running)")
 
     try:
         with Live(create_status_table(), console=console, refresh_per_second=1, transient=True) as live:
@@ -1035,6 +1057,12 @@ def collect_results(
         result["threads"] = run_config.get("threads")
         result["nodes"] = run_config.get("nodes")
         result["run_phase"] = run_config.get("run_phase")
+        if "profile" in run_config:
+            result["profile"] = run_config.get("profile")
+        if "perf" in run_config:
+            result["perf"] = run_config.get("perf")
+        if "perf_interval" in run_config:
+            result["perf_interval"] = run_config.get("perf_interval")
         if "size" in run_config:
             result["size"] = run_config.get("size")
         if "compile_args" in run_config:
@@ -1078,6 +1106,34 @@ def collect_results(
                 artifacts.setdefault("executable_arts", str(arts_exe))
             if omp_exe.exists():
                 artifacts.setdefault("executable_omp", str(omp_exe))
+
+    def _apply_perf_artifacts(result: Dict[str, Any], run_dir: Path) -> None:
+        perf_dir = run_dir / "perf"
+        if not perf_dir.exists():
+            return
+
+        arts_perf_files = sorted(perf_dir.glob("arts_node_*.csv"))
+        omp_perf_file = perf_dir / "omp.csv"
+
+        artifacts = result.setdefault("artifacts", {})
+        artifacts["perf_dir"] = str(perf_dir)
+        if arts_perf_files:
+            artifacts["perf_files"] = [str(path) for path in arts_perf_files]
+        if omp_perf_file.exists():
+            artifacts["perf_omp_file"] = str(omp_perf_file)
+
+        if arts_perf_files:
+            perf_metrics = aggregate_perf_csvs(arts_perf_files)
+            if perf_metrics:
+                arts = result.setdefault("arts", {})
+                arts["perf_metrics"] = perf_metrics
+                arts["perf_csv_path"] = str(perf_dir)
+        if omp_perf_file.exists():
+            omp_perf_metrics = parse_perf_csv(omp_perf_file)
+            if omp_perf_metrics:
+                omp = result.setdefault("omp", {})
+                omp["perf_metrics"] = omp_perf_metrics
+                omp["perf_csv_path"] = str(omp_perf_file)
 
     def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
         summary: Dict[str, Any] = {
@@ -1189,6 +1245,7 @@ def collect_results(
         }
         _apply_run_config(failure, run_config)
         _apply_compile_artifact_paths(failure, run_config)
+        _apply_perf_artifacts(failure, run_dir)
         warning_reasons = _runtime_warning_reasons(failure.get("diagnostics"))
         if warning_reasons:
             failure.setdefault("diagnostics", {})["runtime_warning"] = {
@@ -1259,6 +1316,7 @@ def collect_results(
                     "slurm_err": str(status.run_dir / "slurm.err"),
                 })
                 _apply_compile_artifact_paths(result, run_config)
+                _apply_perf_artifacts(result, status.run_dir)
                 warning_reasons = _runtime_warning_reasons(result.get("diagnostics"))
                 if warning_reasons:
                     diagnostics = result.setdefault("diagnostics", {})
@@ -1297,6 +1355,101 @@ def collect_results(
                     run_config,
                 )
             )
+
+    return results
+
+
+def build_submission_failure_results(
+    failures: List[SubmissionFailure],
+) -> List[Dict[str, Any]]:
+    """Build synthetic result rows for sbatch submission failures."""
+    results: List[Dict[str, Any]] = []
+
+    for failure in failures:
+        run_dir = failure.run_dir
+        run_config: Dict[str, Any] = {}
+        run_config_file = run_dir / "run_config.json"
+        if run_config_file.exists():
+            try:
+                payload = json.loads(run_config_file.read_text())
+                if isinstance(payload, dict):
+                    run_config = payload
+            except Exception:
+                run_config = {}
+
+        result: Dict[str, Any] = {
+            "benchmark": failure.benchmark_name,
+            "run_number": failure.run_number,
+            "status": "FAIL",
+            "status_detail": "SUBMIT_FAILED",
+            "error": f"SLURM submission failed: {failure.error}",
+            "_run_dir": str(run_dir),
+            "slurm": {
+                "job_id": None,
+                "state": "SUBMIT_FAILED",
+                "exit_code": None,
+                "elapsed": None,
+                "nodelist": None,
+            },
+            "artifacts": {
+                "run_dir": str(run_dir),
+                "run_config": str(run_config_file),
+                "result_json": str(run_dir / "result.json"),
+                "slurm_out": str(run_dir / "slurm.out"),
+                "slurm_err": str(run_dir / "slurm.err"),
+                "sbatch_script": str(failure.script_path),
+            },
+            "diagnostics": {
+                "submission_error": failure.error,
+                "sbatch_script": str(failure.script_path),
+            },
+        }
+
+        if run_config:
+            result["threads"] = run_config.get("threads")
+            result["nodes"] = run_config.get("nodes")
+            result["run_phase"] = run_config.get("run_phase")
+            if "profile" in run_config:
+                result["profile"] = run_config.get("profile")
+            if "perf" in run_config:
+                result["perf"] = run_config.get("perf")
+            if "perf_interval" in run_config:
+                result["perf_interval"] = run_config.get("perf_interval")
+            if "size" in run_config:
+                result["size"] = run_config.get("size")
+            if "compile_args" in run_config:
+                result["compile_args"] = run_config.get("compile_args")
+            if "cflags" in run_config:
+                result["cflags"] = run_config.get("cflags")
+            if "config" in run_config and isinstance(run_config["config"], dict):
+                result["config"] = run_config["config"]
+            if "reference" in run_config and isinstance(run_config["reference"], dict):
+                reference = run_config["reference"]
+                result["verification"] = {
+                    "note": "Submission failed before execution",
+                    "arts_checksum": None,
+                    "omp_checksum": None,
+                    "reference_checksum": reference.get("checksum"),
+                    "reference_source": reference.get("source"),
+                }
+            arts_cfg_source = run_config.get("arts_cfg_source")
+            if arts_cfg_source:
+                build_dir = Path(str(arts_cfg_source)).parent
+                artifacts = result.setdefault("artifacts", {})
+                artifacts["arts_config"] = str(arts_cfg_source)
+                artifacts["build_dir"] = str(build_dir)
+
+                benchmark_name = str(run_config.get("benchmark") or "")
+                if benchmark_name:
+                    example_name = benchmark_name.split("/")[-1]
+                    arts_candidate = build_dir / f"{example_name}_arts"
+                    omp_candidate = build_dir / f"{example_name}_omp"
+                    if arts_candidate.exists():
+                        artifacts["executable_arts"] = str(arts_candidate)
+                    if omp_candidate.exists():
+                        artifacts["executable_omp"] = str(omp_candidate)
+
+        results.append(result)
 
     return results
 

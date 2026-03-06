@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
@@ -12,7 +13,7 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from benchmark_common import parse_all_counters
+from benchmark_common import parse_all_counters, parse_perf_csv
 
 if TYPE_CHECKING:
     from benchmark_models import BenchmarkResult, ExperimentStep
@@ -22,11 +23,14 @@ try:
     from openpyxl.formatting.rule import CellIsRule
     from openpyxl.styles import Font
     from openpyxl.styles import PatternFill
+    from openpyxl.worksheet.table import Table, TableStyleInfo
 except ImportError:  # pragma: no cover - runtime dependency check
     Workbook = None  # type: ignore[assignment]
     CellIsRule = None  # type: ignore[assignment]
     Font = None  # type: ignore[assignment]
     PatternFill = None  # type: ignore[assignment]
+    Table = None  # type: ignore[assignment]
+    TableStyleInfo = None  # type: ignore[assignment]
 
 
 RESULTS_COLUMNS = [
@@ -38,12 +42,24 @@ RESULTS_COLUMNS = [
     "run",
     "run_phase",
     "compile_args",
+    "profile",
+    "perf_enabled",
+    "perf_interval",
     "status",
     "status_detail",
+    "verified",
+    "has_counters",
+    "has_perf",
+    "verification_note",
+    "arts_checksum",
+    "omp_checksum",
+    "reference_checksum",
+    "reference_source",
     "runtime_warning",
     "slurm_job_id",
     "slurm_state",
     "slurm_exit_code",
+    "slurm_nodelist",
     "srun_error_count",
     "broken_pipe_count",
     "counter_timeout_warnings",
@@ -85,6 +101,16 @@ RESULTS_COLUMNS = [
     "avg_task_time_us",
     "memory_per_edt",
     "comm_bytes_per_edt",
+    "artifact_run_dir",
+    "artifact_run_config",
+    "artifact_result_json",
+    "artifact_slurm_out",
+    "artifact_slurm_err",
+    "artifact_build_dir",
+    "artifact_arts_config",
+    "artifact_counter_dir",
+    "artifact_perf_dir",
+    "artifact_perf_file_count",
 ]
 
 SUMMARY_COLUMNS = [
@@ -111,10 +137,100 @@ SUMMARY_COLUMNS = [
     "speedup_max",
     "parallel_efficiency_mean",
     "init_overhead_pct_mean",
+    "verified_count",
     "pass_count",
     "fail_count",
     "warn_count",
+    "rows_with_counters",
+    "rows_with_perf",
 ]
+
+NODE_COUNTER_SUMMARY_COLUMNS = [
+    "benchmark",
+    "suite",
+    "size",
+    "threads",
+    "nodes",
+    "run",
+    "run_phase",
+    "compile_args",
+    "counter_name",
+    "capture_mode",
+    "capture_level",
+    "reduce_method",
+    "metric_kind",
+    "nodes_reported",
+    "metric_total",
+    "metric_mean",
+    "metric_min",
+    "metric_max",
+    "metric_std",
+    "metric_cv_pct",
+    "max_to_min_ratio",
+]
+
+NODE_COUNTER_COLUMNS = [
+    "benchmark",
+    "suite",
+    "size",
+    "threads",
+    "nodes",
+    "run",
+    "run_phase",
+    "compile_args",
+    "node_id",
+    "total_threads",
+    "counter_name",
+    "capture_mode",
+    "capture_level",
+    "reduce_method",
+    "metric_kind",
+    "metric_value",
+    "value",
+    "value_ms",
+    "history_points",
+    "nodes_reported",
+    "metric_total",
+    "metric_mean",
+    "node_fraction",
+    "imbalance_vs_mean_pct",
+    "counter_file",
+]
+
+PERF_FILE_COLUMNS = [
+    "benchmark",
+    "suite",
+    "size",
+    "threads",
+    "nodes",
+    "run",
+    "run_phase",
+    "compile_args",
+    "perf_role",
+    "perf_rank",
+    "perf_file",
+    "cache_references",
+    "cache_misses",
+    "cache_miss_rate",
+    "l1d_loads",
+    "l1d_load_misses",
+    "l1d_load_miss_rate",
+]
+
+PATH_LIKE_FIELDS = {
+    "reference_source",
+    "artifact_run_dir",
+    "artifact_run_config",
+    "artifact_result_json",
+    "artifact_slurm_out",
+    "artifact_slurm_err",
+    "artifact_build_dir",
+    "artifact_arts_config",
+    "artifact_counter_dir",
+    "artifact_perf_dir",
+    "counter_file",
+    "perf_file",
+}
 
 COUNTER_FIELD_MAP = {
     "num_edts_created": "numEdtsCreated",
@@ -147,6 +263,7 @@ INT_FIELDS = {
     "counter_files_found",
     "counter_files_valid",
     "counter_expected_nodes",
+    "artifact_perf_file_count",
     "memory_footprint_bytes",
     "remote_bytes_sent",
     "remote_bytes_received",
@@ -154,6 +271,11 @@ INT_FIELDS = {
     "pass_count",
     "fail_count",
     "warn_count",
+    "verified_count",
+    "nodes_reported",
+    "node_id",
+    "total_threads",
+    "history_points",
 }
 
 RATIO_FIELDS = {
@@ -161,12 +283,15 @@ RATIO_FIELDS = {
     "l1d_load_miss_rate",
     "parallel_efficiency",
     "parallel_efficiency_mean",
+    "node_fraction",
 }
 
 PCT_POINT_FIELDS = {
     "init_overhead_pct",
     "arts_e2e_cv_pct",
     "init_overhead_pct_mean",
+    "imbalance_vs_mean_pct",
+    "metric_cv_pct",
 }
 
 
@@ -230,13 +355,13 @@ def _phase_name(value: Any) -> str:
 def _counter_dir_from_artifacts(artifacts: Any) -> Optional[Path]:
     counter_dir: Optional[str] = None
     if isinstance(artifacts, dict):
-        counter_dir = artifacts.get("counters_dir")
+        counter_dir = artifacts.get("counters_dir") or artifacts.get("counter_dir")
         if not counter_dir:
             counter_files = artifacts.get("counter_files") or []
             if counter_files:
                 counter_dir = str(Path(counter_files[0]).parent)
     else:
-        counter_dir = getattr(artifacts, "counters_dir", None)
+        counter_dir = getattr(artifacts, "counters_dir", None) or getattr(artifacts, "counter_dir", None)
         if not counter_dir:
             counter_files = getattr(artifacts, "counter_files", None) or []
             if counter_files:
@@ -311,24 +436,32 @@ def _collect_counters(
         return {}, meta
 
     cluster_counters = parse_all_counters(counter_dir)
-    found, valid = _count_valid_node_counter_files(counter_dir)
-    meta["counter_files_found"] = found
-    meta["counter_files_valid"] = valid
-
-    if cluster_counters:
-        meta["counter_source"] = "cluster"
-        if expected_nodes is not None:
-            meta["counter_complete"] = True
-        return cluster_counters, meta
-
     node_counters, found, valid = _aggregate_node_counter_files(counter_dir)
     meta["counter_files_found"] = found
     meta["counter_files_valid"] = valid
-    if node_counters:
+
+    combined_counters = dict(cluster_counters)
+    node_added_fields = False
+    for name, value in node_counters.items():
+        if name in combined_counters:
+            continue
+        combined_counters[name] = value
+        node_added_fields = True
+
+    if cluster_counters and node_added_fields:
+        meta["counter_source"] = "cluster+node"
+        if expected_nodes is not None:
+            meta["counter_complete"] = valid >= expected_nodes
+    elif cluster_counters:
+        meta["counter_source"] = "cluster"
+        if expected_nodes is not None:
+            meta["counter_complete"] = True
+    elif node_counters:
         meta["counter_source"] = "node_fallback"
-    if expected_nodes is not None:
-        meta["counter_complete"] = valid >= expected_nodes
-    return node_counters, meta
+        if expected_nodes is not None:
+            meta["counter_complete"] = valid >= expected_nodes
+
+    return combined_counters, meta
 
 
 def _perf_dict(run: Any) -> Dict[str, Any]:
@@ -344,6 +477,260 @@ def _perf_dict(run: Any) -> Dict[str, Any]:
     if is_dataclass(perf):
         return asdict(perf)
     return {}
+
+
+def _path_if_exists(value: Any) -> Optional[Path]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    path = Path(text)
+    return path if path.exists() else None
+
+
+def _base_result_identity(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "benchmark": row.get("benchmark"),
+        "suite": row.get("suite"),
+        "size": row.get("size"),
+        "threads": row.get("threads"),
+        "nodes": row.get("nodes"),
+        "run": row.get("run"),
+        "run_phase": row.get("run_phase"),
+        "compile_args": row.get("compile_args"),
+    }
+
+
+def _build_node_counter_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    for result_row in result_rows:
+        counter_dir = _path_if_exists(result_row.get("artifact_counter_dir"))
+        if counter_dir is None:
+            continue
+
+        for counter_file in sorted(counter_dir.glob("n*.json")):
+            try:
+                payload = json.loads(counter_file.read_text())
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            counters = payload.get("counters")
+            if not isinstance(counters, dict):
+                continue
+
+            node_id = metadata.get("nodeId")
+            if node_id is None:
+                match = re.match(r"n(\d+)\.json$", counter_file.name)
+                node_id = int(match.group(1)) if match else None
+
+            total_threads = metadata.get("totalThreads")
+
+            for counter_name, entry in counters.items():
+                if not isinstance(entry, dict):
+                    continue
+                capture_level = str(entry.get("captureLevel") or "")
+                if capture_level.upper() == "CLUSTER":
+                    continue
+
+                value = _to_float(entry.get("value"))
+                value_ms = _to_float(entry.get("value_ms"))
+                metric_value = value_ms if value_ms is not None else value
+                metric_kind = "value_ms" if value_ms is not None else "value"
+                if metric_value is None:
+                    continue
+
+                history = entry.get("captureHistory")
+                history_points = len(history) if isinstance(history, list) else 0
+
+                row = _base_result_identity(result_row)
+                row.update(
+                    {
+                        "node_id": node_id,
+                        "total_threads": total_threads,
+                        "counter_name": counter_name,
+                        "capture_mode": entry.get("captureMode"),
+                        "capture_level": entry.get("captureLevel"),
+                        "reduce_method": entry.get("reduceMethod"),
+                        "metric_kind": metric_kind,
+                        "metric_value": metric_value,
+                        "value": value,
+                        "value_ms": value_ms,
+                        "history_points": history_points,
+                        "counter_file": str(counter_file),
+                    }
+                )
+                rows.append(row)
+
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+            row.get("run"),
+            row.get("run_phase"),
+            row.get("compile_args"),
+            row.get("counter_name"),
+            row.get("capture_mode"),
+            row.get("capture_level"),
+            row.get("reduce_method"),
+            row.get("metric_kind"),
+        )
+        grouped[key].append(row)
+
+    for grouped_rows in grouped.values():
+        values = [_to_float(row.get("metric_value")) for row in grouped_rows]
+        numeric_values = [value for value in values if value is not None]
+        if not numeric_values:
+            continue
+        total_value = sum(numeric_values)
+        mean_value = mean(numeric_values)
+        min_value = min(numeric_values)
+        max_value = max(numeric_values)
+        for row in grouped_rows:
+            metric_value = _to_float(row.get("metric_value"))
+            row["nodes_reported"] = len(grouped_rows)
+            row["metric_total"] = total_value
+            row["metric_mean"] = mean_value
+            row["node_fraction"] = _safe_div(metric_value, total_value)
+            row["imbalance_vs_mean_pct"] = (
+                ((metric_value - mean_value) / mean_value) * 100.0
+                if metric_value is not None and mean_value not in (None, 0)
+                else None
+            )
+
+    return rows
+
+
+def _build_node_counter_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    detail_rows = _build_node_counter_rows(result_rows)
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in detail_rows:
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+            row.get("run"),
+            row.get("run_phase"),
+            row.get("compile_args"),
+            row.get("counter_name"),
+            row.get("capture_mode"),
+            row.get("capture_level"),
+            row.get("reduce_method"),
+            row.get("metric_kind"),
+        )
+        grouped[key].append(row)
+
+    summary_rows: List[Dict[str, Any]] = []
+    for key in sorted(grouped.keys(), key=lambda item: tuple(str(part) for part in item)):
+        values = [
+            _to_float(row.get("metric_value"))
+            for row in grouped[key]
+            if _to_float(row.get("metric_value")) is not None
+        ]
+        if not values:
+            continue
+
+        metric_mean, metric_std = _mean_std(values)
+        metric_min = min(values)
+        metric_max = max(values)
+        metric_cv_pct = None
+        if metric_mean not in (None, 0) and metric_std is not None:
+            metric_cv_pct = (metric_std / metric_mean) * 100.0
+
+        max_to_min_ratio = None
+        if metric_min != 0:
+            max_to_min_ratio = metric_max / metric_min
+
+        (
+            benchmark,
+            suite,
+            size,
+            threads,
+            nodes,
+            run,
+            run_phase,
+            compile_args,
+            counter_name,
+            capture_mode,
+            capture_level,
+            reduce_method,
+            metric_kind,
+        ) = key
+
+        summary_rows.append(
+            {
+                "benchmark": benchmark,
+                "suite": suite,
+                "size": size,
+                "threads": threads,
+                "nodes": nodes,
+                "run": run,
+                "run_phase": run_phase,
+                "compile_args": compile_args,
+                "counter_name": counter_name,
+                "capture_mode": capture_mode,
+                "capture_level": capture_level,
+                "reduce_method": reduce_method,
+                "metric_kind": metric_kind,
+                "nodes_reported": len(values),
+                "metric_total": sum(values),
+                "metric_mean": metric_mean,
+                "metric_min": metric_min,
+                "metric_max": metric_max,
+                "metric_std": metric_std,
+                "metric_cv_pct": metric_cv_pct,
+                "max_to_min_ratio": max_to_min_ratio,
+            }
+        )
+
+    return summary_rows
+
+
+def _build_perf_file_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    for result_row in result_rows:
+        perf_dir = _path_if_exists(result_row.get("artifact_perf_dir"))
+        if perf_dir is None:
+            continue
+
+        perf_files = sorted(perf_dir.glob("arts_node_*.csv"))
+        omp_file = perf_dir / "omp.csv"
+        if omp_file.exists():
+            perf_files.append(omp_file)
+
+        for perf_file in perf_files:
+            perf_metrics = parse_perf_csv(perf_file)
+            row = _base_result_identity(result_row)
+            rank_match = re.match(r"arts_node_(\d+)\.csv$", perf_file.name)
+            perf_role = "omp" if perf_file.name == "omp.csv" else "arts"
+            perf_rank = int(rank_match.group(1)) if rank_match else None
+            row.update(
+                {
+                    "perf_role": perf_role,
+                    "perf_rank": perf_rank,
+                    "perf_file": str(perf_file),
+                    "cache_references": perf_metrics.get("cache_references") if perf_metrics else None,
+                    "cache_misses": perf_metrics.get("cache_misses") if perf_metrics else None,
+                    "cache_miss_rate": perf_metrics.get("cache_miss_rate") if perf_metrics else None,
+                    "l1d_loads": perf_metrics.get("l1d_loads") if perf_metrics else None,
+                    "l1d_load_misses": perf_metrics.get("l1d_load_misses") if perf_metrics else None,
+                    "l1d_load_miss_rate": perf_metrics.get("l1d_load_miss_rate") if perf_metrics else None,
+                }
+            )
+            rows.append(row)
+
+    return rows
 
 
 def _apply_derived_fields(row: Dict[str, Any]) -> None:
@@ -388,12 +775,37 @@ def _apply_derived_fields(row: Dict[str, Any]) -> None:
         ) / num_edts_finished
 
 
+def _verification_state(
+    status: Any,
+    verification_note: Any,
+    arts_checksum: Any,
+    omp_checksum: Any,
+    reference_checksum: Any,
+) -> Optional[bool]:
+    status_text = _status_text(status)
+    if status_text != "PASS":
+        return False
+
+    note_text = str(verification_note or "").strip().lower()
+    if "mismatch" in note_text or "failed" in note_text:
+        return False
+
+    if arts_checksum is not None and (omp_checksum is not None or reference_checksum is not None):
+        return True
+
+    return None
+
+
 def _empty_result_row() -> Dict[str, Any]:
     return {column: None for column in RESULTS_COLUMNS}
 
 
 def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
     row = _empty_result_row()
+    verification = result.verification
+    artifacts = result.artifacts
+    arts_perf_path = result.run_arts.perf_csv_path
+    arts_perf_dir = str(Path(arts_perf_path).parent) if arts_perf_path else None
 
     row.update(
         {
@@ -405,12 +817,28 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "run": result.run_number,
             "run_phase": _phase_name(getattr(result, "run_phase", None)),
             "compile_args": getattr(result, "compile_args", None),
+            "profile": None,
+            "perf_enabled": bool(result.run_arts.perf_metrics or arts_perf_path),
+            "perf_interval": None,
             "status": _status_text(result.run_arts.status),
             "status_detail": _status_text(result.run_arts.status),
+            "verified": _verification_state(
+                result.run_arts.status,
+                verification.note,
+                verification.arts_checksum,
+                verification.omp_checksum,
+                verification.reference_checksum,
+            ),
+            "verification_note": verification.note,
+            "arts_checksum": verification.arts_checksum,
+            "omp_checksum": verification.omp_checksum,
+            "reference_checksum": verification.reference_checksum,
+            "reference_source": verification.reference_source,
             "runtime_warning": False,
             "slurm_job_id": None,
             "slurm_state": None,
             "slurm_exit_code": None,
+            "slurm_nodelist": None,
             "srun_error_count": None,
             "broken_pipe_count": None,
             "counter_timeout_warnings": None,
@@ -426,6 +854,16 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "arts_total_sec": result.timing.arts_total_sec,
             "omp_total_sec": result.timing.omp_total_sec,
             "speedup": result.timing.speedup,
+            "artifact_run_dir": artifacts.run_dir,
+            "artifact_run_config": str(Path(artifacts.run_dir) / "run_config.json") if artifacts.run_dir else None,
+            "artifact_result_json": str(Path(artifacts.run_dir) / "result.json") if artifacts.run_dir else None,
+            "artifact_slurm_out": str(Path(artifacts.run_dir) / "slurm.out") if artifacts.run_dir else None,
+            "artifact_slurm_err": str(Path(artifacts.run_dir) / "slurm.err") if artifacts.run_dir else None,
+            "artifact_build_dir": artifacts.build_dir,
+            "artifact_arts_config": artifacts.arts_config,
+            "artifact_counter_dir": artifacts.counters_dir,
+            "artifact_perf_dir": arts_perf_dir,
+            "artifact_perf_file_count": 1 if arts_perf_path else 0,
         }
     )
 
@@ -443,6 +881,8 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
     for field, counter_key in COUNTER_FIELD_MAP.items():
         row[field] = counters.get(counter_key)
     row.update(counter_meta)
+    row["has_counters"] = bool(counter_meta.get("counter_source"))
+    row["has_perf"] = bool(result.run_arts.perf_metrics or arts_perf_path)
 
     _apply_derived_fields(row)
     return row
@@ -505,12 +945,28 @@ def _flatten_result_serialized(
             "run": result.get("run_number"),
             "run_phase": _phase_name(result.get("run_phase")),
             "compile_args": result.get("compile_args"),
+            "profile": result.get("profile"),
+            "perf_enabled": result.get("perf"),
+            "perf_interval": result.get("perf_interval"),
             "status": status,
             "status_detail": status_detail,
+            "verified": _verification_state(
+                status,
+                (result.get("verification") or {}).get("note"),
+                arts.get("checksum"),
+                omp.get("checksum"),
+                (result.get("verification") or {}).get("reference_checksum"),
+            ),
+            "verification_note": (result.get("verification") or {}).get("note"),
+            "arts_checksum": arts.get("checksum"),
+            "omp_checksum": omp.get("checksum"),
+            "reference_checksum": (result.get("verification") or {}).get("reference_checksum"),
+            "reference_source": (result.get("verification") or {}).get("reference_source"),
             "runtime_warning": detected_runtime_warning,
             "slurm_job_id": slurm.get("job_id"),
             "slurm_state": slurm.get("state"),
             "slurm_exit_code": slurm.get("exit_code"),
+            "slurm_nodelist": slurm.get("nodelist"),
             "srun_error_count": slurm_stderr.get("srun_error_count"),
             "broken_pipe_count": slurm_stderr.get("broken_pipe_count"),
             "counter_timeout_warnings": slurm_stderr.get("counter_timeout_warnings"),
@@ -526,8 +982,22 @@ def _flatten_result_serialized(
             "arts_total_sec": _to_float(arts.get("duration_sec")),
             "omp_total_sec": _to_float(omp.get("duration_sec")),
             "speedup": _to_float(result.get("speedup")),
+            "artifact_run_dir": (result.get("artifacts") or {}).get("run_dir"),
+            "artifact_run_config": (result.get("artifacts") or {}).get("run_config"),
+            "artifact_result_json": (result.get("artifacts") or {}).get("result_json"),
+            "artifact_slurm_out": (result.get("artifacts") or {}).get("slurm_out"),
+            "artifact_slurm_err": (result.get("artifacts") or {}).get("slurm_err"),
+            "artifact_build_dir": (result.get("artifacts") or {}).get("build_dir"),
+            "artifact_arts_config": (result.get("artifacts") or {}).get("arts_config"),
+            "artifact_counter_dir": (result.get("artifacts") or {}).get("counter_dir"),
+            "artifact_perf_dir": (result.get("artifacts") or {}).get("perf_dir"),
         }
     )
+    perf_files = (result.get("artifacts") or {}).get("perf_files")
+    if isinstance(perf_files, list):
+        row["artifact_perf_file_count"] = len(perf_files)
+    elif row.get("artifact_perf_dir"):
+        row["artifact_perf_file_count"] = 1
 
     perf = _perf_dict(arts)
     row["cache_references"] = perf.get("cache_references")
@@ -583,6 +1053,8 @@ def _flatten_result_serialized(
     for field, counter_key in COUNTER_FIELD_MAP.items():
         row[field] = counters.get(counter_key)
     row.update(counter_meta)
+    row["has_counters"] = bool(counter_meta.get("counter_source"))
+    row["has_perf"] = bool(row.get("perf_enabled")) or bool(perf)
 
     _apply_derived_fields(row)
     return row
@@ -652,6 +1124,9 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
         pass_count = sum(1 for r in runs if str(r.get("status", "")).upper() == "PASS")
         fail_count = len(runs) - pass_count
         warn_count = sum(1 for r in runs if r.get("runtime_warning") is True)
+        verified_count = sum(1 for r in runs if r.get("verified") is True)
+        rows_with_counters = sum(1 for r in runs if r.get("has_counters") is True)
+        rows_with_perf = sum(1 for r in runs if r.get("has_perf") is True)
 
         summary_rows.append(
             {
@@ -678,9 +1153,12 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "speedup_max": max(speedup_values) if speedup_values else None,
                 "parallel_efficiency_mean": efficiency_mean,
                 "init_overhead_pct_mean": init_overhead_mean,
+                "verified_count": verified_count,
                 "pass_count": pass_count,
                 "fail_count": fail_count,
                 "warn_count": warn_count,
+                "rows_with_counters": rows_with_counters,
+                "rows_with_perf": rows_with_perf,
             }
         )
 
@@ -841,10 +1319,7 @@ def _build_comparison_sheet(
 
         ws.append(row_values)
 
-    _apply_table_formats(ws, columns)
-    _apply_speedup_rules(ws, columns)
-    ws.auto_filter.ref = ws.dimensions
-    _autosize_columns(ws)
+    _finalize_sheet(ws, columns)
 
 
 def _build_overview_sheet(
@@ -858,14 +1333,24 @@ def _build_overview_sheet(
     ws = workbook.create_sheet(title="Overview")
     columns = [
         "step",
+        "size",
         "threads",
         "nodes",
         "runs",
+        "compile_args",
+        "debug",
         "perf",
+        "perf_interval",
         "profile",
         "benchmarks_run",
+        "rows",
         "passed",
+        "verified",
+        "warn",
         "failed",
+        "rows_with_counters",
+        "rows_with_complete_counters",
+        "rows_with_perf",
     ]
     ws.append(columns)
     _style_header(ws)
@@ -880,27 +1365,58 @@ def _build_overview_sheet(
         phase_rows = by_phase.get(step_name, [])
         statuses = [str(r.get("status") or "").upper() for r in phase_rows]
         passed = sum(1 for s in statuses if s == "PASS")
+        verified = sum(1 for r in phase_rows if r.get("verified") is True)
         failed = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
+        warn = sum(1 for r in phase_rows if _status_text(r.get("status_detail")) == "WARN")
+        rows_with_counters = sum(
+            1
+            for r in phase_rows
+            if any(r.get(field) is not None for field in COUNTER_FIELD_MAP.keys())
+        )
+        rows_with_complete_counters = sum(1 for r in phase_rows if r.get("counter_complete") is True)
+        rows_with_perf = sum(
+            1
+            for r in phase_rows
+            if any(
+                r.get(field) is not None
+                for field in (
+                    "cache_references",
+                    "cache_misses",
+                    "cache_miss_rate",
+                    "l1d_loads",
+                    "l1d_load_misses",
+                    "l1d_load_miss_rate",
+                )
+            )
+        )
         benchmarks = getattr(step, "benchmarks", None)
         benchmarks_run = ", ".join(benchmarks) if benchmarks else "all"
 
         ws.append(
             [
                 step_name,
+                getattr(step, "size", None),
                 getattr(step, "threads", None),
                 getattr(step, "nodes", None),
                 getattr(step, "runs", None),
+                getattr(step, "compile_args", None),
+                getattr(step, "debug", None),
                 bool(getattr(step, "perf", False)),
+                getattr(step, "perf_interval", None) if getattr(step, "perf", False) else None,
                 getattr(step, "profile", None),
                 benchmarks_run,
+                len(phase_rows),
                 passed,
+                verified,
+                warn,
                 failed,
+                rows_with_counters,
+                rows_with_complete_counters,
+                rows_with_perf,
             ]
         )
 
-    _apply_table_formats(ws, columns)
-    ws.auto_filter.ref = ws.dimensions
-    _autosize_columns(ws)
+    _finalize_sheet(ws, columns)
 
 
 def _append_table_sheet(workbook: Workbook, title: str, columns: List[str], rows: List[Dict[str, Any]]) -> None:
@@ -912,11 +1428,108 @@ def _append_table_sheet(workbook: Workbook, title: str, columns: List[str], rows
     for row in rows:
         ws.append([row.get(column) for column in columns])
 
-    _apply_table_formats(ws, columns)
-    _apply_speedup_rules(ws, columns)
-    _apply_status_fill(ws, columns)
-    ws.auto_filter.ref = ws.dimensions
-    _autosize_columns(ws)
+    _finalize_sheet(ws, columns)
+
+
+def _build_issues_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]]) -> None:
+    issue_rows = [
+        row
+        for row in result_rows
+        if (
+            _status_text(row.get("status")) not in {"PASS", "SKIP"}
+            or _status_text(row.get("status_detail")) == "WARN"
+            or row.get("runtime_warning") is True
+            or (row.get("has_counters") is True and row.get("counter_complete") is False)
+            or row.get("verified") is False
+        )
+    ]
+    if not issue_rows:
+        return
+
+    _append_table_sheet(workbook, "Issues", RESULTS_COLUMNS, issue_rows)
+
+
+def _append_optional_table_sheet(
+    workbook: Workbook,
+    title: str,
+    columns: List[str],
+    rows: List[Dict[str, Any]],
+) -> None:
+    if not rows:
+        return
+    _append_table_sheet(workbook, title, columns, rows)
+
+
+def _apply_path_hyperlinks(worksheet: Any, columns: List[str]) -> None:
+    path_columns = [
+        idx
+        for idx, field in enumerate(columns, start=1)
+        if field in PATH_LIKE_FIELDS
+    ]
+    if not path_columns or worksheet.max_row < 2:
+        return
+
+    for idx in path_columns:
+        for row in range(2, worksheet.max_row + 1):
+            cell = worksheet.cell(row=row, column=idx)
+            value = cell.value
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if not text:
+                continue
+
+            if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", text):
+                target = text
+            else:
+                path = Path(text)
+                if not path.is_absolute():
+                    continue
+                try:
+                    target = path.as_uri()
+                except ValueError:
+                    continue
+
+            cell.hyperlink = target
+            cell.style = "Hyperlink"
+
+
+def _excel_table_name(title: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9_]", "_", title)
+    if not base:
+        base = "Sheet"
+    if not re.match(r"^[A-Za-z_]", base):
+        base = f"T_{base}"
+    return f"tbl_{base}"[:255]
+
+
+def _finalize_sheet(worksheet: Any, columns: List[str]) -> None:
+    _apply_table_formats(worksheet, columns)
+    _apply_speedup_rules(worksheet, columns)
+    _apply_status_fill(worksheet, columns)
+    _apply_path_hyperlinks(worksheet, columns)
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    if (
+        Table is not None
+        and TableStyleInfo is not None
+        and worksheet.max_row >= 2
+        and worksheet.max_column >= 1
+    ):
+        table = Table(
+            displayName=_excel_table_name(worksheet.title),
+            ref=worksheet.dimensions,
+        )
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+
+    _autosize_columns(worksheet)
 
 
 def _autosize_columns(worksheet: Any, max_width: int = 48) -> None:
@@ -1079,13 +1692,13 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
     matrix_rows: List[List[Any]] = []
 
     if has_thread_sweep and not has_node_sweep:
-        headers = ["benchmark", "suite", "run_phase", "compile_args"]
+        headers = ["benchmark", "suite", "size", "run_phase", "compile_args"]
         for t in threads:
             headers.extend([f"T{t}_arts_e2e", f"T{t}_speedup", f"T{t}_efficiency"])
         headers.extend(["peak_speedup", "peak_threads", "arts_self_scaling"])
 
-        for (benchmark, suite, _size, run_phase, compile_args), configs in sorted(indexed.items()):
-            row_values: List[Any] = [benchmark, suite, run_phase, compile_args]
+        for (benchmark, suite, size, run_phase, compile_args), configs in sorted(indexed.items()):
+            row_values: List[Any] = [benchmark, suite, size, run_phase, compile_args]
             speedup_candidates: List[Tuple[float, int]] = []
             phase_nodes = sorted({n for (_t, n) in configs.keys()})
             fixed_node = phase_nodes[0] if phase_nodes else nodes[0]
@@ -1112,15 +1725,15 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
             matrix_rows.append(row_values)
 
     elif has_node_sweep and not has_thread_sweep:
-        headers = ["benchmark", "suite", "run_phase", "compile_args"]
+        headers = ["benchmark", "suite", "size", "run_phase", "compile_args"]
         for n in nodes:
             headers.extend([f"N{n}_arts_e2e", f"N{n}_speedup"])
             if n != 1:
                 headers.append(f"N{n}_scaling_vs_N1")
         headers.extend(["peak_speedup", "peak_nodes"])
 
-        for (benchmark, suite, _size, run_phase, compile_args), configs in sorted(indexed.items()):
-            row_values = [benchmark, suite, run_phase, compile_args]
+        for (benchmark, suite, size, run_phase, compile_args), configs in sorted(indexed.items()):
+            row_values = [benchmark, suite, size, run_phase, compile_args]
             speedup_candidates: List[Tuple[float, int]] = []
             phase_threads = sorted({t for (t, _n) in configs.keys()})
             fixed_thread = phase_threads[0] if phase_threads else threads[0]
@@ -1146,7 +1759,7 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
             matrix_rows.append(row_values)
 
     else:
-        headers = ["benchmark", "suite", "run_phase", "compile_args"]
+        headers = ["benchmark", "suite", "size", "run_phase", "compile_args"]
         for t in threads:
             for n in nodes:
                 prefix = f"T{t}N{n}"
@@ -1159,8 +1772,8 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
                 )
         headers.extend(["peak_speedup", "peak_threads", "peak_nodes"])
 
-        for (benchmark, suite, _size, run_phase, compile_args), configs in sorted(indexed.items()):
-            row_values = [benchmark, suite, run_phase, compile_args]
+        for (benchmark, suite, size, run_phase, compile_args), configs in sorted(indexed.items()):
+            row_values = [benchmark, suite, size, run_phase, compile_args]
             peak_tuple: Optional[Tuple[float, int, int]] = None
 
             for t in threads:
@@ -1192,14 +1805,14 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
         ws.append(values)
 
     if matrix_rows:
-        phase_groups: Dict[str, List[List[Any]]] = defaultdict(list)
+        phase_groups: Dict[Tuple[str, str, str], List[List[Any]]] = defaultdict(list)
         for row in matrix_rows:
-            phase_groups[row[2]].append(row)
+            phase_groups[(str(row[2]), str(row[3]), str(row[4]))].append(row)
 
-        for phase in sorted(phase_groups.keys()):
-            rows = phase_groups[phase]
-            geomean_row: List[Any] = ["GEOMEAN", "", phase, ""]
-            for idx, header in enumerate(headers[4:], start=4):
+        for size, phase, compile_args in sorted(phase_groups.keys()):
+            rows = phase_groups[(size, phase, compile_args)]
+            geomean_row: List[Any] = ["GEOMEAN", "", size, phase, compile_args]
+            for idx, header in enumerate(headers[5:], start=5):
                 if header.startswith("peak_"):
                     geomean_row.append(None)
                     continue
@@ -1208,10 +1821,7 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
                 geomean_row.append(_geomean(values))
             ws.append(geomean_row)
 
-    _apply_table_formats(ws, headers)
-    _apply_speedup_rules(ws, headers)
-    ws.auto_filter.ref = ws.dimensions
-    _autosize_columns(ws)
+    _finalize_sheet(ws, headers)
 
 
 def _load_results_metadata(experiment_dir: Path) -> Dict[str, Any]:
@@ -1263,6 +1873,14 @@ def _metadata_rows(
     add("size", metadata.get("size"))
     add("duration_seconds", metadata.get("total_duration_seconds"))
     add("runs_per_config", metadata.get("runs_per_config"))
+    add("total_jobs", metadata.get("total_jobs"))
+    add("submitted_jobs", metadata.get("submitted_jobs"))
+    add("failed_submissions", metadata.get("failed_submissions"))
+    add("partition", metadata.get("partition"))
+    add("time_limit", metadata.get("time_limit"))
+    add("profile", metadata.get("profile"))
+    add("perf", metadata.get("perf"))
+    add("perf_interval", metadata.get("perf_interval"))
 
     add("thread_sweep", metadata.get("thread_sweep"))
     add("node_sweep", metadata.get("node_sweep"))
@@ -1297,6 +1915,7 @@ def _metadata_rows(
         add("report_fail_count", report_summary.get("fail_count"))
         add("report_warn_count", report_summary.get("warn_count"))
         add("report_skipped_count", report_summary.get("skip_count"))
+        add("report_verified_count", report_summary.get("verified_count"))
         add("report_geomean_speedup", report_summary.get("geomean_speedup"))
         add("report_rows_with_counters", report_summary.get("rows_with_counters"))
         add("report_rows_with_complete_counters", report_summary.get("rows_with_complete_counters"))
@@ -1322,8 +1941,7 @@ def _append_metadata_sheet(
         ws.append([key, value])
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    _autosize_columns(ws)
+    _finalize_sheet(ws, ["key", "value"])
 
 
 def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1332,6 +1950,7 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     fail_count = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
     skip_count = sum(1 for s in statuses if s == "SKIP")
     warn_count = sum(1 for r in result_rows if r.get("runtime_warning") is True)
+    verified_count = sum(1 for r in result_rows if r.get("verified") is True)
 
     phases = sorted({_phase_name(r.get("run_phase")) for r in result_rows})
     geomean_speedup: Dict[str, Optional[float]] = {}
@@ -1360,17 +1979,7 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     rows_with_perf = sum(
         1
         for r in result_rows
-        if any(
-            r.get(field) is not None
-            for field in (
-                "cache_references",
-                "cache_misses",
-                "cache_miss_rate",
-                "l1d_loads",
-                "l1d_load_misses",
-                "l1d_load_miss_rate",
-            )
-        )
+        if r.get("has_perf") is True
     )
 
     return {
@@ -1380,6 +1989,7 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "fail_count": fail_count,
         "warn_count": warn_count,
         "skip_count": skip_count,
+        "verified_count": verified_count,
         "geomean_speedup": geomean_speedup,
         "rows_with_counters": rows_with_counters,
         "rows_with_complete_counters": rows_with_complete_counters,
@@ -1407,11 +2017,30 @@ def _write_report(
 
     _build_overview_sheet(workbook, result_rows, steps)
     _append_table_sheet(workbook, "Results", RESULTS_COLUMNS, result_rows)
+    _build_issues_sheet(workbook, result_rows)
 
     summary_rows = _build_summary_rows(result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
     _build_scaling_sheet(workbook, summary_rows)
     _build_comparison_sheet(workbook, result_rows, steps=steps)
+    _append_optional_table_sheet(
+        workbook,
+        "NodeCounterSummary",
+        NODE_COUNTER_SUMMARY_COLUMNS,
+        _build_node_counter_summary_rows(result_rows),
+    )
+    _append_optional_table_sheet(
+        workbook,
+        "NodeCounters",
+        NODE_COUNTER_COLUMNS,
+        _build_node_counter_rows(result_rows),
+    )
+    _append_optional_table_sheet(
+        workbook,
+        "PerfFiles",
+        PERF_FILE_COLUMNS,
+        _build_perf_file_rows(result_rows),
+    )
 
     effective_command = command or _load_manifest_command(experiment_dir)
     report_summary = _build_report_summary(result_rows)
