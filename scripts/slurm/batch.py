@@ -3,10 +3,26 @@
 SLURM Batch Job Submission for CARTS Benchmarks
 
 This module provides functionality to submit all benchmark jobs (benchmarks x runs)
-to SLURM queue at once, leveraging SLURM's job scheduler for parallel execution.
+to SLURM queue, leveraging SLURM's job scheduler for parallel execution.
+
+Two submission modes are supported (controlled via the ``max_concurrent``
+parameter of :func:`submit_all_jobs`, exposed as ``--max-jobs`` on the CLI):
+
+  **Unlimited (default, max_concurrent=0):**
+    All jobs are submitted immediately and the function returns.  A separate
+    monitoring step (``wait_for_jobs_completion``) is expected to poll until
+    every job reaches a terminal state.
+
+  **Throttled (max_concurrent>0):**
+    At most *max_concurrent* jobs are active (PENDING + RUNNING) at any time.
+    The function enters a rolling poll loop — as earlier jobs finish, new ones
+    are submitted to fill the freed slots.  The function only returns once
+    every job has reached a terminal state, so the caller can skip the
+    separate monitoring step entirely.
 
 Key Features:
 - Submit ~240 jobs (24 benchmarks x 10 runs) in one command
+- Optional concurrency cap (``--max-jobs N``) to avoid flooding the SLURM queue
 - Exclusive node allocation for resource isolation
 - Node-based allocation (not thread-based)
 - Counter directory isolation to prevent data collision
@@ -19,7 +35,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,85 +53,50 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from benchmark_common import PERF_CACHE_EVENTS, parse_perf_csv, aggregate_perf_csvs
+from benchmark_common import PERF_CACHE_EVENTS
+from .models import (
+    TERMINAL_JOB_STATES,
+    SlurmBatchResult,
+    SlurmJobConfig,
+    SlurmJobStatus,
+    SubmissionFailure,
+)
+from .results import (
+    build_submission_failure_results as _build_submission_failure_results_impl,
+    collect_results as _collect_results_impl,
+)
 
 
 # ============================================================================
 # Data Classes
 # ============================================================================
 
-TERMINAL_JOB_STATES = {
-    "COMPLETED",
-    "FAILED",
-    "CANCELLED",
-    "TIMEOUT",
-    "NODE_FAIL",
-    "OUT_OF_MEMORY",
-}
+def _create_pending_job_status(job_id: str, config: SlurmJobConfig) -> SlurmJobStatus:
+    """Create the initial in-memory status for a newly submitted job."""
+    return SlurmJobStatus(
+        job_id=job_id,
+        benchmark_name=config.benchmark_name,
+        run_number=config.run_number,
+        node_count=config.node_count,
+        state="PENDING",
+        run_dir=config.run_dir,
+    )
 
 
-@dataclass
-class SlurmJobConfig:
-    """Configuration for a single SLURM job."""
-    benchmark_name: str
-    run_number: int
-    node_count: int
-    time_limit: str  # "HH:MM:SS" format
-    partition: Optional[str]
-    account: Optional[str]
-    executable_arts: Path
-    executable_omp: Optional[Path]
-    arts_config_path: Path
-    run_dir: Path
-    size: str
-    threads: int  # For OpenMP comparison (single-node only)
-    port: Optional[str] = None  # Per-job port override (e.g., "10001" or "[10001-10002]")
-    gdb: bool = False  # Wrap executable with gdb for backtrace on crash
-    perf: bool = False  # Enable perf stat profiling for cache metrics
-    perf_interval: float = 0.1  # Perf sampling interval in seconds
-    exclude_nodes: Optional[str] = None  # SLURM nodes to exclude (e.g. "j006,j007")
-    job_label: Optional[str] = None  # Optional phase/step label to disambiguate job names
-
-
-@dataclass
-class SlurmJobStatus:
-    """Status of a submitted SLURM job."""
-    job_id: str
-    benchmark_name: str
-    run_number: int
-    node_count: int  # Node count for directory path
-    state: str  # PENDING, RUNNING, COMPLETED, FAILED, TIMEOUT, CANCELLED
-    run_dir: Optional[Path] = None
-    exit_code: Optional[int] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    elapsed: Optional[str] = None
-    node_list: Optional[str] = None
-
-
-@dataclass
-class SlurmBatchResult:
-    """Result of a batch submission experiment."""
-    experiment_id: str
-    experiment_dir: Path
-    job_manifest_path: Path
-    jobs_submitted: int
-    jobs_completed: int
-    jobs_failed: int
-    jobs_timeout: int
-    total_duration_sec: float
-    job_statuses: Dict[str, SlurmJobStatus] = field(default_factory=dict)
-
-
-@dataclass
-class SubmissionFailure:
-    """Metadata for an sbatch submission failure."""
-    benchmark_name: str
-    run_number: int
-    node_count: int
-    run_dir: Path
-    script_path: Path
-    error: str
+def _create_submission_failure(
+    config: SlurmJobConfig,
+    script_path: Path,
+    error: str,
+) -> SubmissionFailure:
+    """Create a normalized submission-failure record."""
+    return SubmissionFailure(
+        benchmark_name=config.benchmark_name,
+        run_number=config.run_number,
+        node_count=config.node_count,
+        run_dir=config.run_dir,
+        script_path=script_path,
+        error=error.strip(),
+    )
 
 
 # ============================================================================
@@ -527,16 +508,37 @@ def submit_all_jobs(
     job_configs: List[Tuple[SlurmJobConfig, Path]],
     console: Console,
     dry_run: bool = False,
+    max_concurrent: int = 0,
+    poll_interval: int = 10,
 ) -> Tuple[Dict[str, SlurmJobStatus], List[SubmissionFailure]]:
     """Submit all sbatch scripts and return job statuses.
 
+    Two modes of operation:
+
+    * **Unlimited** (``max_concurrent=0``, the default): every job is submitted
+      immediately and the function returns right away.  Job states will still
+      be PENDING/RUNNING — the caller is responsible for calling
+      ``wait_for_jobs_completion()`` afterwards to block until they finish.
+
+    * **Throttled** (``max_concurrent>0``): at most *max_concurrent* jobs are
+      kept active (PENDING + RUNNING) at any time.  As jobs complete, new ones
+      are submitted to fill the freed slots.  The function blocks until **all**
+      jobs have reached a terminal state (COMPLETED, FAILED, etc.), so the
+      caller can skip ``wait_for_jobs_completion()`` entirely.
+
     Args:
-        job_configs: List of (config, script_path) tuples
-        console: Rich console for output
-        dry_run: If True, don't actually submit (just validate)
+        job_configs: List of (config, script_path) tuples.
+        console: Rich console for output.
+        dry_run: If True, generate fake statuses without submitting.
+        max_concurrent: Maximum number of SLURM jobs that may be active at
+            once.  0 means no limit (submit everything immediately).
+        poll_interval: Seconds between ``squeue`` polls when throttling.
+            Ignored when ``max_concurrent=0``.
 
     Returns:
-        Dict mapping job_id -> SlurmJobStatus
+        Tuple of (job_statuses dict, submission_failures list).
+        When ``max_concurrent>0``, every status will already be in a terminal
+        state and will include final ``sacct`` metadata.
     """
     job_statuses: Dict[str, SlurmJobStatus] = {}
     submission_failures: List[SubmissionFailure] = []
@@ -546,15 +548,15 @@ def submit_all_jobs(
         for config, script_path in job_configs:
             # Use fake job ID for dry run
             fake_id = f"DRY_{config.benchmark_name}_{config.run_number}"
-            job_statuses[fake_id] = SlurmJobStatus(
-                job_id=fake_id,
-                benchmark_name=config.benchmark_name,
-                run_number=config.run_number,
-                node_count=config.node_count,
-                state="DRY_RUN",
-                run_dir=config.run_dir,
-            )
+            status = _create_pending_job_status(fake_id, config)
+            status.state = "DRY_RUN"
+            job_statuses[fake_id] = status
         return job_statuses, submission_failures
+
+    if max_concurrent > 0:
+        return _submit_jobs_throttled(
+            job_configs, console, max_concurrent, poll_interval,
+        )
 
     print_step(f"Submitting {len(job_configs)} jobs to SLURM...")
 
@@ -564,32 +566,146 @@ def submit_all_jobs(
     for config, script_path in job_configs:
         try:
             job_id = submit_job(script_path)
-            job_statuses[job_id] = SlurmJobStatus(
-                job_id=job_id,
-                benchmark_name=config.benchmark_name,
-                run_number=config.run_number,
-                node_count=config.node_count,
-                state="PENDING",
-                run_dir=config.run_dir,
-            )
+            job_statuses[job_id] = _create_pending_job_status(job_id, config)
             submitted += 1
         except subprocess.CalledProcessError as e:
             print_error(f"Failed to submit {config.benchmark_name} run {config.run_number}: {e.stderr}")
             failed += 1
-            submission_failures.append(
-                SubmissionFailure(
-                    benchmark_name=config.benchmark_name,
-                    run_number=config.run_number,
-                    node_count=config.node_count,
-                    run_dir=config.run_dir,
-                    script_path=script_path,
-                    error=(e.stderr or e.stdout or str(e)).strip(),
-                )
-            )
+            submission_failures.append(_create_submission_failure(
+                config,
+                script_path,
+                e.stderr or e.stdout or str(e),
+            ))
 
     print_success(f"Submitted {submitted} jobs")
     if failed > 0:
         print_error(f"{failed} submissions failed")
+
+    return job_statuses, submission_failures
+
+
+def _submit_jobs_throttled(
+    job_configs: List[Tuple[SlurmJobConfig, Path]],
+    console: Console,
+    max_concurrent: int,
+    poll_interval: int,
+) -> Tuple[Dict[str, SlurmJobStatus], List[SubmissionFailure]]:
+    """Submit jobs with a rolling concurrency limit, blocking until completion.
+
+    Keeps at most *max_concurrent* jobs active (PENDING + RUNNING).  When a
+    running job reaches a terminal state the freed slot is immediately filled
+    by submitting the next queued job.  A Rich live table shows real-time
+    progress (per-state counts, active/queued totals).
+
+    Ctrl+C stops submitting new jobs but does **not** cancel already-submitted
+    ones — the user can inspect or cancel them with ``squeue``/``scancel``.
+
+    Before returning, final ``sacct`` metadata is fetched for every submitted
+    job so the caller receives the same rich status it would get from
+    ``wait_for_jobs_completion()``.
+    """
+    job_statuses: Dict[str, SlurmJobStatus] = {}
+    submission_failures: List[SubmissionFailure] = []
+    pending_configs = list(job_configs)  # configs not yet submitted
+    total = len(job_configs)
+
+    def _active_count() -> int:
+        return sum(1 for s in job_statuses.values() if not _is_effectively_terminal(s))
+
+    def _submit_next() -> bool:
+        """Submit the next pending job. Returns True on success, False on failure."""
+        if not pending_configs:
+            return False
+        config, script_path = pending_configs.pop(0)
+        try:
+            job_id = submit_job(script_path)
+            job_statuses[job_id] = _create_pending_job_status(job_id, config)
+            return True
+        except subprocess.CalledProcessError as e:
+            print_error(
+                f"Failed to submit {config.benchmark_name} run {config.run_number}: {e.stderr}"
+            )
+            submission_failures.append(
+                _create_submission_failure(
+                    config,
+                    script_path,
+                    e.stderr or e.stdout or str(e),
+                )
+            )
+            return False
+
+    print_step(
+        f"Submitting {total} jobs to SLURM (max {max_concurrent} concurrent)..."
+    )
+    print_info("Press Ctrl+C to stop submission (already-submitted jobs continue)")
+
+    # Initial burst
+    for _ in range(min(max_concurrent, len(pending_configs))):
+        _submit_next()
+
+    try:
+        with Live(
+            _build_job_state_table(
+                job_statuses,
+                title=f"SLURM Throttled Submission ({len(job_statuses)}/{total})",
+                active_count=_active_count(),
+                queued_count=len(pending_configs),
+                failed_submissions=len(submission_failures),
+            ),
+            console=console,
+            refresh_per_second=1,
+            transient=True,
+        ) as live:
+            while True:
+                # Poll current states
+                job_ids = list(job_statuses.keys())
+                if job_ids:
+                    current_states = poll_jobs(job_ids)
+                    for job_id, state in current_states.items():
+                        if job_id in job_statuses:
+                            job_statuses[job_id].state = state
+
+                # Submit more if slots available
+                while pending_configs and _active_count() < max_concurrent:
+                    _submit_next()
+
+                live.update(
+                    _build_job_state_table(
+                        job_statuses,
+                        title=(
+                            f"SLURM Throttled Submission "
+                            f"({len(job_statuses) + len(submission_failures)}/{total})"
+                        ),
+                        active_count=_active_count(),
+                        queued_count=len(pending_configs),
+                        failed_submissions=len(submission_failures),
+                    )
+                )
+
+                # Done when nothing left to submit and all terminal
+                all_done = (
+                    not pending_configs
+                    and all(_is_effectively_terminal(s) for s in job_statuses.values())
+                )
+                if all_done:
+                    break
+
+                time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        print_warning("Submission stopped. Already-submitted jobs will continue running.")
+        print_info("Use 'squeue -u $USER' to check status or 'scancel' to cancel jobs.")
+
+    submitted = len(job_statuses)
+    failed = len(submission_failures)
+    completed = sum(1 for s in job_statuses.values() if _is_effectively_terminal(s))
+    print_success(f"Submitted {submitted} jobs ({completed} completed, {failed} failed to submit)")
+
+    # Get final sacct metadata
+    job_ids = list(job_statuses.keys())
+    if job_ids:
+        final_statuses = get_final_job_status(job_ids)
+        _apply_final_status_metadata(job_statuses, final_statuses)
 
     return job_statuses, submission_failures
 
@@ -766,6 +882,74 @@ def _has_completed_run_artifact(status: SlurmJobStatus) -> bool:
     return bool(status.run_dir and (status.run_dir / "result.json").exists())
 
 
+def _is_effectively_terminal(status: SlurmJobStatus) -> bool:
+    """Return whether the job can be treated as terminal for orchestration."""
+    if status.state in TERMINAL_JOB_STATES:
+        return True
+    return status.state == "UNKNOWN" and _has_completed_run_artifact(status)
+
+
+def _apply_final_status_metadata(
+    job_statuses: Dict[str, SlurmJobStatus],
+    final_statuses: Dict[str, SlurmJobStatus],
+) -> None:
+    """Overlay scheduler-finalized fields while preserving submission metadata."""
+    for job_id, final_status in final_statuses.items():
+        original = job_statuses.get(job_id)
+        if original is None:
+            continue
+        final_status.benchmark_name = original.benchmark_name
+        final_status.run_number = original.run_number
+        final_status.node_count = original.node_count
+        final_status.run_dir = original.run_dir
+        job_statuses[job_id] = final_status
+
+
+def _build_job_state_table(
+    job_statuses: Dict[str, SlurmJobStatus],
+    *,
+    title: str,
+    active_count: Optional[int] = None,
+    queued_count: Optional[int] = None,
+    failed_submissions: int = 0,
+) -> Table:
+    """Create the standard SLURM job-state table used by live displays."""
+    table = Table(title=title, box=None)
+    table.add_column("State", style="bold")
+    table.add_column("Count", justify="right")
+
+    state_counts: Dict[str, int] = {}
+    for status in job_statuses.values():
+        state_counts[status.state] = state_counts.get(status.state, 0) + 1
+
+    state_colors = {
+        "PENDING": Colors.SKIP,
+        "RUNNING": Colors.RUNNING,
+        "COMPLETED": Colors.PASS,
+        "FAILED": Colors.FAIL,
+        "TIMEOUT": Colors.FAIL,
+        "CANCELLED": Colors.SKIP,
+        "UNKNOWN": Colors.DIM,
+    }
+    for state, count in sorted(state_counts.items()):
+        color = state_colors.get(state, Colors.DIM)
+        table.add_row(f"[{color}]{state}[/{color}]", str(count))
+
+    if active_count is not None or queued_count is not None or failed_submissions:
+        table.add_row("", "")
+        if active_count is not None:
+            table.add_row("[bold]Active[/bold]", str(active_count))
+        if queued_count is not None:
+            table.add_row("[bold]Queued[/bold]", str(queued_count))
+        if failed_submissions:
+            table.add_row(
+                f"[{Colors.FAIL}]Submit failures[/{Colors.FAIL}]",
+                str(failed_submissions),
+            )
+
+    return table
+
+
 def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
     """Get final job status from sacct after completion.
 
@@ -821,48 +1005,16 @@ def wait_for_jobs_completion(
     if not job_ids:
         return job_statuses
 
-    def is_monitor_terminal(status: SlurmJobStatus) -> bool:
-        if status.state in TERMINAL_JOB_STATES:
-            return True
-        # Some SLURM installations briefly lose final accounting before sacct
-        # catches up. A completed per-run result artifact is sufficient to stop
-        # polling without treating UNKNOWN itself as terminal.
-        return status.state == "UNKNOWN" and _has_completed_run_artifact(status)
-
-    def create_status_table() -> Table:
-        """Create a status table for live display."""
-        table = Table(title="SLURM Job Status", box=None)
-        table.add_column("State", style="bold")
-        table.add_column("Count", justify="right")
-
-        # Count states
-        state_counts: Dict[str, int] = {}
-        for status in job_statuses.values():
-            state = status.state
-            state_counts[state] = state_counts.get(state, 0) + 1
-
-        # Add rows with colors
-        state_colors = {
-            "PENDING": Colors.SKIP,
-            "RUNNING": Colors.RUNNING,
-            "COMPLETED": Colors.PASS,
-            "FAILED": Colors.FAIL,
-            "TIMEOUT": Colors.FAIL,
-            "CANCELLED": Colors.SKIP,
-            "UNKNOWN": Colors.DIM,
-        }
-
-        for state, count in sorted(state_counts.items()):
-            color = state_colors.get(state, Colors.DIM)
-            table.add_row(f"[{color}]{state}[/{color}]", str(count))
-
-        return table
-
     print_step(f"Monitoring {len(job_ids)} jobs (poll every {poll_interval}s)")
     print_info("Press Ctrl+C to stop monitoring (jobs will continue running)")
 
     try:
-        with Live(create_status_table(), console=console, refresh_per_second=1, transient=True) as live:
+        with Live(
+            _build_job_state_table(job_statuses, title="SLURM Job Status"),
+            console=console,
+            refresh_per_second=1,
+            transient=True,
+        ) as live:
             while True:
                 # Poll current states
                 current_states = poll_jobs(job_ids)
@@ -873,13 +1025,10 @@ def wait_for_jobs_completion(
                         job_statuses[job_id].state = state
 
                 # Update display
-                live.update(create_status_table())
+                live.update(_build_job_state_table(job_statuses, title="SLURM Job Status"))
 
                 # Check if all jobs are done
-                all_done = all(
-                    is_monitor_terminal(status)
-                    for status in job_statuses.values()
-                )
+                all_done = all(_is_effectively_terminal(status) for status in job_statuses.values())
 
                 if all_done:
                     break
@@ -892,14 +1041,7 @@ def wait_for_jobs_completion(
 
     # Get final status from sacct
     final_statuses = get_final_job_status(job_ids)
-    for job_id, final_status in final_statuses.items():
-        if job_id in job_statuses:
-            # Preserve benchmark_name and run_number from original
-            final_status.benchmark_name = job_statuses[job_id].benchmark_name
-            final_status.run_number = job_statuses[job_id].run_number
-            final_status.node_count = job_statuses[job_id].node_count
-            final_status.run_dir = job_statuses[job_id].run_dir
-            job_statuses[job_id] = final_status
+    _apply_final_status_metadata(job_statuses, final_statuses)
 
     return job_statuses
 
@@ -913,545 +1055,15 @@ def collect_results(
     job_statuses: Dict[str, SlurmJobStatus],
     experiment_dir: Path,
 ) -> List[Dict[str, Any]]:
-    """Collect results from completed SLURM jobs.
-
-    Directory structure (experiment-specific):
-        results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/
-        └── run_{N}/
-            ├── result.json
-            ├── counters/
-            ├── perf/
-            ├── slurm.out
-            └── slurm.err
-
-    Args:
-        job_statuses: Final job statuses
-        experiment_dir: Experiment directory (kept for API compatibility)
-
-    Returns:
-        List of result dictionaries (one per job, including failures)
-    """
-    results = []
-    snapshot_cache: Dict[str, Dict[str, Any]] = {}
-
-    def _parse_key_value_tokens(text: str) -> Dict[str, str]:
-        parsed: Dict[str, str] = {}
-        for token in text.split():
-            if "=" not in token:
-                continue
-            key, value = token.split("=", 1)
-            parsed[key] = value
-        return parsed
-
-    def _run_snapshot_cmd(command: List[str], timeout: int) -> Dict[str, Any]:
-        snapshot: Dict[str, Any] = {
-            "command": " ".join(command),
-            "ok": False,
-        }
-        try:
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            snapshot["return_code"] = proc.returncode
-            snapshot["stdout"] = (proc.stdout or "").strip()
-            snapshot["stderr"] = (proc.stderr or "").strip()
-            snapshot["ok"] = proc.returncode == 0
-        except FileNotFoundError:
-            snapshot["error"] = f"{command[0]} not found"
-        except subprocess.TimeoutExpired:
-            snapshot["error"] = f"{command[0]} timed out after {timeout}s"
-        except Exception as exc:
-            snapshot["error"] = str(exc)
-        return snapshot
-
-    def _collect_slurm_snapshot(job_id: str) -> Dict[str, Any]:
-        if job_id in snapshot_cache:
-            return snapshot_cache[job_id]
-
-        snapshot: Dict[str, Any] = {
-            "captured_at": datetime.now().isoformat(),
-            "job_id": job_id,
-        }
-
-        sacct_cmd = [
-            "sacct",
-            f"--jobs={job_id}",
-            "--format=JobIDRaw,State,ExitCode,Elapsed,NodeList,Start,End,Reason",
-            "--parsable2",
-            "--noheader",
-        ]
-        sacct = _run_snapshot_cmd(sacct_cmd, timeout=20)
-        if sacct.get("ok") and sacct.get("stdout"):
-            lines = [line for line in str(sacct["stdout"]).splitlines() if line.strip()]
-            primary = None
-            for line in lines:
-                parts = line.split("|")
-                if parts and parts[0] == job_id:
-                    primary = line
-                    break
-            if primary is None:
-                primary = lines[0] if lines else ""
-            if primary:
-                parts = primary.split("|")
-                if len(parts) >= 8:
-                    exit_parts = parts[2].split(":", 1)
-                    sacct["parsed"] = {
-                        "job_id_raw": parts[0],
-                        "state": parts[1],
-                        "exit_code": parts[2],
-                        "elapsed": parts[3],
-                        "nodelist": parts[4],
-                        "start": parts[5],
-                        "end": parts[6],
-                        "reason": parts[7],
-                        "exit_status": int(exit_parts[0]) if exit_parts[0].isdigit() else None,
-                        "exit_signal": int(exit_parts[1]) if len(exit_parts) > 1 and exit_parts[1].isdigit() else None,
-                    }
-            sacct["lines"] = lines[-20:]
-        snapshot["sacct"] = sacct
-
-        scontrol_cmd = ["scontrol", "show", "job", job_id]
-        scontrol = _run_snapshot_cmd(scontrol_cmd, timeout=20)
-        if scontrol.get("ok") and scontrol.get("stdout"):
-            parsed = _parse_key_value_tokens(str(scontrol["stdout"]))
-            keys = [
-                "JobId",
-                "JobName",
-                "JobState",
-                "Reason",
-                "ExitCode",
-                "RunTime",
-                "SubmitTime",
-                "StartTime",
-                "EndTime",
-                "NodeList",
-                "BatchHost",
-                "NumNodes",
-                "NumCPUs",
-                "NumTasks",
-                "CPUs/Task",
-            ]
-            scontrol["parsed"] = {k: parsed.get(k) for k in keys if k in parsed}
-            scontrol["stdout_tail"] = str(scontrol["stdout"]).splitlines()[-60:]
-        snapshot["scontrol"] = scontrol
-
-        snapshot_cache[job_id] = snapshot
-        return snapshot
-
-    def _load_run_config(run_dir: Path) -> Dict[str, Any]:
-        run_config_file = run_dir / "run_config.json"
-        if not run_config_file.exists():
-            return {}
-        try:
-            payload = json.loads(run_config_file.read_text())
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
-
-    def _apply_run_config(result: Dict[str, Any], run_config: Dict[str, Any]) -> None:
-        if not run_config:
-            return
-        result["threads"] = run_config.get("threads")
-        result["nodes"] = run_config.get("nodes")
-        result["run_phase"] = run_config.get("run_phase")
-        if "profile" in run_config:
-            result["profile"] = run_config.get("profile")
-        if "perf" in run_config:
-            result["perf"] = run_config.get("perf")
-        if "perf_interval" in run_config:
-            result["perf_interval"] = run_config.get("perf_interval")
-        if "size" in run_config:
-            result["size"] = run_config.get("size")
-        if "compile_args" in run_config:
-            result["compile_args"] = run_config.get("compile_args")
-        if "cflags" in run_config:
-            result["cflags"] = run_config.get("cflags")
-        if "config" in run_config and isinstance(run_config["config"], dict):
-            result["config"] = run_config["config"]
-        if "reference" in run_config and isinstance(run_config["reference"], dict):
-            verification = result.setdefault("verification", {})
-            reference = run_config["reference"]
-            if "checksum" in reference:
-                verification.setdefault("reference_checksum", reference.get("checksum"))
-            if "source" in reference:
-                verification.setdefault("reference_source", reference.get("source"))
-
-    def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, Any]) -> None:
-        """Attach compile-time artifact locations from run_config when available."""
-        if not run_config:
-            return
-
-        arts_cfg_source = run_config.get("arts_cfg_source")
-        if not arts_cfg_source:
-            return
-
-        try:
-            arts_cfg_path = Path(str(arts_cfg_source)).resolve()
-        except Exception:
-            return
-
-        artifacts = result.setdefault("artifacts", {})
-        artifacts.setdefault("arts_config", str(arts_cfg_path))
-        artifacts.setdefault("build_dir", str(arts_cfg_path.parent))
-
-        benchmark_name = str(run_config.get("benchmark") or "")
-        example_name = benchmark_name.split("/")[-1] if benchmark_name else ""
-        if example_name:
-            arts_exe = arts_cfg_path.parent / f"{example_name}_arts"
-            omp_exe = arts_cfg_path.parent / f"{example_name}_omp"
-            if arts_exe.exists():
-                artifacts.setdefault("executable_arts", str(arts_exe))
-            if omp_exe.exists():
-                artifacts.setdefault("executable_omp", str(omp_exe))
-
-    def _apply_perf_artifacts(result: Dict[str, Any], run_dir: Path) -> None:
-        perf_dir = run_dir / "perf"
-        if not perf_dir.exists():
-            return
-
-        arts_perf_files = sorted(perf_dir.glob("arts_node_*.csv"))
-        omp_perf_file = perf_dir / "omp.csv"
-
-        artifacts = result.setdefault("artifacts", {})
-        artifacts["perf_dir"] = str(perf_dir)
-        if arts_perf_files:
-            artifacts["perf_files"] = [str(path) for path in arts_perf_files]
-        if omp_perf_file.exists():
-            artifacts["perf_omp_file"] = str(omp_perf_file)
-
-        if arts_perf_files:
-            perf_metrics = aggregate_perf_csvs(arts_perf_files)
-            if perf_metrics:
-                arts = result.setdefault("arts", {})
-                arts["perf_metrics"] = perf_metrics
-                arts["perf_csv_path"] = str(perf_dir)
-        if omp_perf_file.exists():
-            omp_perf_metrics = parse_perf_csv(omp_perf_file)
-            if omp_perf_metrics:
-                omp = result.setdefault("omp", {})
-                omp["perf_metrics"] = omp_perf_metrics
-                omp["perf_csv_path"] = str(omp_perf_file)
-
-    def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
-        summary: Dict[str, Any] = {
-            "path": str(log_path),
-            "exists": log_path.exists(),
-        }
-        if not log_path.exists():
-            return summary
-        try:
-            text = log_path.read_text(errors="replace")
-        except Exception as exc:
-            summary["read_error"] = str(exc)
-            return summary
-
-        lines = text.splitlines()
-        summary["line_count"] = len(lines)
-        summary["tail"] = lines[-tail_lines:]
-        if log_path.name.endswith(".err"):
-            summary["broken_pipe_count"] = len(re.findall(r"Broken pipe", text))
-            summary["srun_error_count"] = len(re.findall(r"^srun: error:", text, flags=re.MULTILINE))
-            summary["counter_timeout_warnings"] = len(
-                re.findall(r"Could not read counter file", text)
-            )
-            summary["remote_send_hard_timeout_count"] = len(
-                re.findall(r"Remote send hard-timeout", text)
-            )
-            summary["connection_refused_count"] = len(
-                re.findall(r"Connection refused", text)
-            )
-        return summary
-
-    def _slurm_err_summary(diagnostics: Any) -> Dict[str, Any]:
-        if not isinstance(diagnostics, dict):
-            return {}
-        slurm_stderr = diagnostics.get("slurm_stderr")
-        if isinstance(slurm_stderr, dict):
-            return slurm_stderr
-        slurm_err = diagnostics.get("slurm_err")
-        if isinstance(slurm_err, dict):
-            return slurm_err
-        return {}
-
-    def _runtime_warning_reasons(diagnostics: Any) -> List[str]:
-        slurm_err = _slurm_err_summary(diagnostics)
-        reasons: List[str] = []
-        if not slurm_err:
-            return reasons
-
-        srun_errors = int(slurm_err.get("srun_error_count") or 0)
-        broken_pipes = int(slurm_err.get("broken_pipe_count") or 0)
-        counter_timeouts = int(slurm_err.get("counter_timeout_warnings") or 0)
-        remote_send_timeouts = int(slurm_err.get("remote_send_hard_timeout_count") or 0)
-        connection_refused = int(slurm_err.get("connection_refused_count") or 0)
-
-        if srun_errors > 0:
-            reasons.append(f"srun_error_count={srun_errors}")
-        if broken_pipes > 0:
-            reasons.append(f"broken_pipe_count={broken_pipes}")
-        if counter_timeouts > 0:
-            reasons.append(f"counter_timeout_warnings={counter_timeouts}")
-        if remote_send_timeouts > 0:
-            reasons.append(f"remote_send_hard_timeout_count={remote_send_timeouts}")
-        if connection_refused > 0:
-            reasons.append(f"connection_refused_count={connection_refused}")
-        return reasons
-
-    def _build_failure_result(
-        status: SlurmJobStatus,
-        error: str,
-        run_dir: Path,
-        run_config: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        snapshot = _collect_slurm_snapshot(status.job_id)
-        parsed = snapshot.get("scontrol", {}).get("parsed", {})
-        snapshot_nodelist = parsed.get("NodeList")
-        resolved_nodelist = status.node_list or snapshot_nodelist
-        result_status = "TIMEOUT" if status.state == "TIMEOUT" else "FAIL"
-        failure_error = error
-        if status.state == "TIMEOUT" and error.startswith("No result.json found"):
-            failure_error = (
-                f"SLURM job timed out before result.json was written: {run_dir} "
-                "(increase --time-limit or reduce workload)."
-            )
-        failure: Dict[str, Any] = {
-            "benchmark": status.benchmark_name,
-            "run_number": status.run_number,
-            "status": result_status,
-            "slurm": {
-                "job_id": status.job_id,
-                "state": status.state,
-                "exit_code": status.exit_code,
-                "elapsed": status.elapsed,
-                "nodelist": resolved_nodelist,
-            },
-            "error": failure_error,
-            "_run_dir": str(run_dir),
-            "artifacts": {
-                "run_dir": str(run_dir),
-                "run_config": str(run_dir / "run_config.json"),
-                "result_json": str(run_dir / "result.json"),
-                "slurm_out": str(run_dir / "slurm.out"),
-                "slurm_err": str(run_dir / "slurm.err"),
-            },
-            "diagnostics": {
-                "slurm_out": _summarize_log(run_dir / "slurm.out"),
-                "slurm_err": _summarize_log(run_dir / "slurm.err"),
-                "slurm_snapshot": snapshot,
-            },
-        }
-        _apply_run_config(failure, run_config)
-        _apply_compile_artifact_paths(failure, run_config)
-        _apply_perf_artifacts(failure, run_dir)
-        warning_reasons = _runtime_warning_reasons(failure.get("diagnostics"))
-        if warning_reasons:
-            failure.setdefault("diagnostics", {})["runtime_warning"] = {
-                "has_warning": True,
-                "reasons": warning_reasons,
-            }
-        return failure
-
-    for job_id, status in job_statuses.items():
-        if status.state == "DRY_RUN":
-            continue
-
-        if not status.run_dir:
-            results.append({
-                "benchmark": status.benchmark_name,
-                "run_number": status.run_number,
-                "status": "FAIL",
-                "slurm": {
-                    "job_id": job_id,
-                    "state": status.state,
-                    "exit_code": status.exit_code,
-                },
-                "error": "Missing run_dir in SLURM job status",
-                "diagnostics": {
-                    "slurm_snapshot": _collect_slurm_snapshot(job_id),
-                },
-            })
-            continue
-
-        result_file = status.run_dir / "result.json"
-        run_config = _load_run_config(status.run_dir)
-
-        if result_file.exists():
-            try:
-                with open(result_file) as f:
-                    result = json.load(f)
-                # Merge SLURM status info without erasing richer per-run fields
-                # from job_result.py (for example, nodelist captured from
-                # SLURM_JOB_NODELIST in the batch script environment).
-                slurm_info = result.setdefault("slurm", {})
-                effective_state = status.state
-                if effective_state == "UNKNOWN" and result.get("status") == "PASS":
-                    effective_state = "COMPLETED"
-                    result.setdefault("diagnostics", {}).setdefault(
-                        "slurm_state_inference",
-                        {
-                            "state": "COMPLETED",
-                            "reason": (
-                                "Inferred from a successful result.json because "
-                                "SLURM accounting did not return a final state."
-                            ),
-                        },
-                    )
-                slurm_info["state"] = effective_state
-                if status.exit_code is not None:
-                    slurm_info["exit_code"] = status.exit_code
-                if status.elapsed is not None:
-                    slurm_info["elapsed"] = status.elapsed
-                if status.node_list:
-                    slurm_info["nodelist"] = status.node_list
-                result["_run_dir"] = str(status.run_dir)
-                _apply_run_config(result, run_config)
-                result.setdefault("artifacts", {}).update({
-                    "run_dir": str(status.run_dir),
-                    "run_config": str(status.run_dir / "run_config.json"),
-                    "result_json": str(result_file),
-                    "slurm_out": str(status.run_dir / "slurm.out"),
-                    "slurm_err": str(status.run_dir / "slurm.err"),
-                })
-                _apply_compile_artifact_paths(result, run_config)
-                _apply_perf_artifacts(result, status.run_dir)
-                warning_reasons = _runtime_warning_reasons(result.get("diagnostics"))
-                if warning_reasons:
-                    diagnostics = result.setdefault("diagnostics", {})
-                    diagnostics["runtime_warning"] = {
-                        "has_warning": True,
-                        "reasons": warning_reasons,
-                    }
-                    if str(result.get("status", "")).upper() == "PASS":
-                        result["status_detail"] = "WARN"
-                if result.get("status") != "PASS":
-                    result.setdefault("diagnostics", {}).setdefault(
-                        "slurm_snapshot",
-                        _collect_slurm_snapshot(status.job_id),
-                    )
-                elif warning_reasons:
-                    result.setdefault("diagnostics", {}).setdefault(
-                        "slurm_snapshot",
-                        _collect_slurm_snapshot(status.job_id),
-                    )
-                results.append(result)
-            except json.JSONDecodeError:
-                results.append(
-                    _build_failure_result(
-                        status,
-                        "Failed to parse result.json",
-                        status.run_dir,
-                        run_config,
-                    )
-                )
-        else:
-            results.append(
-                _build_failure_result(
-                    status,
-                    f"No result.json found in {status.run_dir}",
-                    status.run_dir,
-                    run_config,
-                )
-            )
-
-    return results
+    """Collect results from completed SLURM jobs."""
+    return _collect_results_impl(job_statuses, experiment_dir)
 
 
 def build_submission_failure_results(
     failures: List[SubmissionFailure],
 ) -> List[Dict[str, Any]]:
     """Build synthetic result rows for sbatch submission failures."""
-    results: List[Dict[str, Any]] = []
-
-    for failure in failures:
-        run_dir = failure.run_dir
-        run_config: Dict[str, Any] = {}
-        run_config_file = run_dir / "run_config.json"
-        if run_config_file.exists():
-            try:
-                payload = json.loads(run_config_file.read_text())
-                if isinstance(payload, dict):
-                    run_config = payload
-            except Exception:
-                run_config = {}
-
-        result: Dict[str, Any] = {
-            "benchmark": failure.benchmark_name,
-            "run_number": failure.run_number,
-            "status": "FAIL",
-            "status_detail": "SUBMIT_FAILED",
-            "error": f"SLURM submission failed: {failure.error}",
-            "_run_dir": str(run_dir),
-            "slurm": {
-                "job_id": None,
-                "state": "SUBMIT_FAILED",
-                "exit_code": None,
-                "elapsed": None,
-                "nodelist": None,
-            },
-            "artifacts": {
-                "run_dir": str(run_dir),
-                "run_config": str(run_config_file),
-                "result_json": str(run_dir / "result.json"),
-                "slurm_out": str(run_dir / "slurm.out"),
-                "slurm_err": str(run_dir / "slurm.err"),
-                "sbatch_script": str(failure.script_path),
-            },
-            "diagnostics": {
-                "submission_error": failure.error,
-                "sbatch_script": str(failure.script_path),
-            },
-        }
-
-        if run_config:
-            result["threads"] = run_config.get("threads")
-            result["nodes"] = run_config.get("nodes")
-            result["run_phase"] = run_config.get("run_phase")
-            if "profile" in run_config:
-                result["profile"] = run_config.get("profile")
-            if "perf" in run_config:
-                result["perf"] = run_config.get("perf")
-            if "perf_interval" in run_config:
-                result["perf_interval"] = run_config.get("perf_interval")
-            if "size" in run_config:
-                result["size"] = run_config.get("size")
-            if "compile_args" in run_config:
-                result["compile_args"] = run_config.get("compile_args")
-            if "cflags" in run_config:
-                result["cflags"] = run_config.get("cflags")
-            if "config" in run_config and isinstance(run_config["config"], dict):
-                result["config"] = run_config["config"]
-            if "reference" in run_config and isinstance(run_config["reference"], dict):
-                reference = run_config["reference"]
-                result["verification"] = {
-                    "note": "Submission failed before execution",
-                    "arts_checksum": None,
-                    "omp_checksum": None,
-                    "reference_checksum": reference.get("checksum"),
-                    "reference_source": reference.get("source"),
-                }
-            arts_cfg_source = run_config.get("arts_cfg_source")
-            if arts_cfg_source:
-                build_dir = Path(str(arts_cfg_source)).parent
-                artifacts = result.setdefault("artifacts", {})
-                artifacts["arts_config"] = str(arts_cfg_source)
-                artifacts["build_dir"] = str(build_dir)
-
-                benchmark_name = str(run_config.get("benchmark") or "")
-                if benchmark_name:
-                    example_name = benchmark_name.split("/")[-1]
-                    arts_candidate = build_dir / f"{example_name}_arts"
-                    omp_candidate = build_dir / f"{example_name}_omp"
-                    if arts_candidate.exists():
-                        artifacts["executable_arts"] = str(arts_candidate)
-                    if omp_candidate.exists():
-                        artifacts["executable_omp"] = str(omp_candidate)
-
-        results.append(result)
-
-    return results
+    return _build_submission_failure_results_impl(failures)
 
 
 def write_job_manifest(

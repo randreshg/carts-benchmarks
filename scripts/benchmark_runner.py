@@ -27,7 +27,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import threading
 
 logger = logging.getLogger(__name__)
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -64,13 +63,19 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-# SLURM batch support
-from slurm import batch as slurm_batch
+from slurm.experiment import (
+    SlurmBatchExecutor,
+    SlurmBatchRequest,
+    SlurmExecutorDependencies,
+    count_total_slurm_jobs,
+    find_multinode_disabled_benchmarks,
+    format_node_counts_display,
+    require_slurm_commands,
+)
 
 # Shared constants and parsing
 from benchmark_common import (
     CHECKSUM_PATTERNS,
-    PERF_CACHE_EVENTS,
     SKIP_DIRS,
     BENCHMARK_CLEAN_DIR_NAMES,
     BENCHMARK_CLEAN_DIR_GLOBS,
@@ -87,9 +92,7 @@ from benchmark_common import (
     parse_kernel_timings,
     parse_e2e_timings,
     parse_init_timings,
-    parse_counter_json,
     parse_perf_csv as _shared_parse_perf_csv,
-    filter_benchmark_output,
 )
 
 # ============================================================================
@@ -103,10 +106,29 @@ from benchmark_models import (
     RunResult, TimingResult, VerificationResult, ReferenceChecksum, ExperimentStep,
     Artifacts, BenchmarkConfig, BenchmarkResult,
 )
+from benchmark_execution import (
+    BenchmarkExecutionContext,
+    BenchmarkProcessRequest,
+    BenchmarkProcessRunner,
+    BenchmarkRunFiles,
+)
+from benchmark_orchestration import (
+    LocalStepExecutionRequest,
+    ResolvedStepConfig,
+    SlurmStepExecutionRequest,
+    StepCliDefaults,
+    StepExecutionOrchestrator,
+    StepResolver,
+)
+from benchmark_pipeline import (
+    ConfigExecutionExecutor,
+    ConfigExecutionPlan,
+    ExecutionHooks,
+)
 
 # Artifact management
 from benchmark_artifacts import ArtifactManager
-from benchmark_report import generate_report, generate_report_from_rows
+from benchmark_report import generate_report
 
 # Reproducibility metadata
 from benchmark_metadata import (
@@ -1344,6 +1366,210 @@ class BenchmarkRunner:
 
         return paths
 
+    def _make_process_runner(self) -> BenchmarkProcessRunner:
+        """Create the shared process runner used by local benchmark variants."""
+        return BenchmarkProcessRunner(
+            self.console,
+            verbose=self.verbose,
+            debug=self.debug,
+        )
+
+    def _create_execution_context(
+        self,
+        *,
+        name: str,
+        size: str,
+        bench_path: Path,
+        config: BenchmarkConfig,
+        effective_arts_cfg: Path,
+        desired_threads: int,
+        desired_nodes: int,
+        desired_launcher: str,
+        actual_omp_threads: int,
+        effective_cflags: str,
+        build_output_dir: Optional[Path] = None,
+        artifact_paths: Optional[Dict[str, Optional[str]]] = None,
+    ) -> BenchmarkExecutionContext:
+        """Create the resolved execution contract for one benchmark config."""
+        return BenchmarkExecutionContext(
+            name=name,
+            suite=name.split("/")[0] if "/" in name else "",
+            size=size,
+            bench_path=bench_path,
+            config=config,
+            effective_arts_cfg=effective_arts_cfg,
+            desired_threads=desired_threads,
+            desired_nodes=desired_nodes,
+            desired_launcher=desired_launcher,
+            actual_omp_threads=actual_omp_threads,
+            effective_cflags=effective_cflags,
+            run_args=self.get_run_args(bench_path, size),
+            verify_tolerance=self.get_verify_tolerance(bench_path),
+            build_output_dir=build_output_dir,
+            artifact_paths=artifact_paths or {},
+        )
+
+    def _create_run_files(
+        self,
+        *,
+        name: str,
+        bench_path: Path,
+        config: BenchmarkConfig,
+        desired_threads: int,
+        run_number: int,
+        runs: int,
+        counter_dir: Optional[Path],
+        perf_enabled: bool,
+        perf_dir: Optional[Path] = None,
+        run_timestamp: str = "",
+        sweep_log_names: bool = False,
+    ) -> BenchmarkRunFiles:
+        """Resolve per-run logs, counters, and perf output locations."""
+        am = self.artifact_manager
+        safe_bench_name = name.replace("/", "_")
+
+        run_dir: Optional[Path] = None
+        arts_log: Optional[Path] = None
+        omp_log: Optional[Path] = None
+        run_counter_dir: Optional[Path] = None
+        perf_output_dir: Optional[Path] = None
+        arts_perf_name = omp_perf_name = None
+        arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
+
+        if am:
+            run_dir = am.get_run_dir(name, config, run_number)
+            arts_log = run_dir / "arts.log"
+            omp_log = run_dir / "omp.log"
+            run_counter_dir = am.get_counter_dir(name, config, run_number)
+            if perf_enabled:
+                perf_output_dir = am.get_perf_dir(name, config, run_number)
+                arts_perf_name = "arts_cache.csv"
+                omp_perf_name = "omp_cache.csv"
+        else:
+            if counter_dir is not None:
+                if run_timestamp:
+                    run_counter_dir = counter_dir / run_timestamp / f"{safe_bench_name}_{run_number}"
+                else:
+                    run_counter_dir = counter_dir
+                run_counter_dir.mkdir(parents=True, exist_ok=True)
+
+            if self.debug >= 2:
+                logs_dir = bench_path / "logs"
+                if sweep_log_names:
+                    run_suffix = f"_r{run_number}" if runs > 1 else ""
+                    arts_log = logs_dir / f"arts_{desired_threads}t{run_suffix}.log"
+                    omp_log = logs_dir / f"omp_{desired_threads}t{run_suffix}.log"
+                else:
+                    arts_log = logs_dir / "arts.log"
+                    omp_log = logs_dir / "omp.log"
+
+            if perf_enabled:
+                effective_perf_dir = perf_dir or Path("./perfs")
+                if run_timestamp:
+                    perf_timestamp_dir = effective_perf_dir / run_timestamp
+                    perf_timestamp_dir.mkdir(parents=True, exist_ok=True)
+                    perf_output_dir = perf_timestamp_dir
+                    arts_perf_main = perf_timestamp_dir / f"{safe_bench_name}_arts.csv"
+                    arts_perf_temp = (
+                        perf_timestamp_dir / f"_temp_{safe_bench_name}_arts_{run_number}.csv"
+                    )
+                    omp_perf_main = perf_timestamp_dir / f"{safe_bench_name}_omp.csv"
+                    omp_perf_temp = (
+                        perf_timestamp_dir / f"_temp_{safe_bench_name}_omp_{run_number}.csv"
+                    )
+                    arts_perf_name = arts_perf_temp.name
+                    omp_perf_name = omp_perf_temp.name
+                elif not sweep_log_names:
+                    effective_perf_dir.mkdir(parents=True, exist_ok=True)
+                    perf_output_dir = effective_perf_dir
+
+        return BenchmarkRunFiles(
+            run_number=run_number,
+            run_dir=run_dir,
+            arts_log=arts_log,
+            omp_log=omp_log,
+            counter_dir=run_counter_dir,
+            perf_output_dir=perf_output_dir,
+            arts_perf_name=arts_perf_name,
+            omp_perf_name=omp_perf_name,
+            arts_perf_main=arts_perf_main,
+            arts_perf_temp=arts_perf_temp,
+            omp_perf_main=omp_perf_main,
+            omp_perf_temp=omp_perf_temp,
+        )
+
+    def _run_process_request(self, request: BenchmarkProcessRequest) -> RunResult:
+        """Execute one process request and parse the benchmark-specific outputs."""
+        outcome = self._make_process_runner().execute(request)
+
+        perf_metrics = None
+        perf_csv_path = None
+        if request.perf_enabled and outcome.perf_output and outcome.perf_output.exists():
+            perf_metrics = self.parse_perf_csv(outcome.perf_output)
+            perf_csv_path = str(outcome.perf_output)
+
+        return RunResult(
+            status=outcome.status,
+            duration_sec=outcome.duration_sec,
+            exit_code=outcome.exit_code,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            checksum=self.extract_checksum(outcome.stdout),
+            kernel_timings=self.extract_kernel_timings(outcome.stdout),
+            e2e_timings=self.extract_e2e_timings(outcome.stdout),
+            init_timings=self.extract_init_timings(outcome.stdout),
+            parallel_task_timing=self.extract_parallel_task_timings(outcome.stdout),
+            perf_metrics=perf_metrics,
+            perf_csv_path=perf_csv_path,
+        )
+
+    def _create_common_env(self) -> Dict[str, str]:
+        """Return environment overrides shared by local benchmark runs."""
+        env: Dict[str, str] = {}
+        if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
+            env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
+        return env
+
+    def _create_execution_plan(
+        self,
+        *,
+        execution: BenchmarkExecutionContext,
+        timeout: int,
+        run_numbers: Tuple[int, ...],
+        verify: bool,
+        compile_args: Optional[str],
+        perf_enabled: bool,
+        perf_interval: float,
+        counter_dir: Optional[Path],
+        perf_dir: Optional[Path],
+        run_timestamp: str,
+        sweep_log_names: bool,
+        report_speedup: bool,
+        env_overrides: Dict[str, str],
+        persisted_env_overrides: Optional[Dict[str, str]] = None,
+    ) -> ConfigExecutionPlan:
+        """Create the shared execution plan for one resolved benchmark config."""
+        return ConfigExecutionPlan(
+            execution=execution,
+            timeout=timeout,
+            run_numbers=run_numbers,
+            verify=verify,
+            compile_args=compile_args,
+            perf_enabled=perf_enabled,
+            perf_interval=perf_interval,
+            counter_dir=counter_dir,
+            perf_dir=perf_dir,
+            run_timestamp=run_timestamp,
+            sweep_log_names=sweep_log_names,
+            report_speedup=report_speedup,
+            env_overrides=dict(env_overrides),
+            persisted_env_overrides=(
+                dict(persisted_env_overrides)
+                if persisted_env_overrides is not None
+                else None
+            ),
+        )
+
     def run_with_thread_sweep(
         self,
         name: str,
@@ -1379,9 +1605,6 @@ class BenchmarkRunner:
             self.clean_benchmark(name)
 
         bench_path = self.benchmarks_dir / name
-        run_args = self.get_run_args(bench_path, size)
-        verify_tolerance = self.get_verify_tolerance(bench_path)
-
         # Determine effective config template
         effective_config = _resolve_effective_arts_config(bench_path, base_config)
 
@@ -1446,11 +1669,10 @@ class BenchmarkRunner:
                     if weak_cflags:
                         effective_cflags = f"{cflags} {weak_cflags}".strip()
 
-                env = {"OMP_NUM_THREADS": str(actual_omp_threads)}
+                env = self._create_common_env()
+                env["OMP_NUM_THREADS"] = str(actual_omp_threads)
                 if "OMP_WAIT_POLICY" not in os.environ:
                     env["OMP_WAIT_POLICY"] = "ACTIVE"
-                if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
-                    env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
 
                 build_output_dir: Optional[Path] = None
                 if am:
@@ -1458,178 +1680,36 @@ class BenchmarkRunner:
                     build_output_dir = am.get_artifacts_dir(name, config)
                     build_output_dir.mkdir(parents=True, exist_ok=True)
 
-                # Build ARTS variant
-                build_arts = self.build_benchmark(
-                    name, size, "arts", arts_cfg, effective_cflags, compile_args,
+                execution = self._create_execution_context(
+                    name=name,
+                    size=size,
+                    bench_path=bench_path,
+                    config=config,
+                    effective_arts_cfg=arts_cfg,
+                    desired_threads=threads,
+                    desired_nodes=desired_nodes,
+                    desired_launcher=desired_launcher,
+                    actual_omp_threads=actual_omp_threads,
+                    effective_cflags=effective_cflags,
                     build_output_dir=build_output_dir,
                 )
-
-                # Build OpenMP variant (single-node reference for correctness).
-                build_omp = self.build_benchmark(
-                    name, size, "openmp", None, effective_cflags,
-                    build_output_dir=build_output_dir,
+                plan = self._create_execution_plan(
+                    execution=execution,
+                    timeout=timeout,
+                    run_numbers=tuple(range(1, runs + 1)),
+                    verify=True,
+                    compile_args=compile_args,
+                    perf_enabled=perf_enabled,
+                    perf_interval=perf_interval,
+                    counter_dir=counter_dir,
+                    perf_dir=None,
+                    run_timestamp="",
+                    sweep_log_names=True,
+                    report_speedup=(desired_nodes == 1),
+                    env_overrides=env,
+                    persisted_env_overrides=env,
                 )
-
-                # Index build artifacts ONCE per config (build already happens in artifacts dir).
-                artifact_paths: Dict[str, Optional[str]] = {}
-                if am and build_output_dir is not None:
-                    artifact_paths = self._index_build_artifacts(
-                        build_output_dir, arts_cfg_used=arts_cfg
-                    )
-
-                # Run multiple times per configuration
-                for run_num in range(1, runs + 1):
-                    arts_log: Optional[Path] = None
-                    omp_log: Optional[Path] = None
-                    run_counter_dir: Optional[Path] = None
-
-                    if am:
-                        run_counter_dir = am.get_counter_dir(name, config, run_num)
-                        run_dir = am.get_run_dir(name, config, run_num)
-                        arts_log = run_dir / "arts.log"
-                        omp_log = run_dir / "omp.log"
-                    elif self.debug >= 2:
-                        logs_dir = bench_path / "logs"
-                        run_suffix = f"_r{run_num}" if runs > 1 else ""
-                        arts_log = logs_dir / f"arts_{threads}t{run_suffix}.log"
-                        omp_log = logs_dir / f"omp_{threads}t{run_suffix}.log"
-
-                    # Perf setup
-                    arts_perf_name = omp_perf_name = None
-                    perf_output_dir: Optional[Path] = None
-                    if perf_enabled and am:
-                        perf_output_dir = am.get_perf_dir(name, config, run_num)
-                        arts_perf_name = "arts_cache.csv"
-                        omp_perf_name = "omp_cache.csv"
-
-                    # Clean up stale ARTS port before run
-                    self._cleanup_port()
-
-                    # Run ARTS version
-                    if build_arts.status == Status.PASS and build_arts.executable:
-                        run_arts = self.run_benchmark(
-                            build_arts.executable,
-                            timeout,
-                            env=env,
-                            launcher=desired_launcher,
-                            node_count=desired_nodes,
-                            threads=threads,
-                            args=run_args,
-                            log_file=arts_log,
-                            perf_enabled=perf_enabled,
-                            perf_interval=perf_interval,
-                            perf_output_name=arts_perf_name or "perf_cache_arts.csv",
-                            perf_output_dir=perf_output_dir,
-                            counter_dir=run_counter_dir,
-                        )
-                    else:
-                        run_arts = RunResult(
-                            status=Status.SKIP, duration_sec=0.0,
-                            exit_code=-1, stdout="", stderr="Build failed",
-                        )
-
-                    # Run OpenMP version
-                    if build_omp.status == Status.PASS and build_omp.executable:
-                        run_omp = self.run_benchmark(
-                            build_omp.executable,
-                            timeout,
-                            env=env,
-                            args=run_args,
-                            log_file=omp_log,
-                            perf_enabled=perf_enabled,
-                            perf_interval=perf_interval,
-                            perf_output_name=omp_perf_name or "perf_cache_omp.csv",
-                            perf_output_dir=perf_output_dir,
-                        )
-                    else:
-                        run_omp = RunResult(
-                            status=Status.SKIP, duration_sec=0.0,
-                            exit_code=-1, stdout="", stderr="Build failed",
-                        )
-
-                    timing = self.calculate_timing(
-                        run_arts, run_omp, report_speedup=(desired_nodes == 1)
-                    )
-                    verification = self.verify_correctness(
-                        run_arts, run_omp, tolerance=verify_tolerance)
-                    artifacts = self.collect_artifacts(bench_path)
-
-                    # Update artifacts with paths inside experiment directory
-                    has_counters = False
-                    has_perf = False
-                    if am:
-                        run_dir = am.get_run_dir(name, config, run_num)
-                        artifacts_dir = am.get_artifacts_dir(name, config)
-
-                        # Build artifact paths
-                        for key, attr in [
-                            ("arts_config", "arts_config"),
-                            ("carts_metadata", "carts_metadata"),
-                            ("arts_metadata_mlir", "arts_metadata_mlir"),
-                            ("executable_arts", "executable_arts"),
-                            ("executable_omp", "executable_omp"),
-                        ]:
-                            if artifact_paths.get(key):
-                                setattr(artifacts, attr, artifact_paths[key])
-                        artifacts.build_dir = str(artifacts_dir)
-                        artifacts.run_dir = str(run_dir)
-                        artifacts.arts_log = str(arts_log) if arts_log else None
-                        artifacts.omp_log = str(omp_log) if omp_log else None
-
-                        # Counter files (already landed in place via counterFolder)
-                        counter_path = am.get_counter_dir(name, config, run_num)
-                        counter_files = sorted(counter_path.glob("*.json"))
-                        if counter_files:
-                            has_counters = True
-                            artifacts.counters_dir = str(counter_path)
-                            artifacts.counter_files = [str(f) for f in counter_files]
-                            init_sec, e2e_sec = parse_counter_json(counter_path)
-                            run_arts.counter_init_sec = init_sec
-                            run_arts.counter_e2e_sec = e2e_sec
-
-                        # Perf
-                        if perf_enabled and perf_output_dir and perf_output_dir.exists():
-                            perf_files = list(perf_output_dir.glob("*.csv"))
-                            if perf_files:
-                                has_perf = True
-
-                        am.record_run(name, config, run_num,
-                                      has_counters=has_counters, has_perf=has_perf)
-
-                        # Save effective arts.cfg and run_config.json per-run
-                        run_cfg_path = (
-                            Path(artifact_paths["arts_config"])
-                            if artifact_paths.get("arts_config")
-                            else arts_cfg
-                        )
-                        am.save_run_config(
-                            name, config, run_num,
-                            arts_cfg_path=run_cfg_path,
-                            env_overrides=env if env else None,
-                            size=size,
-                            cflags=effective_cflags or None,
-                            compile_args=compile_args or None,
-                            perf=perf_enabled,
-                        )
-
-                    result = BenchmarkResult(
-                        name=name,
-                        suite=name.split("/")[0] if "/" in name else "",
-                        size=size,
-                        config=config,
-                        run_number=run_num,
-                        build_arts=build_arts,
-                        build_omp=build_omp,
-                        run_arts=run_arts,
-                        run_omp=run_omp,
-                        timing=timing,
-                        verification=verification,
-                        artifacts=artifacts,
-                        timestamp=datetime.now().isoformat(),
-                        total_duration_sec=0.0,
-                        size_params=self.get_size_params(bench_path, size),
-                    )
-                    results.append(result)
+                results.extend(ConfigExecutionExecutor(self, plan).execute())
 
         return results
 
@@ -1667,277 +1747,27 @@ class BenchmarkRunner:
             counter_dir: Optional path to override the embedded counterFolder config value
                 via the ARTS per-variable env var mechanism.
         """
-        if not executable or not os.path.exists(executable):
-            return RunResult(
-                status=Status.SKIP,
-                duration_sec=0.0,
-                exit_code=-1,
-                stdout="",
-                stderr="Executable not found",
+        result = self._run_process_request(
+            BenchmarkProcessRequest(
+                executable=executable,
+                timeout=timeout,
+                env=dict(env or {}),
+                launcher=launcher,
+                node_count=node_count,
+                threads=threads,
+                args=list(args or []),
+                log_file=log_file,
+                perf_enabled=perf_enabled,
+                perf_interval=perf_interval,
+                perf_output_name=perf_output_name,
+                perf_output_dir=perf_output_dir,
+                counter_dir=counter_dir,
             )
-
-        # Merge with current environment
-        run_env = os.environ.copy()
-        if env:
-            run_env.update(env)
-        if counter_dir:
-            run_env["counterFolder"] = str(counter_dir)
-
-        # Build command based on launcher
-        if launcher == "slurm" and node_count > 1:
-            # For Slurm multi-node: wrap in srun
-            # ARTS reads SLURM_NNODES and SLURM_CPUS_PER_TASK from environment
-            cmd = [
-                "srun",
-                f"-N{node_count}",
-                "--ntasks-per-node=1",
-                f"--cpus-per-task={threads}",
-                executable,
-            ]
-        else:
-            # Local or SSH launcher: run directly (ARTS handles distribution for SSH)
-            cmd = [executable]
-        if args:
-            cmd.extend(args)
-
-        # Wrap with perf stat if enabled and available
-        perf_output: Optional[Path] = None
-        perf_available = False
-        if perf_enabled:
-            # Check if perf is available and has permission
-            try:
-                test_result = subprocess.run(
-                    ["perf", "stat", "-e", "cycles", "--", "/bin/true"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if test_result.returncode == 0 or "counted" in test_result.stderr.lower():
-                    perf_available = True
-                else:
-                    if self.verbose or self.debug >= 1:
-                        self.console.print(
-                            "[yellow]Warning: perf not available (permission denied or not installed). "
-                            "Running without perf profiling.[/]"
-                        )
-            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-                if self.verbose or self.debug >= 1:
-                    self.console.print(
-                        "[yellow]Warning: perf not found. Running without perf profiling.[/]"
-                    )
-
-        if perf_enabled and perf_available:
-            output_dir = perf_output_dir if perf_output_dir else Path(executable).parent
-            perf_output = output_dir / perf_output_name
-            events = ",".join(PERF_CACHE_EVENTS)
-            interval_ms = int(perf_interval * 1000)
-            # perf stat: -e events, -I interval_ms, -x separator, -o output file
-            perf_cmd = [
-                "perf", "stat",
-                "-e", events,
-                "-I", str(interval_ms),
-                "-x", ",",
-                "-o", str(perf_output),
-                "--"
-            ]
-            cmd = perf_cmd + cmd
-
-        # Debug output level 1: show commands
-        if self.debug >= 1:
-            env_str = " ".join(f"{k}={v}" for k, v in (env or {}).items())
-            if env_str:
-                self.console.print(f"[dim]$ {env_str} {' '.join(cmd)}[/]")
-            else:
-                self.console.print(f"[dim]$ {' '.join(cmd)}[/]")
-
-        start = time.time()
-        def to_text(value: object) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, bytes):
-                return value.decode(errors="replace")
-            return str(value)
-
-        def write_run_log(
-            duration: float,
-            exit_code: int,
-            stdout_text: str,
-            stderr_text: str,
-            timed_out: bool = False,
-            note: Optional[str] = None,
-        ) -> None:
-            if not log_file:
-                return
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_file, "w") as f:
-                f.write(f"# Command: {' '.join(cmd)}\n")
-                f.write(f"# Duration: {duration:.3f}s\n")
-                f.write(f"# Exit code: {exit_code}\n")
-                if timed_out:
-                    f.write("# Timed out: true\n")
-                if note:
-                    f.write(f"# Note: {note}\n")
-                f.write("\n")
-                if stdout_text:
-                    f.write("=== STDOUT ===\n")
-                    f.write(stdout_text)
-                    if not stdout_text.endswith("\n"):
-                        f.write("\n")
-                if stderr_text:
-                    f.write("=== STDERR ===\n")
-                    f.write(stderr_text)
-                    if not stderr_text.endswith("\n"):
-                        f.write("\n")
-
-        proc: Optional[subprocess.Popen[str]] = None
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=Path(executable).parent,
-                env=run_env,
-                start_new_session=True,
-            )
-            stdout_text, stderr_text = proc.communicate(timeout=timeout)
-            duration = time.time() - start
-            return_code = proc.returncode if proc.returncode is not None else -1
-
-            # Always write log file when path is provided
-            if log_file:
-                write_run_log(
-                    duration=duration,
-                    exit_code=return_code,
-                    stdout_text=stdout_text or "",
-                    stderr_text=stderr_text or "",
-                )
-                if self.debug >= 2:
-                    self.console.print(f"[dim]  Log: {log_file}[/]")
-            elif self.debug >= 2:
-                # No log file specified, print summary only
-                lines = ((stdout_text or "") + (stderr_text or "")).strip().split('\n')
-                if len(lines) > 10:
-                    self.console.print(
-                        f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
-                elif lines and lines[0]:
-                    for line in lines[:10]:
-                        self.console.print(f"[dim]  {line}[/]")
-
-            # Determine status based on exit code
-            if return_code == 0:
-                status = Status.PASS
-            elif return_code in (139, 134, 136):  # SEGV, ABRT, FPE
-                status = Status.CRASH
-            else:
-                status = Status.FAIL
-
-            checksum = self.extract_checksum(stdout_text)
-            kernel_timings = self.extract_kernel_timings(stdout_text)
-            e2e_timings = self.extract_e2e_timings(stdout_text)
-            init_timings = self.extract_init_timings(stdout_text)
-            parallel_task_timing = self.extract_parallel_task_timings(stdout_text)
-
-            # Parse perf metrics if enabled
-            perf_metrics = None
-            perf_csv_path = None
-            if perf_enabled and perf_output and perf_output.exists():
-                perf_metrics = self.parse_perf_csv(perf_output)
-                perf_csv_path = str(perf_output)
-
-            return RunResult(
-                status=status,
-                duration_sec=duration,
-                exit_code=return_code,
-                stdout=stdout_text or "",
-                stderr=stderr_text or "",
-                checksum=checksum,
-                kernel_timings=kernel_timings,
-                e2e_timings=e2e_timings,
-                init_timings=init_timings,
-                parallel_task_timing=parallel_task_timing,
-                perf_metrics=perf_metrics,
-                perf_csv_path=perf_csv_path,
-            )
-        except subprocess.TimeoutExpired as e:
-            duration = time.time() - start
-            timeout_stdout = to_text(e.stdout)
-            timeout_stderr = to_text(e.stderr)
-            timeout_note = f"Execution timed out after {timeout} seconds"
-
-            if proc is not None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                except Exception:
-                    pass
-
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-                    except Exception:
-                        pass
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
-
-                try:
-                    collected_stdout, collected_stderr = proc.communicate(timeout=2)
-                    if collected_stdout:
-                        timeout_stdout = to_text(collected_stdout)
-                    if collected_stderr:
-                        timeout_stderr = to_text(collected_stderr)
-                except subprocess.TimeoutExpired:
-                    pass
-                except Exception:
-                    pass
-
+        )
+        if result.status == Status.TIMEOUT:
             self._cleanup_port()
             time.sleep(0.5)
-
-            if log_file:
-                write_run_log(
-                    duration=duration,
-                    exit_code=124,
-                    stdout_text=timeout_stdout,
-                    stderr_text=f"{timeout_stderr}\n{timeout_note}".strip(),
-                    timed_out=True,
-                    note=timeout_note,
-                )
-                if self.debug >= 2:
-                    self.console.print(f"[dim]  Log: {log_file}[/]")
-            return RunResult(
-                status=Status.TIMEOUT,
-                duration_sec=duration,
-                exit_code=124,
-                stdout=timeout_stdout,
-                stderr=f"{timeout_stderr}\n{timeout_note}".strip(),
-            )
-        except Exception as e:
-            duration = time.time() - start
-            if log_file:
-                write_run_log(
-                    duration=duration,
-                    exit_code=-1,
-                    stdout_text="",
-                    stderr_text=str(e),
-                    note="Runner exception",
-                )
-                if self.debug >= 2:
-                    self.console.print(f"[dim]  Log: {log_file}[/]")
-            return RunResult(
-                status=Status.FAIL,
-                duration_sec=duration,
-                exit_code=-1,
-                stdout="",
-                stderr=str(e),
-            )
+        return result
 
     def extract_checksum(self, output: str) -> Optional[str]:
         """Extract checksum/result from benchmark output.
@@ -2232,10 +2062,7 @@ class BenchmarkRunner:
                            Used by run_all to update live display.
             partial_results: Optional dict to store partial results as phases complete.
         """
-        start_time = time.time()
-        timestamp = datetime.now().isoformat()
         bench_path = self.benchmarks_dir / name
-        suite = name.split("/")[0] if "/" in name else ""
 
         # Determine effective config template.
         effective_config = _resolve_effective_arts_config(bench_path, arts_config)
@@ -2270,15 +2097,11 @@ class BenchmarkRunner:
                 "Benchmark disabled for multi-node (has .disable-multinode marker)",
                 config,
             )
-
-        # Counter directory: artifact_manager path or explicit --counter-dir
-        safe_bench_name = name.replace("/", "_")
         run_counter_dir: Optional[Path] = None
         if am:
             run_counter_dir = am.get_counter_dir(name, config, run_number)
         elif counter_dir is not None:
-            run_counter_dir = counter_dir / run_timestamp / f"{safe_bench_name}_{run_number}"
-            run_counter_dir.mkdir(parents=True, exist_ok=True)
+            run_counter_dir = counter_dir
 
         # Generate config with overrides only if values actually differ from base
         need_generated = False
@@ -2314,274 +2137,39 @@ class BenchmarkRunner:
             build_output_dir = am.get_artifacts_dir(name, config)
             build_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build ARTS version
-        if phase_callback:
-            phase_callback(Phase.BUILD_ARTS)
-        build_arts = self.build_benchmark(
-            name, size, "arts", effective_arts_cfg, cflags, compile_args,
-            build_output_dir=build_output_dir,
-        )
-        if partial_results is not None:
-            partial_results["build_arts"] = build_arts
-
-        # Build OpenMP version (single-node reference for correctness).
-        if phase_callback:
-            phase_callback(Phase.BUILD_OMP)
-        build_omp = self.build_benchmark(
-            name, size, "openmp", None, cflags,
-            build_output_dir=build_output_dir,
-        )
-        if partial_results is not None:
-            partial_results["build_omp"] = build_omp
-
-        # Index build artifacts (build already happens in artifacts dir).
-        artifact_paths: Dict[str, Optional[str]] = {}
-        if am and build_output_dir is not None:
-            artifact_paths = self._index_build_artifacts(
-                build_output_dir, arts_cfg_used=effective_arts_cfg
-            )
-
-        # Setup log files
-        arts_log: Optional[Path] = None
-        omp_log: Optional[Path] = None
-        if am:
-            run_dir = am.get_run_dir(name, config, run_number)
-            arts_log = run_dir / "arts.log"
-            omp_log = run_dir / "omp.log"
-        elif self.debug >= 2:
-            logs_dir = bench_path / "logs"
-            arts_log = logs_dir / "arts.log"
-            omp_log = logs_dir / "omp.log"
-
-        run_args = self.get_run_args(bench_path, size)
-        verify_tolerance = self.get_verify_tolerance(bench_path)
-
-        # Ensure init timing is reported and align OMP wait/spin policy with ARTS.
-        common_env: Dict[str, str] = {}
-        if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
-            common_env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
-
-        # Setup perf output paths
-        perf_output_dir: Optional[Path] = None
-        arts_perf_name = omp_perf_name = None
-        arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
-
-        if perf_enabled and am:
-            # Perf CSVs land inside the run directory
-            perf_output_dir = am.get_perf_dir(name, config, run_number)
-            arts_perf_name = "arts_cache.csv"
-            omp_perf_name = "omp_cache.csv"
-        elif perf_enabled:
-            effective_perf_dir = perf_dir or Path("./perfs")
-            if run_timestamp:
-                perf_timestamp_dir = effective_perf_dir / run_timestamp
-                perf_timestamp_dir.mkdir(parents=True, exist_ok=True)
-                perf_output_dir = perf_timestamp_dir
-                arts_perf_main = perf_timestamp_dir / f"{safe_bench_name}_arts.csv"
-                arts_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_arts_{run_number}.csv"
-                omp_perf_main = perf_timestamp_dir / f"{safe_bench_name}_omp.csv"
-                omp_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_omp_{run_number}.csv"
-                arts_perf_name = arts_perf_temp.name
-                omp_perf_name = omp_perf_temp.name
-            else:
-                effective_perf_dir.mkdir(parents=True, exist_ok=True)
-                perf_output_dir = effective_perf_dir
-
-        # Clean up stale ARTS port before run
-        self._cleanup_port()
-
-        # Run ARTS version. Modern CARTS binaries embed the compile-time
-        # arts.cfg directly; the run-specific cfg we save alongside the run is
-        # for traceability and path-based fallback binaries.
-        if phase_callback:
-            phase_callback(Phase.RUN_ARTS)
-        if build_arts.status == Status.PASS and build_arts.executable:
-            run_arts = self.run_benchmark(
-                build_arts.executable,
-                timeout,
-                env=common_env,
-                launcher=desired_launcher,
-                node_count=desired_nodes,
-                threads=desired_threads,
-                args=run_args,
-                log_file=arts_log,
-                perf_enabled=perf_enabled,
-                perf_interval=perf_interval,
-                perf_output_name=arts_perf_name or "perf_cache_arts.csv",
-                perf_output_dir=perf_output_dir,
-                counter_dir=run_counter_dir,
-            )
-            # Append temp perf data to main CSV (non-artifact-manager mode).
-            if perf_enabled and arts_perf_temp and arts_perf_main:
-                append_perf_to_main_csv(arts_perf_temp, arts_perf_main, run_number)
-        else:
-            run_arts = RunResult(
-                status=Status.SKIP, duration_sec=0.0,
-                exit_code=-1, stdout="", stderr="Build failed",
-            )
-
-        # Parse counter JSON for timing data from run-specific counter directory
-        if run_counter_dir and run_counter_dir.exists():
-            init_sec, e2e_sec = parse_counter_json(run_counter_dir)
-            run_arts.counter_init_sec = init_sec
-            run_arts.counter_e2e_sec = e2e_sec
-
-        if partial_results is not None:
-            partial_results["run_arts"] = run_arts
-
-        # Run OpenMP version
-        if phase_callback:
-            phase_callback(Phase.RUN_OMP)
-        if build_omp.status == Status.PASS and build_omp.executable:
-            omp_env = dict(common_env)
-            omp_env["OMP_NUM_THREADS"] = str(actual_omp_threads)
-            if "OMP_WAIT_POLICY" not in os.environ:
-                omp_env["OMP_WAIT_POLICY"] = "ACTIVE"
-            run_omp = self.run_benchmark(
-                build_omp.executable,
-                timeout,
-                env=omp_env,
-                args=run_args,
-                log_file=omp_log,
-                perf_enabled=perf_enabled,
-                perf_interval=perf_interval,
-                perf_output_name=omp_perf_name or "perf_cache_omp.csv",
-                perf_output_dir=perf_output_dir,
-            )
-            # Append temp perf data to main CSV (non-artifact-manager mode).
-            if perf_enabled and omp_perf_temp and omp_perf_main:
-                append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
-        else:
-            run_omp = RunResult(
-                status=Status.SKIP, duration_sec=0.0,
-                exit_code=-1, stdout="", stderr="Build failed",
-            )
-
-        # Print trace output if enabled
-        if self.trace:
-            arts_combined = (run_arts.stdout or "") + ("\n" + run_arts.stderr if run_arts.stderr else "")
-            omp_combined = (run_omp.stdout or "") + ("\n" + run_omp.stderr if run_omp.stderr else "")
-            arts_output = filter_benchmark_output(arts_combined)
-            omp_output = filter_benchmark_output(omp_combined)
-
-            self.console.print(
-                f"\n[bold cyan]═══ CARTS Output ({name}) ═══[/]")
-            if arts_output:
-                self.console.print(arts_output)
-            elif arts_combined.strip():
-                self.console.print(arts_combined.strip())
-            else:
-                self.console.print("[dim](no benchmark output)[/]")
-
-            self.console.print(f"\n[bold green]═══ OMP Output ({name}) ═══[/]")
-            if omp_output:
-                self.console.print(omp_output)
-            elif omp_combined.strip():
-                self.console.print(omp_combined.strip())
-            else:
-                self.console.print("[dim](no benchmark output)[/]")
-            self.console.print()
-
-        # Calculate timing
-        timing = self.calculate_timing(
-            run_arts, run_omp, report_speedup=(desired_nodes == 1)
-        )
-
-        # Verify correctness
-        if verify:
-            verification = self.verify_correctness(
-                run_arts, run_omp, tolerance=verify_tolerance
-            )
-        else:
-            verification = VerificationResult(
-                correct=False,
-                arts_checksum=run_arts.checksum,
-                omp_checksum=run_omp.checksum,
-                tolerance_used=0.0,
-                note="Verification disabled",
-            )
-
-        # Collect artifacts
-        artifacts = self.collect_artifacts(bench_path)
-
-        # Update artifacts with experiment directory paths when using artifact_manager
-        has_counters = False
-        has_perf = False
-        if am:
-            run_dir = am.get_run_dir(name, config, run_number)
-            artifacts_dir = am.get_artifacts_dir(name, config)
-            for key, attr in [
-                ("arts_config", "arts_config"),
-                ("carts_metadata", "carts_metadata"),
-                ("arts_metadata_mlir", "arts_metadata_mlir"),
-                ("executable_arts", "executable_arts"),
-                ("executable_omp", "executable_omp"),
-            ]:
-                if artifact_paths.get(key):
-                    setattr(artifacts, attr, artifact_paths[key])
-            artifacts.build_dir = str(artifacts_dir)
-            artifacts.run_dir = str(run_dir)
-            artifacts.arts_log = str(arts_log) if arts_log else None
-            artifacts.omp_log = str(omp_log) if omp_log else None
-
-            # Counter files (already landed in place via counterFolder)
-            counter_path = am.get_counter_dir(name, config, run_number)
-            counter_files = sorted(counter_path.glob("*.json"))
-            if counter_files:
-                has_counters = True
-                artifacts.counters_dir = str(counter_path)
-                artifacts.counter_files = [str(f) for f in counter_files]
-
-            # Perf
-            if perf_enabled and perf_output_dir and perf_output_dir.exists():
-                if list(perf_output_dir.glob("*.csv")):
-                    has_perf = True
-
-            am.record_run(name, config, run_number,
-                          has_counters=has_counters, has_perf=has_perf)
-
-            # Save effective arts.cfg and run_config.json per-run
-            run_cfg_path = (
-                Path(artifact_paths["arts_config"])
-                if artifact_paths.get("arts_config")
-                else effective_arts_cfg
-            )
-            am.save_run_config(
-                name, config, run_number,
-                arts_cfg_path=run_cfg_path,
-                env_overrides=common_env if common_env else None,
-                size=size,
-                cflags=cflags or None,
-                compile_args=compile_args or None,
-                perf=perf_enabled,
-            )
-        else:
-            if effective_arts_cfg:
-                artifacts.arts_config = str(effective_arts_cfg)
-            if arts_log is not None:
-                artifacts.arts_log = str(arts_log)
-            if omp_log is not None:
-                artifacts.omp_log = str(omp_log)
-
-        total_duration = time.time() - start_time
-
-        return BenchmarkResult(
+        execution = self._create_execution_context(
             name=name,
-            suite=suite,
             size=size,
+            bench_path=bench_path,
             config=config,
-            run_number=run_number,
-            build_arts=build_arts,
-            build_omp=build_omp,
-            run_arts=run_arts,
-            run_omp=run_omp,
-            timing=timing,
-            verification=verification,
-            artifacts=artifacts,
-            timestamp=timestamp,
-            total_duration_sec=total_duration,
-            size_params=self.get_size_params(bench_path, size),
+            effective_arts_cfg=effective_arts_cfg,
+            desired_threads=desired_threads,
+            desired_nodes=desired_nodes,
+            desired_launcher=desired_launcher,
+            actual_omp_threads=actual_omp_threads,
+            effective_cflags=cflags,
+            build_output_dir=build_output_dir,
         )
+        plan = self._create_execution_plan(
+            execution=execution,
+            timeout=timeout,
+            run_numbers=(run_number,),
+            verify=verify,
+            compile_args=compile_args,
+            perf_enabled=perf_enabled,
+            perf_interval=perf_interval,
+            counter_dir=counter_dir,
+            perf_dir=perf_dir,
+            run_timestamp=run_timestamp,
+            sweep_log_names=False,
+            report_speedup=(desired_nodes == 1),
+            env_overrides=self._create_common_env(),
+        )
+        hooks = ExecutionHooks(
+            phase_callback=phase_callback,
+            partial_results=partial_results,
+        )
+        return ConfigExecutionExecutor(self, plan).execute(hooks)[0]
 
     def run_all(
         self,
@@ -4304,6 +3892,15 @@ def _parse_nodes_spec(spec: str) -> List[int]:
     except ValueError:
         return parse_node_spec(spec)
 
+_STEP_RESOLVER = StepResolver(
+    configs_dir=CONFIGS_DIR,
+    profiles_dir=PROFILES_DIR,
+    parse_threads=parse_threads,
+    parse_nodes_spec=_parse_nodes_spec,
+    parse_inline_steps=_parse_inline_steps,
+    load_experiment=_load_experiment,
+)
+
 
 def _run_step(
     runner: BenchmarkRunner,
@@ -4422,86 +4019,6 @@ def _run_step(
     )
 
 
-def _resolve_step_bench_list(
-    step_name: str,
-    all_benchmarks: List[str],
-    step_benchmarks: Optional[List[str]],
-) -> List[str]:
-    """Resolve benchmark list for a step, validating explicit subsets."""
-    if not step_benchmarks:
-        return all_benchmarks
-
-    requested = [b.strip() for b in step_benchmarks if b and b.strip()]
-    if not requested:
-        raise ValueError(f"Step '{step_name}' has an empty `benchmarks` selection")
-
-    unknown = [b for b in requested if b not in all_benchmarks]
-    if unknown:
-        raise ValueError(
-            f"Step '{step_name}' has unknown benchmark(s): {', '.join(unknown)}"
-        )
-
-    # Keep user-provided order but drop duplicates.
-    seen: set[str] = set()
-    ordered: List[str] = []
-    for bench in requested:
-        if bench in seen:
-            continue
-        seen.add(bench)
-        ordered.append(bench)
-    return ordered
-
-
-def _resolve_step_name(step: ExperimentStep, idx: int) -> str:
-    """Return a canonical, non-empty step name."""
-    resolved = (step.name or f"step_{idx}").strip()
-    return resolved if resolved else f"step_{idx}"
-
-
-def _step_name_to_token(step_name: str) -> str:
-    """Sanitize a step name for filesystem/script-safe identifiers."""
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", step_name).strip("_") or "default"
-
-
-def _validate_step_name_collisions(steps: List[ExperimentStep]) -> None:
-    """Fail fast on step-name collisions that would overwrite artifacts/scripts."""
-    names_to_indices: Dict[str, List[int]] = {}
-    token_to_names: Dict[str, set[str]] = {}
-
-    for idx, step in enumerate(steps, start=1):
-        step_name = _resolve_step_name(step, idx)
-        names_to_indices.setdefault(step_name, []).append(idx)
-        token = _step_name_to_token(step_name)
-        token_to_names.setdefault(token, set()).add(step_name)
-
-    duplicate_names = {
-        name: indices for name, indices in names_to_indices.items() if len(indices) > 1
-    }
-    if duplicate_names:
-        detail = "; ".join(
-            f"'{name}' at steps {indices}" for name, indices in duplicate_names.items()
-        )
-        raise ValueError(
-            f"Duplicate step names detected ({detail}). "
-            "Step names must be unique to avoid artifact collisions."
-        )
-
-    token_collisions = {
-        token: sorted(names)
-        for token, names in token_to_names.items()
-        if len(names) > 1
-    }
-    if token_collisions:
-        detail = "; ".join(
-            f"token '{token}' from names {names}"
-            for token, names in token_collisions.items()
-        )
-        raise ValueError(
-            f"Step-name token collisions detected ({detail}). "
-            "Rename steps to produce unique script-safe names."
-        )
-
-
 def _run_step_slurm(
     bench_list: List[str],
     size: str,
@@ -4521,6 +4038,8 @@ def _run_step_slurm(
     perf_interval: float,
     artifact_manager: Optional[ArtifactManager] = None,
     step_name: Optional[str] = None,
+    max_jobs: int = 0,
+    report_steps: Optional[List[ExperimentStep]] = None,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
     if not node_counts:
@@ -4554,9 +4073,91 @@ def _run_step_slurm(
             perf_interval=perf_interval,
             exclude_nodes=exclude_nodes,
             exclude=None,
+            max_jobs=max_jobs,
             artifact_manager=artifact_manager,
             step_name=step_name,
+            report_steps=report_steps,
         )
+
+
+def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
+    """Rebuild ARTS when a resolved step requests instrumentation changes."""
+    if not step_config.should_rebuild_arts:
+        return
+    _rebuild_arts(
+        console,
+        debug=step_config.debug,
+        profile=step_config.profile_path,
+    )
+
+
+def _run_local_resolved_step(
+    *,
+    step_config: ResolvedStepConfig,
+    request: LocalStepExecutionRequest,
+) -> List[BenchmarkResult]:
+    """Adapter from step orchestration to the existing local step runner."""
+    return _run_step(
+        runner=request.runner,
+        bench_list=step_config.bench_list,
+        size=step_config.size,
+        timeout=step_config.timeout,
+        verify=request.verify,
+        arts_config=step_config.arts_config,
+        threads_list=step_config.threads_list,
+        node_counts=step_config.node_counts,
+        launcher=step_config.launcher,
+        omp_threads=request.omp_threads,
+        weak_scaling=request.weak_scaling,
+        base_size=request.base_size,
+        runs=step_config.runs,
+        compile_args=step_config.compile_args,
+        perf=step_config.perf,
+        perf_interval=step_config.perf_interval,
+        run_timestamp=request.run_timestamp,
+        cflags=step_config.cflags,
+        quiet=request.quiet,
+    )
+
+
+def _run_slurm_resolved_step(
+    *,
+    step_config: ResolvedStepConfig,
+    request: SlurmStepExecutionRequest,
+    report_steps: Optional[List[ExperimentStep]],
+) -> None:
+    """Adapter from step orchestration to the existing SLURM step runner."""
+    _run_step_slurm(
+        bench_list=step_config.bench_list,
+        size=step_config.size,
+        node_counts=step_config.node_counts or [],
+        runs=step_config.runs,
+        verify=request.verify,
+        partition=request.partition,
+        time_limit=request.time_limit,
+        arts_config=step_config.arts_config,
+        threads_list=step_config.threads_list,
+        results_dir=request.results_dir,
+        verbose=request.verbose,
+        cflags=step_config.cflags,
+        compile_args=step_config.compile_args,
+        exclude_nodes=step_config.exclude_nodes,
+        perf=step_config.perf,
+        perf_interval=step_config.perf_interval,
+        artifact_manager=request.artifact_manager,
+        step_name=step_config.name,
+        max_jobs=request.max_jobs,
+        report_steps=report_steps,
+    )
+
+
+_STEP_EXECUTOR = StepExecutionOrchestrator(
+    resolver=_STEP_RESOLVER,
+    rebuild_step=_rebuild_arts_for_step,
+    run_local_step=_run_local_resolved_step,
+    run_slurm_step=_run_slurm_resolved_step,
+    print_step=print_step,
+)
 
 
 def _is_option_from_cli(
@@ -4656,6 +4257,12 @@ def run(
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
+    max_jobs: int = typer.Option(
+        0, "--max-jobs", "-J",
+        help="Max concurrent SLURM jobs (PENDING+RUNNING). "
+             "0 = unlimited (submit all at once). "
+             "When set, new jobs are submitted as earlier ones finish. "
+             "Only with --slurm"),
 ):
     """Run benchmarks with verification and timing."""
     try:
@@ -4729,87 +4336,52 @@ def run(
         print_error("Use either --experiment or --step, not both.")
         raise typer.Exit(2)
 
-    explicit_step_mode = bool(experiment or step)
-    configs_dir = CONFIGS_DIR
     try:
-        if step:
-            steps = _parse_inline_steps(step)
-        elif experiment:
-            steps = _load_experiment(experiment, configs_dir)
-        else:
-            implicit_step = ExperimentStep(
-                name="default",
-                profile=str(profile.resolve()) if profile else None,
-                debug=0,
-                runs=runs,
-                perf=perf,
-                perf_interval=perf_interval,
-                size=size,
-                threads=threads,
-                nodes=nodes,
-                timeout=timeout,
-                cflags=cflags,
-                compile_args=compile_args,
-                exclude_nodes=exclude_nodes,
-                arts_config=str(arts_config.resolve()) if arts_config else None,
-                launcher=launcher,
-            )
-            setattr(implicit_step, "_has_runs", True)
-            setattr(implicit_step, "_has_perf", True)
-            setattr(implicit_step, "_has_perf_interval", True)
-            setattr(implicit_step, "_has_size", True)
-            setattr(implicit_step, "_has_threads", threads is not None)
-            setattr(implicit_step, "_has_nodes", nodes is not None)
-            setattr(implicit_step, "_has_timeout", True)
-            setattr(implicit_step, "_has_cflags", cflags is not None)
-            setattr(implicit_step, "_has_compile_args", compile_args is not None)
-            setattr(implicit_step, "_has_exclude_nodes", exclude_nodes is not None)
-            setattr(implicit_step, "_has_arts_config", arts_config is not None)
-            setattr(implicit_step, "_has_profile", profile is not None)
-            setattr(implicit_step, "_has_benchmarks", False)
-            steps = [implicit_step]
+        steps, explicit_step_mode = _STEP_RESOLVER.load_steps(
+            experiment=experiment,
+            step_args=step,
+            size=size,
+            timeout=timeout,
+            runs=runs,
+            perf=perf,
+            perf_interval=perf_interval,
+            threads=threads,
+            nodes=nodes,
+            cflags=cflags,
+            compile_args=compile_args,
+            exclude_nodes=exclude_nodes,
+            arts_config=arts_config,
+            profile=profile,
+            launcher=launcher,
+        )
     except ValueError as e:
         print_error(str(e))
         raise typer.Exit(1)
 
-    if explicit_step_mode and profile:
-        if len(steps) == 1 and not getattr(steps[0], "_has_profile", False):
-            steps[0].profile = str(profile.resolve())
-            setattr(steps[0], "_has_profile", True)
-        elif not quiet:
-            print_warning(
-                "Ignoring --profile because explicit steps are provided. "
-                "Use step `profile=...` instead."
-            )
-
-    # Validate resolved step paths from all entry paths (experiment, --step, CLI).
-    for s in steps:
-        if s.arts_config and not Path(s.arts_config).exists():
-            print_error(f"Step '{s.name}': arts_config not found: {s.arts_config}")
-            raise typer.Exit(1)
-        if s.profile and not Path(s.profile).exists():
-            print_error(f"Step '{s.name}': profile not found: {s.profile}")
-            raise typer.Exit(1)
+    _STEP_RESOLVER.apply_cli_profile_override(
+        steps,
+        explicit_step_mode=explicit_step_mode,
+        profile=profile,
+        quiet=quiet,
+        print_warning=print_warning,
+    )
+    try:
+        _STEP_RESOLVER.validate_step_paths(steps)
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
 
     try:
-        _validate_step_name_collisions(steps)
+        _STEP_RESOLVER.validate_step_name_collisions(steps)
     except ValueError as e:
         print_error(str(e))
         raise typer.Exit(2)
 
-    step_sizes = [
-        s.size for s in steps
-        if getattr(s, "_has_size", False) and s.size
-    ]
-    if size_from_cli:
-        effective_size_label = size
-    elif step_sizes:
-        unique_step_sizes = sorted(set(step_sizes))
-        effective_size_label = (
-            unique_step_sizes[0] if len(unique_step_sizes) == 1 else "mixed"
-        )
-    else:
-        effective_size_label = size
+    effective_size_label = _STEP_RESOLVER.resolve_effective_size_label(
+        steps,
+        size,
+        size_from_cli,
+    )
 
     # Reject simultaneous thread + node sweeps early (per-step checks also exist).
     has_thread_sweep = bool(base_threads_list and len(base_threads_list) > 1)
@@ -4818,107 +4390,44 @@ def run(
         print_error("Cannot sweep both threads and nodes simultaneously.")
         raise typer.Exit(2)
 
+    step_defaults = StepCliDefaults(
+        size=size,
+        timeout=timeout,
+        threads_spec=threads,
+        nodes_spec=nodes,
+        runs=runs,
+        perf=perf,
+        perf_interval=perf_interval,
+        cflags=cflags,
+        compile_args=compile_args,
+        exclude_nodes=exclude_nodes,
+        arts_config=arts_config,
+        launcher=launcher,
+        explicit_step_mode=explicit_step_mode,
+        size_from_cli=size_from_cli,
+    )
+
     if slurm:
         if weak_scaling:
             print_error("--weak-scaling is not supported with --slurm.")
             raise typer.Exit(2)
 
         try:
-            for idx, step_def in enumerate(steps, start=1):
-                step_name = _resolve_step_name(step_def, idx)
-                if not quiet and len(steps) > 1:
-                    print_step(step_name, idx, len(steps))
-
-                step_bench_list = _resolve_step_bench_list(
-                    step_name,
-                    bench_list,
-                    step_def.benchmarks,
-                )
-
-                step_profile_path = (
-                    Path(step_def.profile)
-                    if step_def.profile
-                    else PROFILES_DIR / "profile-none.cfg"
-                )
-                has_explicit_step_profile = step_def.profile is not None
-                should_rebuild = (
-                    explicit_step_mode
-                    or has_explicit_step_profile
-                    or step_def.debug > 0
-                )
-                if should_rebuild:
-                    _rebuild_arts(
-                        console,
-                        debug=step_def.debug,
-                        profile=step_profile_path,
-                    )
-
-                use_step_threads = getattr(step_def, "_has_threads", False) or not explicit_step_mode
-                use_step_nodes = getattr(step_def, "_has_nodes", False) or not explicit_step_mode
-                use_step_runs = getattr(step_def, "_has_runs", False) or not explicit_step_mode
-                use_step_perf = getattr(step_def, "_has_perf", False) or not explicit_step_mode
-                use_step_perf_interval = (
-                    getattr(step_def, "_has_perf_interval", False) or not explicit_step_mode
-                )
-                use_step_size = getattr(step_def, "_has_size", False) and not size_from_cli
-                use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
-                use_step_compile_args = (
-                    getattr(step_def, "_has_compile_args", False) or not explicit_step_mode
-                )
-                use_step_exclude_nodes = (
-                    getattr(step_def, "_has_exclude_nodes", False) or not explicit_step_mode
-                )
-                use_step_arts_config = (
-                    getattr(step_def, "_has_arts_config", False) or not explicit_step_mode
-                )
-
-                step_threads_spec = step_def.threads if use_step_threads else threads
-                step_nodes_spec = step_def.nodes if use_step_nodes else nodes
-                step_runs = step_def.runs if use_step_runs else runs
-                step_perf = step_def.perf if use_step_perf else perf
-                step_perf_interval = (
-                    step_def.perf_interval if use_step_perf_interval else perf_interval
-                )
-                step_size = step_def.size if (use_step_size and step_def.size) else size
-                step_cflags = step_def.cflags if use_step_cflags else cflags
-                step_compile_args = step_def.compile_args if use_step_compile_args else compile_args
-                step_exclude_nodes = (
-                    step_def.exclude_nodes if use_step_exclude_nodes else exclude_nodes
-                )
-
-                if not step_nodes_spec:
-                    raise ValueError("--slurm requires --nodes (or step nodes override)")
-                step_node_counts = _parse_nodes_spec(step_nodes_spec)
-                step_threads_list = parse_threads(step_threads_spec) if step_threads_spec else None
-                step_has_thread_sweep = bool(step_threads_list and len(step_threads_list) > 1)
-                step_has_node_sweep = bool(step_node_counts and len(step_node_counts) > 1)
-                if step_has_thread_sweep and step_has_node_sweep:
-                    raise ValueError("Cannot sweep both threads and nodes simultaneously.")
-
-                step_arts_config: Optional[Path] = arts_config
-                if use_step_arts_config and step_def.arts_config:
-                    step_arts_config = Path(step_def.arts_config).resolve()
-
-                _run_step_slurm(
-                    bench_list=step_bench_list,
-                    size=step_size,
-                    node_counts=step_node_counts,
-                    runs=step_runs,
+            _STEP_EXECUTOR.execute_slurm_steps(
+                steps=steps,
+                bench_list=bench_list,
+                defaults=step_defaults,
+                request=SlurmStepExecutionRequest(
                     verify=verify,
                     partition=partition,
                     time_limit=time_limit,
-                    arts_config=step_arts_config,
-                    threads_list=step_threads_list,
                     results_dir=results_dir,
                     verbose=verbose,
-                    cflags=step_cflags,
-                    compile_args=step_compile_args,
-                    exclude_nodes=step_exclude_nodes,
-                    perf=step_perf,
-                    perf_interval=step_perf_interval,
+                    quiet=quiet,
                     artifact_manager=am,
-                    step_name=step_name,
-                )
+                    max_jobs=max_jobs,
+                ),
+            )
         except ValueError as e:
             console.print(f"\n[red]Error:[/] {e}")
             raise typer.Exit(1)
@@ -4987,13 +4496,6 @@ def run(
     # Run benchmarks
     start_time = time.time()
 
-    # Determine if sweep mode
-    has_thread_sweep = bool(base_threads_list and len(base_threads_list) > 1)
-    has_node_sweep = bool(base_node_counts and len(base_node_counts) > 1)
-    if has_thread_sweep and has_node_sweep:
-        print_error("Cannot sweep both threads and nodes simultaneously.")
-        raise typer.Exit(2)
-
     # Export metadata: differentiate fixed config vs sweep.
     fixed_threads_meta: Optional[int] = None
     fixed_nodes_meta: Optional[int] = None
@@ -5005,119 +4507,26 @@ def run(
     if not has_node_sweep and base_node_counts and len(base_node_counts) == 1:
         fixed_nodes_meta = int(base_node_counts[0])
 
-    all_results: List[BenchmarkResult] = []
     try:
-        for idx, step_def in enumerate(steps, start=1):
-            step_name = _resolve_step_name(step_def, idx)
-
-            if not quiet and len(steps) > 1:
-                print_step(step_name, idx, len(steps))
-
-            step_bench_list = _resolve_step_bench_list(
-                step_name,
-                bench_list,
-                step_def.benchmarks,
-            )
-
-            am.set_phase(step_name)
-            if explicit_step_mode:
-                runner.clean = True
-            else:
-                runner.clean = clean
-
-            step_profile_path = (
-                Path(step_def.profile)
-                if step_def.profile
-                else PROFILES_DIR / "profile-none.cfg"
-            )
-            has_explicit_step_profile = step_def.profile is not None
-            should_rebuild = (
-                explicit_step_mode
-                or has_explicit_step_profile
-                or step_def.debug > 0
-            )
-            if should_rebuild:
-                _rebuild_arts(
-                    console,
-                    debug=step_def.debug,
-                    profile=step_profile_path,
-                )
-
-            use_step_threads = getattr(step_def, "_has_threads", False) or not explicit_step_mode
-            use_step_nodes = getattr(step_def, "_has_nodes", False) or not explicit_step_mode
-            use_step_timeout = getattr(step_def, "_has_timeout", False) or not explicit_step_mode
-            use_step_size = getattr(step_def, "_has_size", False) and not size_from_cli
-            use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
-            use_step_compile_args = (
-                getattr(step_def, "_has_compile_args", False) or not explicit_step_mode
-            )
-            use_step_runs = getattr(step_def, "_has_runs", False) or not explicit_step_mode
-            use_step_perf = getattr(step_def, "_has_perf", False) or not explicit_step_mode
-            use_step_perf_interval = (
-                getattr(step_def, "_has_perf_interval", False) or not explicit_step_mode
-            )
-            use_step_arts_config = (
-                getattr(step_def, "_has_arts_config", False) or not explicit_step_mode
-            )
-            use_step_launcher = getattr(step_def, "_has_launcher", False) or not explicit_step_mode
-
-            step_threads_spec = step_def.threads if use_step_threads else threads
-            step_nodes_spec = step_def.nodes if use_step_nodes else nodes
-            step_timeout = (
-                step_def.timeout if (use_step_timeout and step_def.timeout is not None) else timeout
-            )
-            step_size = step_def.size if (use_step_size and step_def.size) else size
-            step_cflags = step_def.cflags if use_step_cflags else cflags
-            step_compile_args = step_def.compile_args if use_step_compile_args else compile_args
-            step_runs = step_def.runs if use_step_runs else runs
-            step_perf = step_def.perf if use_step_perf else perf
-            step_perf_interval = (
-                step_def.perf_interval if use_step_perf_interval else perf_interval
-            )
-
-            step_arts_config: Optional[Path] = arts_config
-            if use_step_arts_config and step_def.arts_config:
-                step_arts_config = Path(step_def.arts_config).resolve()
-
-            step_launcher = step_def.launcher if use_step_launcher and step_def.launcher else launcher
-
-            step_threads_list = parse_threads(step_threads_spec) if step_threads_spec else None
-            step_node_counts = _parse_nodes_spec(step_nodes_spec) if step_nodes_spec else None
-            step_has_thread_sweep = bool(step_threads_list and len(step_threads_list) > 1)
-            step_has_node_sweep = bool(step_node_counts and len(step_node_counts) > 1)
-            if step_has_thread_sweep and step_has_node_sweep:
-                raise ValueError("Cannot sweep both threads and nodes simultaneously.")
-
-            step_results = _run_step(
+        results = _STEP_EXECUTOR.execute_local_steps(
+            steps=steps,
+            bench_list=bench_list,
+            defaults=step_defaults,
+            request=LocalStepExecutionRequest(
                 runner=runner,
-                bench_list=step_bench_list,
-                size=step_size,
-                timeout=step_timeout,
                 verify=verify,
-                arts_config=step_arts_config,
-                threads_list=step_threads_list,
-                node_counts=step_node_counts,
-                launcher=step_launcher,
                 omp_threads=omp_threads,
                 weak_scaling=weak_scaling,
                 base_size=base_size,
-                runs=step_runs,
-                compile_args=step_compile_args,
-                perf=step_perf,
-                perf_interval=step_perf_interval,
                 run_timestamp=run_timestamp,
-                cflags=step_cflags,
+                clean=clean,
                 quiet=quiet,
-            )
-            result_phase = step_name if (explicit_step_mode or len(steps) > 1) else None
-            for result in step_results:
-                result.run_phase = result_phase
-            all_results.extend(step_results)
+                artifact_manager=am,
+            ),
+        )
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
         raise typer.Exit(1)
-
-    results = all_results
     total_duration = time.time() - start_time
 
     # Display results
@@ -5333,26 +4742,6 @@ def clean(
 # ============================================================================
 
 
-def _load_existing_job_statuses(manifest_file: Path) -> Dict[str, slurm_batch.SlurmJobStatus]:
-    """Load previously stored SLURM job statuses from job_manifest.json."""
-    if not manifest_file.exists():
-        return {}
-    try:
-        existing_manifest = json.loads(manifest_file.read_text())
-        statuses = {}
-        for job_id, status_payload in existing_manifest.get("jobs", {}).items():
-            if not isinstance(status_payload, dict):
-                continue
-            payload = dict(status_payload)
-            run_dir_raw = payload.get("run_dir")
-            if run_dir_raw:
-                payload["run_dir"] = Path(run_dir_raw)
-            statuses[job_id] = slurm_batch.SlurmJobStatus(**payload)
-        return statuses
-    except Exception:
-        return {}
-
-
 def _execute_slurm_batch(
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to run (default: all)"),
@@ -5413,76 +4802,61 @@ def _execute_slurm_batch(
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
+    max_jobs: int = typer.Option(
+        0, "--max-jobs", "-J",
+        help="Max concurrent SLURM jobs (PENDING+RUNNING). "
+             "0 = unlimited (submit all at once). "
+             "When set, new jobs are submitted as earlier ones finish"),
     artifact_manager: Optional[ArtifactManager] = None,
     step_name: Optional[str] = None,
+    report_steps: Optional[List[ExperimentStep]] = None,
 ):
     """Submit benchmarks as SLURM batch jobs.
 
     This command:
     1. Builds all benchmarks locally (reusable across jobs)
     2. Generates sbatch scripts for each (benchmark x node_count x run)
-    3. Submits all jobs to SLURM queue
-    4. Monitors job progress
+    3. Submits jobs to the SLURM queue
+    4. Monitors job progress until all jobs finish
     5. Collects and aggregates results
+
+    By default every job is submitted at once and a polling monitor waits for
+    completion.  Use ``--max-jobs N`` to cap how many jobs are active
+    (PENDING + RUNNING) simultaneously — new jobs are submitted as earlier ones
+    finish, so the SLURM queue never has more than N of your jobs at a time.
+    When throttling is active, submission and monitoring happen in a single
+    step (Phase 3) and the separate monitoring phase (Phase 4) is skipped.
 
     Example:
         carts benchmarks run --slurm --nodes=1-15 --runs 10
+        carts benchmarks run --slurm --nodes=1-15 --runs 10 --max-jobs 20
         carts benchmarks run polybench/gemm --slurm --nodes=4 --time-limit 00:30:00
         carts benchmarks run --slurm --nodes=1,2,4,8,16 --partition compute
 
     Key Features:
-    - Submit all jobs at once (no sequential waiting)
+    - Submit all jobs at once, or throttle with --max-jobs N
     - Exclusive node allocation for resource isolation
     - Each job has isolated counter directory (no data collision)
     - Sweep across multiple node counts with --nodes=1-15
     """
-    # Initialize
-    try:
-        size = parse_size(size, "--size")
-    except ValueError as e:
-        print_error(str(e))
-        raise typer.Exit(2)
-
-    slurm_start_time = time.time()
+    size = parse_size(size, "--size")
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
-
-    required_slurm_cmds = ["sbatch"]
-    if not dry_run:
-        required_slurm_cmds.extend(["squeue", "sacct", "scontrol"])
-    missing_slurm_cmds = [cmd for cmd in required_slurm_cmds if shutil.which(cmd) is None]
-    if missing_slurm_cmds:
-        print_error(
-            "Missing required SLURM command(s): "
-            + ", ".join(missing_slurm_cmds)
-            + ". Run this on a SLURM login node or add SLURM tools to PATH."
-        )
-        raise typer.Exit(1)
+    require_slurm_commands(dry_run)
 
     # Parse node counts from --nodes parameter
-    try:
-        node_counts = parse_node_spec(nodes)
-    except ValueError as e:
-        print_error(f"Error parsing --nodes: {e}")
-        raise typer.Exit(1)
+    node_counts = parse_node_spec(nodes)
 
     # Determine explicit arts config override (if provided).
     explicit_arts_config = arts_config.resolve() if arts_config else None
     if explicit_arts_config is not None and not explicit_arts_config.exists():
-        print_error(f"arts.cfg not found: {explicit_arts_config}")
-        raise typer.Exit(1)
+        raise ValueError(f"arts.cfg not found: {explicit_arts_config}")
 
     # Get threads from explicit config or default config.
     if threads is None:
         thread_source_cfg = explicit_arts_config or DEFAULT_ARTS_CONFIG.resolve()
         threads = get_arts_cfg_int(thread_source_cfg, "threads") or 8
 
-    # Format node counts for display
-    if len(node_counts) == 1:
-        nodes_display = str(node_counts[0])
-    elif len(node_counts) <= 5:
-        nodes_display = ", ".join(str(n) for n in node_counts)
-    else:
-        nodes_display = f"{node_counts[0]}-{node_counts[-1]} ({len(node_counts)} values)"
+    nodes_display = format_node_counts_display(node_counts)
 
     config_display = (
         str(explicit_arts_config)
@@ -5534,446 +4908,57 @@ def _execute_slurm_batch(
 
     if not bench_list:
         print_warning("No benchmarks to run.")
-        raise typer.Exit(0)
+        return
 
-    # Check which benchmarks support multinode
-    multinode_disabled = set()
-    for bench in bench_list:
-        bench_path = runner.benchmarks_dir / bench
-        if (bench_path / ".disable-multinode").exists():
-            multinode_disabled.add(bench)
-
-    # Calculate total jobs: sum over node counts
-    # (benchmarks with multinode disabled only run with node_count=1)
-    total_jobs = 0
-    for nc in node_counts:
-        if nc == 1:
-            total_jobs += len(bench_list) * runs
-        else:
-            valid_benchmarks = len(bench_list) - len(multinode_disabled)
-            total_jobs += valid_benchmarks * runs
+    multinode_disabled = find_multinode_disabled_benchmarks(runner, bench_list)
+    total_jobs = count_total_slurm_jobs(
+        bench_list,
+        node_counts,
+        runs,
+        multinode_disabled,
+    )
 
     print_info(
         f"Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs"
     )
     if multinode_disabled and max(node_counts) > 1:
         print_info(f"{len(multinode_disabled)} benchmarks disabled for multi-node")
-
-    # Create experiment directories (all artifacts stay under this experiment root).
-    am = artifact_manager
-    if am is None:
-        am = ArtifactManager(output_dir, datetime.now().strftime("%Y%m%d_%H%M%S"))
-    am.set_phase(step_name or "default")
-    runner.artifact_manager = am
-
-    experiment_dir = am.experiment_dir
-    scripts_dir = experiment_dir / "scripts"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-
-    print_info(f"Experiment directory: {experiment_dir}")
-
-    # Handle custom counter profile (triggers ARTS rebuild)
-    if profile:
-        if not profile.exists():
-            print_error(f"Profile not found: {profile}")
-            raise typer.Exit(1)
-
-        print_warning(f"Rebuilding ARTS with profile: {profile}")
-        result = subprocess.run(
-            ["carts", "build", "--arts", f"--profile={profile}"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            print_error(f"ARTS rebuild failed:\n{result.stderr}")
-            raise typer.Exit(1)
-        print_success("ARTS rebuild complete")
-
-    # Phase 1: Build per (benchmark, node_count) into per-step artifacts directories.
-    # ARTS executable embeds nodeCount at compile time via arts.cfg, so each node count
-    # has a distinct binary.
-    num_workers = min(os.cpu_count() or 1, len(bench_list))
-    print_step(
-        f"Building benchmarks per node count ({num_workers} workers)",
-        1,
-        5,
+    request = SlurmBatchRequest(
+        bench_list=bench_list,
+        node_counts=node_counts,
+        size=size,
+        runs=runs,
+        verify=verify,
+        partition=partition,
+        time_limit=time_limit,
+        account=account,
+        explicit_arts_config=explicit_arts_config,
+        threads=threads,
+        output_dir=output_dir,
+        dry_run=dry_run,
+        no_build=no_build,
+        verbose=verbose,
+        cflags=cflags,
+        compile_args=compile_args,
+        gdb=gdb,
+        profile=profile,
+        perf=perf,
+        perf_interval=perf_interval,
+        exclude_nodes=exclude_nodes,
+        artifact_manager=artifact_manager,
+        step_name=step_name,
+        report_steps=report_steps,
+        command_str="carts benchmarks " + " ".join(sys.argv[1:]),
     )
-
-    # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
-    # Note: build_arts_cfg is the compile-time config in artifacts/ directory.
-    build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
-    reference_checksums: Dict[str, ReferenceChecksum] = {}
-    print_lock = threading.Lock()
-
-    def _build_one_bench(bench: str) -> List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]]:
-        """Build all node_count variants for one benchmark (sequential within)."""
-        bench_path = runner.benchmarks_dir / bench
-        effective_base_config = _resolve_effective_arts_config(
-            bench_path, explicit_arts_config
-        )
-        src_arts, src_omp = runner.get_executable_paths(bench_path)
-        results = []
-
-        needs_multinode_reference = verify and any(
-            node_count > 1 and bench not in multinode_disabled
-            for node_count in node_counts
-        )
-        if needs_multinode_reference:
-            reference_timeout = parse_slurm_time_limit_seconds(time_limit)
-            reference = runner.ensure_omp_reference(
-                bench,
-                size,
-                cflags or "",
-                threads,
-                timeout=reference_timeout,
-            )
-            if reference.status != Status.PASS or reference.checksum is None:
-                raise RuntimeError(
-                    f"Failed to establish OpenMP reference for {bench}: {reference.note}"
-                )
-            with print_lock:
-                console.print(
-                    f"  {bench} multinode reference checksum... [green]OK[/] "
-                    f"[dim]({reference.checksum}, {threads} OMP threads)[/]"
-                )
-            reference_checksums[bench] = reference
-
-        for node_count in node_counts:
-            if node_count > 1 and bench in multinode_disabled:
-                continue
-
-            bench_config = BenchmarkConfig(
-                arts_threads=threads,
-                arts_nodes=node_count,
-                omp_threads=threads,
-                launcher="slurm",
-            )
-            build_node_dir = am.get_artifacts_dir(bench, bench_config)
-            build_node_dir.mkdir(parents=True, exist_ok=True)
-
-            dst_arts = build_node_dir / src_arts.name
-            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
-            build_arts_cfg = build_node_dir / "arts.cfg"
-
-            # Skip if ARTS executable already exists in this step/config artifact directory.
-            if dst_arts.exists() and build_arts_cfg.exists():
-                with print_lock:
-                    console.print(f"  {bench} (nodes={node_count}, threads={threads})... [cyan]SKIP (exists)[/]")
-                if node_count == 1 and dst_omp and not dst_omp.exists():
-                    runner.build_benchmark(
-                        bench, size, variant="openmp",
-                        cflags=cflags or "",
-                        build_output_dir=build_node_dir,
-                    )
-                results.append(((bench, node_count), (dst_arts, dst_omp if dst_omp and dst_omp.exists() else None, build_arts_cfg)))
-                continue
-
-            if no_build:
-                with print_lock:
-                    console.print(f"  {bench} (nodes={node_count}, threads={threads})... [red]MISSING (--no-build)[/]")
-                continue
-
-            _validate_thread_network_topology(
-                effective_base_config, threads, node_count, bench
-            )
-
-            # Generate arts.cfg for compilation (counterFolder is placeholder)
-            build_arts_cfg = slurm_batch.generate_arts_config_for_node(
-                effective_base_config, build_node_dir, node_count, threads
-            )
-
-            # Build ARTS with this node-specific arts.cfg
-            build_arts = runner.build_benchmark(
-                bench, size, variant="arts",
-                arts_config=build_arts_cfg,
-                cflags=cflags or "",
-                compile_args=compile_args,
-                build_output_dir=build_node_dir,
-            )
-
-            if build_arts.status != Status.PASS:
-                with print_lock:
-                    console.print(f"  {bench} (nodes={node_count}, threads={threads})... [red]FAILED[/]")
-                    if verbose:
-                        console.print(f"    {build_arts.output[:200]}...")
-                continue
-            if not dst_arts.exists():
-                with print_lock:
-                    console.print(
-                        f"  {bench} (nodes={node_count}, threads={threads})... "
-                        "[red]FAILED (missing ARTS executable in artifacts dir)[/]"
-                    )
-                continue
-
-            # Build OMP variant (only for node_count=1).
-            dst_omp = None
-            if node_count == 1:
-                build_omp = runner.build_benchmark(
-                    bench, size, variant="openmp",
-                    cflags=cflags or "",
-                    build_output_dir=build_node_dir,
-                )
-                cached_omp = build_node_dir / src_omp.name
-                if build_omp.status == Status.PASS and cached_omp.exists():
-                    dst_omp = cached_omp
-
-            with print_lock:
-                console.print(f"  {bench} (nodes={node_count}, threads={threads})... [green]OK[/]")
-            results.append(((bench, node_count), (dst_arts, dst_omp, build_arts_cfg)))
-
-        return results
-
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_build_one_bench, bench): bench for bench in bench_list}
-        for future in as_completed(futures):
-            for key, value in future.result():
-                build_results[key] = value
-
-    # Phase 2: Generate sbatch scripts
-    # Directory structure:
-    #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/artifacts/ <- build outputs
-    #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/run_{R}/   <- run outputs
-    #   results/{timestamp}/scripts/*.sbatch     <- generated scripts
-    print_step("Generating job scripts", 2, 5)
-
-    slurm_job_result_script = Path(__file__).parent / "slurm" / "job_result.py"
-
-    job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
-
-    step_token = _step_name_to_token(step_name or "default")
-    seen_run_dirs: set[Path] = set()
-    seen_script_paths: set[Path] = set()
-
-    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
-        safe_name = bench.replace("/", "_")
-
-        for run_num in range(1, runs + 1):
-            bench_config = BenchmarkConfig(
-                arts_threads=threads,
-                arts_nodes=node_count,
-                omp_threads=threads,
-                launcher="slurm",
-            )
-            run_dir = am.get_run_dir(bench, bench_config, run_num)
-            run_dir_resolved = run_dir.resolve()
-            if run_dir_resolved in seen_run_dirs:
-                raise ValueError(
-                    f"Collision detected: duplicate run directory '{run_dir_resolved}'. "
-                    "Ensure step names and benchmark/config combinations are unique."
-                )
-            seen_run_dirs.add(run_dir_resolved)
-            am.save_run_config(
-                bench,
-                bench_config,
-                run_num,
-                arts_cfg_path=build_arts_cfg,
-                size=size,
-                cflags=cflags,
-                compile_args=compile_args,
-                run_phase=step_name or "default",
-                profile=str(profile) if profile else None,
-                perf=perf,
-                perf_interval=perf_interval if perf else None,
-                reference_checksum=(
-                    reference_checksums.get(bench).checksum
-                    if verify and node_count > 1 and bench in reference_checksums
-                    else None
-                ),
-                reference_source=(
-                    reference_checksums.get(bench).source
-                    if verify and node_count > 1 and bench in reference_checksums
-                    else None
-                ),
-                reference_threads=(
-                    reference_checksums.get(bench).omp_threads
-                    if verify and node_count > 1 and bench in reference_checksums
-                    else None
-                ),
-            )
-            am.record_run(
-                bench, bench_config, run_num,
-                has_counters=bool(profile),
-                has_perf=perf,
-            )
-
-            config = slurm_batch.SlurmJobConfig(
-                benchmark_name=bench,
-                run_number=run_num,
-                node_count=node_count,
-                time_limit=time_limit,
-                partition=partition,
-                account=account,
-                executable_arts=arts_exe,           # From artifacts/ (shared per config)
-                executable_omp=omp_exe,             # From artifacts/ (single-node only)
-                arts_config_path=build_arts_cfg,    # From artifacts/ (template for runtime cfg)
-                run_dir=run_dir,
-                size=size,
-                threads=threads,
-                gdb=gdb,
-                perf=perf,
-                perf_interval=perf_interval,
-                exclude_nodes=exclude_nodes,
-                job_label=step_token,
-            )
-
-            # Generate sbatch script in experiment scripts/ directory
-            script_path = (
-                scripts_dir
-                / f"{step_token}__{safe_name}_{threads}t_{node_count}n_run{run_num}.sbatch"
-            )
-            script_path_resolved = script_path.resolve()
-            if script_path_resolved in seen_script_paths:
-                raise ValueError(
-                    f"Collision detected: duplicate script path '{script_path_resolved}'. "
-                    "Ensure step names and benchmark/config combinations are unique."
-                )
-            seen_script_paths.add(script_path_resolved)
-            slurm_batch.generate_sbatch_script(
-                config, script_path, slurm_job_result_script
-            )
-
-            job_configs.append((config, script_path))
-
-    print_info(f"Generated {len(job_configs)} job scripts")
-
-    # Phase 3: Submit jobs
-    print_step("Submitting jobs", 3, 5)
-
-    job_statuses, submission_failures = slurm_batch.submit_all_jobs(
-        job_configs, console, dry_run
+    deps = SlurmExecutorDependencies(
+        resolve_effective_arts_config=_resolve_effective_arts_config,
+        validate_thread_network_topology=_validate_thread_network_topology,
+        parse_time_limit_seconds=parse_slurm_time_limit_seconds,
+        get_carts_dir=get_carts_dir,
+        get_benchmarks_dir=get_benchmarks_dir,
+        step_name_to_token=_STEP_RESOLVER.step_name_to_token,
     )
-    failed_submissions = len(submission_failures)
-
-    # Write job manifest
-    metadata = {
-        "timestamp": experiment_dir.name,
-        "size": size,
-        "node_counts": node_counts,
-        "threads": threads,
-        "runs_per_benchmark": runs,
-        "total_jobs": len(job_configs),
-        "submitted_jobs": len(job_statuses),
-        "failed_submissions": failed_submissions,
-        "partition": partition,
-        "time_limit": time_limit,
-        "arts_config": (
-            str(explicit_arts_config)
-            if explicit_arts_config is not None
-            else "benchmark-specific defaults"
-        ),
-        "dry_run": dry_run,
-        "profile": str(profile) if profile else None,
-        "perf": perf,
-        "perf_interval": perf_interval if perf else None,
-    }
-
-    manifest_file = experiment_dir / "job_manifest.json"
-    existing_job_statuses = _load_existing_job_statuses(manifest_file)
-    existing_job_statuses.update(job_statuses)
-    manifest_path = slurm_batch.write_job_manifest(
-        experiment_dir, existing_job_statuses, metadata
-    )
-    print_info(f"Job manifest: {manifest_path}")
-
-    if dry_run:
-        print_warning("Dry run complete. Scripts generated but not submitted.")
-        print_info(f"To submit manually, run sbatch on scripts in: {scripts_dir}")
-        raise typer.Exit(0)
-
-    current_results: List[Dict[str, Any]] = []
-    if job_statuses:
-        # Phase 4: Monitor jobs
-        print_step("Monitoring jobs", 4, 5)
-
-        job_statuses = slurm_batch.wait_for_jobs_completion(
-            job_statuses, console, poll_interval=10
-        )
-
-        # Update manifest with final job states
-        existing_job_statuses = _load_existing_job_statuses(manifest_file)
-        existing_job_statuses.update(job_statuses)
-        slurm_batch.write_job_manifest(experiment_dir, existing_job_statuses, metadata)
-
-        # Phase 5: Collect results
-        print_step("Collecting results", 5, 5)
-        current_results = slurm_batch.collect_results(job_statuses, experiment_dir)
-    else:
-        print_warning("Phase 4/5 skipped: no jobs were submitted successfully.")
-
-    submission_failure_results = slurm_batch.build_submission_failure_results(
-        submission_failures
-    )
-    existing_results: List[Dict[str, Any]] = []
-    if am.results_json_path.exists():
-        try:
-            existing_payload = json.loads(am.results_json_path.read_text())
-            raw_results = existing_payload.get("results", [])
-            if isinstance(raw_results, list):
-                existing_results = raw_results
-        except Exception:
-            existing_results = []
-
-    merged_results: List[Dict[str, Any]] = []
-    seen_job_ids: set[str] = set()
-    for result in existing_results + submission_failure_results + current_results:
-        slurm_data = result.get("slurm", {})
-        job_id = str(slurm_data.get("job_id", "")).strip()
-        result_key = job_id
-        if not result_key:
-            result_key = str((result.get("artifacts") or {}).get("run_dir") or "")
-        if result_key and result_key in seen_job_ids:
-            continue
-        if result_key:
-            seen_job_ids.add(result_key)
-        merged_results.append(result)
-
-    results_path = slurm_batch.write_aggregated_results(
-        experiment_dir, merged_results, metadata
-    )
-
-    report_path: Optional[Path] = None
-    try:
-        report_steps = steps if (explicit_step_mode or len(steps) > 1) else None
-        report_path = generate_report_from_rows(
-            merged_results,
-            experiment_dir,
-            quiet=True,
-            steps=report_steps,
-        )
-    except Exception as e:
-        print_warning(f"Failed to generate report.xlsx: {e}")
-
-    # Write manifest.json (same schema as standard run)
-    total_duration = time.time() - slurm_start_time
-    slurm_command = "carts benchmarks " + " ".join(sys.argv[1:])
-    carts_dir = get_carts_dir()
-    benchmarks_dir = get_benchmarks_dir()
-    repro = get_reproducibility_metadata(carts_dir, benchmarks_dir)
-    slurm_manifest = slurm_batch.write_slurm_manifest(
-        experiment_dir, merged_results, metadata, slurm_command, total_duration, repro
-    )
-
-    # Summary
-    successful = sum(1 for r in merged_results if r.get("status") == "PASS")
-    failed = sum(1 for r in merged_results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
-
-    summary_content = (
-        f"{format_summary_line(successful, failed, len(merged_results) - successful - failed)}\n\n"
-        f"Total jobs: {len(merged_results)}\n"
-        f"Results: {results_path}\n"
-        f"Manifest: {slurm_manifest}"
-    )
-    if report_path:
-        summary_content += f"\nReport: {report_path}"
-    style = "green" if failed == 0 else "red"
-    print_footer(f"Experiment Complete — {summary_content}", style=style)
-
-    if failed_submissions > 0:
-        print_error(
-            f"SLURM submission failed for {failed_submissions}/{len(job_configs)} jobs. "
-            "Report artifacts were still generated."
-        )
-        raise typer.Exit(1)
+    SlurmBatchExecutor(runner, request, deps).execute()
 
 
 if __name__ == "__main__":
