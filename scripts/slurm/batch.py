@@ -35,7 +35,8 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import asdict
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +66,8 @@ from .results import (
     build_submission_failure_results as _build_submission_failure_results_impl,
     collect_results as _collect_results_impl,
 )
+
+_POLL_SPINNER_FRAMES = ("|", "/", "-", "\\")
 
 
 # ============================================================================
@@ -97,6 +100,55 @@ def _create_submission_failure(
         script_path=script_path,
         error=error.strip(),
     )
+
+
+def _snapshot_job_statuses(
+    job_statuses: Dict[str, SlurmJobStatus],
+) -> Dict[str, SlurmJobStatus]:
+    """Create a detached status snapshot for background polling."""
+    return {job_id: replace(status) for job_id, status in job_statuses.items()}
+
+
+def _start_poll_future(
+    executor: ThreadPoolExecutor,
+    job_statuses: Dict[str, SlurmJobStatus],
+) -> Future[Dict[str, str]]:
+    """Start one background scheduler poll against a stable status snapshot."""
+    return executor.submit(poll_jobs, _snapshot_job_statuses(job_statuses))
+
+
+def _apply_polled_states(
+    poll_future: Optional[Future[Dict[str, str]]],
+    job_statuses: Dict[str, SlurmJobStatus],
+) -> bool:
+    """Apply background poll results if the future completed."""
+    if poll_future is None or not poll_future.done():
+        return False
+    current_states = poll_future.result()
+    for job_id, state in current_states.items():
+        if job_id in job_statuses:
+            job_statuses[job_id].state = state
+    return True
+
+
+def _format_poll_status_label(
+    *,
+    in_flight: bool,
+    last_poll_started: Optional[datetime],
+    last_poll_completed: Optional[datetime],
+) -> str:
+    """Format the live polling status shown in the job table."""
+    if in_flight:
+        spinner = _POLL_SPINNER_FRAMES[int(time.time() * 2) % len(_POLL_SPINNER_FRAMES)]
+        started = (
+            last_poll_started.strftime("%H:%M:%S")
+            if last_poll_started is not None
+            else "--:--:--"
+        )
+        return f"{spinner} polling (started {started})"
+    if last_poll_completed is not None:
+        return f"idle (last {last_poll_completed.strftime('%H:%M:%S')})"
+    return "waiting to poll"
 
 
 # ============================================================================
@@ -644,54 +696,78 @@ def _submit_jobs_throttled(
         _submit_next()
 
     try:
-        with Live(
-            _build_job_state_table(
-                job_statuses,
-                title=f"SLURM Throttled Submission ({len(job_statuses)}/{total})",
-                active_count=_active_count(),
-                queued_count=len(pending_configs),
-                failed_submissions=len(submission_failures),
-            ),
-            console=console,
-            refresh_per_second=1,
-            transient=True,
-        ) as live:
-            while True:
-                # Poll current states
-                job_ids = list(job_statuses.keys())
-                if job_ids:
-                    current_states = poll_jobs(job_statuses)
-                    for job_id, state in current_states.items():
-                        if job_id in job_statuses:
-                            job_statuses[job_id].state = state
+        with ThreadPoolExecutor(max_workers=1) as poll_executor:
+            poll_future: Optional[Future[Dict[str, str]]] = None
+            last_poll_started: Optional[datetime] = None
+            last_poll_completed: Optional[datetime] = None
+            next_poll_deadline = 0.0
 
-                # Submit more if slots available
-                while pending_configs and _active_count() < max_concurrent:
-                    _submit_next()
+            with Live(
+                _build_job_state_table(
+                    job_statuses,
+                    title=f"SLURM Throttled Submission ({len(job_statuses)}/{total})",
+                    active_count=_active_count(),
+                    queued_count=len(pending_configs),
+                    failed_submissions=len(submission_failures),
+                    poll_status_label="waiting to poll",
+                ),
+                console=console,
+                refresh_per_second=4,
+                transient=True,
+            ) as live:
+                while True:
+                    now = time.monotonic()
 
-                live.update(
-                    _build_job_state_table(
-                        job_statuses,
-                        title=(
-                            f"SLURM Throttled Submission "
-                            f"({len(job_statuses) + len(submission_failures)}/{total})"
-                        ),
-                        active_count=_active_count(),
-                        queued_count=len(pending_configs),
-                        failed_submissions=len(submission_failures),
-                        last_poll_label=datetime.now().strftime("%H:%M:%S"),
+                    if _apply_polled_states(poll_future, job_statuses):
+                        poll_future = None
+                        last_poll_completed = datetime.now()
+
+                    if (
+                        poll_future is None
+                        and job_statuses
+                        and now >= next_poll_deadline
+                    ):
+                        poll_future = _start_poll_future(poll_executor, job_statuses)
+                        last_poll_started = datetime.now()
+                        next_poll_deadline = now + poll_interval
+
+                    # Submit more if slots available
+                    while pending_configs and _active_count() < max_concurrent:
+                        _submit_next()
+
+                    live.update(
+                        _build_job_state_table(
+                            job_statuses,
+                            title=(
+                                f"SLURM Throttled Submission "
+                                f"({len(job_statuses) + len(submission_failures)}/{total})"
+                            ),
+                            active_count=_active_count(),
+                            queued_count=len(pending_configs),
+                            failed_submissions=len(submission_failures),
+                            poll_status_label=_format_poll_status_label(
+                                in_flight=poll_future is not None,
+                                last_poll_started=last_poll_started,
+                                last_poll_completed=last_poll_completed,
+                            ),
+                            last_poll_label=(
+                                last_poll_completed.strftime("%H:%M:%S")
+                                if last_poll_completed is not None
+                                else None
+                            ),
+                        )
                     )
-                )
 
-                # Done when nothing left to submit and all terminal
-                all_done = (
-                    not pending_configs
-                    and all(_is_effectively_terminal(s) for s in job_statuses.values())
-                )
-                if all_done:
-                    break
+                    # Done when nothing left to submit and all terminal
+                    all_done = (
+                        not pending_configs
+                        and poll_future is None
+                        and all(_is_effectively_terminal(s) for s in job_statuses.values())
+                    )
+                    if all_done:
+                        break
 
-                time.sleep(poll_interval)
+                    time.sleep(1)
 
     except KeyboardInterrupt:
         print_warning("Submission stopped. Already-submitted jobs will continue running.")
@@ -923,6 +999,7 @@ def _build_job_state_table(
     queued_count: Optional[int] = None,
     failed_submissions: int = 0,
     last_poll_label: Optional[str] = None,
+    poll_status_label: Optional[str] = None,
 ) -> Table:
     """Create the standard SLURM job-state table used by live displays."""
     table = Table(title=title, box=None)
@@ -946,7 +1023,13 @@ def _build_job_state_table(
         color = state_colors.get(state, Colors.DIM)
         table.add_row(f"[{color}]{state}[/{color}]", str(count))
 
-    if active_count is not None or queued_count is not None or failed_submissions:
+    if (
+        active_count is not None
+        or queued_count is not None
+        or failed_submissions
+        or last_poll_label is not None
+        or poll_status_label is not None
+    ):
         table.add_row("", "")
         if active_count is not None:
             table.add_row("[bold]Active[/bold]", str(active_count))
@@ -957,6 +1040,8 @@ def _build_job_state_table(
                 f"[{Colors.FAIL}]Submit failures[/{Colors.FAIL}]",
                 str(failed_submissions),
             )
+        if poll_status_label is not None:
+            table.add_row("[bold]Polling[/bold]", poll_status_label)
         if last_poll_label is not None:
             table.add_row("[bold]Last poll[/bold]", last_poll_label)
 
@@ -1022,41 +1107,62 @@ def wait_for_jobs_completion(
     print_info("Press Ctrl+C to stop monitoring (jobs will continue running)")
 
     try:
-        with Live(
-            _build_job_state_table(
-                job_statuses,
-                title="SLURM Job Status",
-                last_poll_label="starting",
-            ),
-            console=console,
-            refresh_per_second=1,
-            transient=True,
-        ) as live:
-            while True:
-                # Poll current states
-                current_states = poll_jobs(job_statuses)
+        with ThreadPoolExecutor(max_workers=1) as poll_executor:
+            poll_future: Optional[Future[Dict[str, str]]] = None
+            last_poll_started: Optional[datetime] = None
+            last_poll_completed: Optional[datetime] = None
+            next_poll_deadline = 0.0
 
-                # Update statuses
-                for job_id, state in current_states.items():
-                    if job_id in job_statuses:
-                        job_statuses[job_id].state = state
+            with Live(
+                _build_job_state_table(
+                    job_statuses,
+                    title="SLURM Job Status",
+                    poll_status_label="waiting to poll",
+                ),
+                console=console,
+                refresh_per_second=4,
+                transient=True,
+            ) as live:
+                while True:
+                    now = time.monotonic()
 
-                # Update display
-                live.update(
-                    _build_job_state_table(
-                        job_statuses,
-                        title="SLURM Job Status",
-                        last_poll_label=datetime.now().strftime("%H:%M:%S"),
+                    if _apply_polled_states(poll_future, job_statuses):
+                        poll_future = None
+                        last_poll_completed = datetime.now()
+
+                    if poll_future is None and now >= next_poll_deadline:
+                        poll_future = _start_poll_future(poll_executor, job_statuses)
+                        last_poll_started = datetime.now()
+                        next_poll_deadline = now + poll_interval
+
+                    live.update(
+                        _build_job_state_table(
+                            job_statuses,
+                            title="SLURM Job Status",
+                            poll_status_label=_format_poll_status_label(
+                                in_flight=poll_future is not None,
+                                last_poll_started=last_poll_started,
+                                last_poll_completed=last_poll_completed,
+                            ),
+                            last_poll_label=(
+                                last_poll_completed.strftime("%H:%M:%S")
+                                if last_poll_completed is not None
+                                else None
+                            ),
+                        )
                     )
-                )
 
-                # Check if all jobs are done
-                all_done = all(_is_effectively_terminal(status) for status in job_statuses.values())
+                    all_done = (
+                        poll_future is None
+                        and all(
+                            _is_effectively_terminal(status)
+                            for status in job_statuses.values()
+                        )
+                    )
+                    if all_done:
+                        break
 
-                if all_done:
-                    break
-
-                time.sleep(poll_interval)
+                    time.sleep(1)
 
     except KeyboardInterrupt:
         print_warning("Monitoring stopped. Jobs will continue running.")
