@@ -44,6 +44,15 @@ from benchmark_common import PERF_CACHE_EVENTS
 # Data Classes
 # ============================================================================
 
+TERMINAL_JOB_STATES = {
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+}
+
 
 @dataclass
 class SlurmJobConfig:
@@ -568,21 +577,6 @@ def submit_all_jobs(
 # ============================================================================
 
 
-def _get_scontrol_state(job_id: str) -> str:
-    """Get job state from scontrol (works when sacct is disabled)."""
-    try:
-        result = subprocess.run(
-            ["scontrol", "show", "job", job_id],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stdout.split():
-            if line.startswith("JobState="):
-                return line.split("=", 1)[1]
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        pass
-    return "UNKNOWN"
-
-
 def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
     """Query squeue for current job states.
 
@@ -607,6 +601,8 @@ def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
             text=True,
             timeout=30,
         )
+        if result.returncode != 0:
+            return {}
 
         states = {}
         for line in result.stdout.strip().split("\n"):
@@ -619,13 +615,133 @@ def poll_jobs(job_ids: List[str]) -> Dict[str, str]:
         # Jobs not in squeue are finished — use scontrol to get real state
         for job_id in job_ids:
             if job_id not in states:
-                states[job_id] = _get_scontrol_state(job_id)
+                states[job_id] = _get_scontrol_status(job_id).state
 
         return states
 
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        # If squeue fails, assume jobs are still running
-        return {job_id: "UNKNOWN" for job_id in job_ids}
+    except subprocess.TimeoutExpired:
+        # Keep the previous in-memory state on transient scheduler query failures.
+        return {}
+
+
+def _query_sacct_statuses(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
+    """Query sacct for final job states, returning any rows it can resolve."""
+    statuses: Dict[str, SlurmJobStatus] = {}
+    if not job_ids:
+        return statuses
+
+    result = subprocess.run(
+        [
+            "sacct",
+            "--jobs=" + ",".join(job_ids),
+            "--format=JobID,JobName,State,ExitCode,Elapsed,NodeList,Start,End",
+            "--parsable2",
+            "--noheader",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return statuses
+
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 8:
+            continue
+
+        job_id = parts[0]
+        if "." in job_id:
+            continue
+
+        exit_parts = parts[3].split(":")
+        exit_code = int(exit_parts[0]) if exit_parts[0].isdigit() else None
+
+        job_name = parts[1]
+        node_count = 1
+        run_number = 0
+        match = re.match(r"^(.+)_n(\d+)_r(\d+)$", job_name)
+        if match:
+            job_name = match.group(1)
+            node_count = int(match.group(2))
+            run_number = int(match.group(3))
+
+        statuses[job_id] = SlurmJobStatus(
+            job_id=job_id,
+            benchmark_name=job_name,
+            run_number=run_number,
+            node_count=node_count,
+            state=parts[2],
+            exit_code=exit_code,
+            elapsed=parts[4],
+            node_list=parts[5],
+            start_time=parts[6],
+            end_time=parts[7],
+        )
+
+    return statuses
+
+
+def _empty_slurm_status(job_id: str, state: str = "UNKNOWN") -> SlurmJobStatus:
+    """Create a placeholder SLURM status when accounting data is unavailable."""
+    return SlurmJobStatus(
+        job_id=job_id,
+        benchmark_name="",
+        run_number=0,
+        node_count=1,
+        state=state,
+    )
+
+
+def _get_scontrol_status(job_id: str) -> SlurmJobStatus:
+    """Get the best-effort job status from scontrol."""
+    state = "UNKNOWN"
+    exit_code = None
+    start_time = None
+    end_time = None
+    elapsed = None
+    node_list = None
+
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "job", job_id],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return _empty_slurm_status(job_id, state=state)
+        for token in result.stdout.split():
+            if token.startswith("JobState="):
+                state = token.split("=", 1)[1]
+            elif token.startswith("ExitCode="):
+                exit_parts = token.split("=", 1)[1].split(":")
+                exit_code = int(exit_parts[0]) if exit_parts[0].isdigit() else None
+            elif token.startswith("StartTime="):
+                start_time = token.split("=", 1)[1]
+            elif token.startswith("EndTime="):
+                end_time = token.split("=", 1)[1]
+            elif token.startswith("RunTime="):
+                elapsed = token.split("=", 1)[1]
+            elif token.startswith("NodeList="):
+                node_list = token.split("=", 1)[1]
+    except subprocess.TimeoutExpired:
+        pass
+
+    status = _empty_slurm_status(job_id, state=state)
+    status.exit_code = exit_code
+    status.start_time = start_time
+    status.end_time = end_time
+    status.elapsed = elapsed
+    status.node_list = node_list
+    return status
+
+
+def _has_completed_run_artifact(status: SlurmJobStatus) -> bool:
+    """Return True when the job produced its per-run result artifact."""
+    return bool(status.run_dir and (status.run_dir / "result.json").exists())
 
 
 def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
@@ -642,89 +758,23 @@ def get_final_job_status(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
 
     statuses: Dict[str, SlurmJobStatus] = {}
 
-    try:
-        result = subprocess.run(
-            [
-                "sacct",
-                "--jobs=" + ",".join(job_ids),
-                "--format=JobID,JobName,State,ExitCode,Elapsed,NodeList,Start,End",
-                "--parsable2",
-                "--noheader",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) >= 8:
-                job_id = parts[0]
-                # Skip batch/extern steps, only want main job
-                if "." in job_id:
-                    continue
-
-                # Parse exit code (format: exitcode:signal)
-                exit_parts = parts[3].split(":")
-                exit_code = int(exit_parts[0]) if exit_parts[0].isdigit() else None
-
-                # Parse job name: {benchmark}_n{node_count}_r{run_number}
-                job_name = parts[1]
-                node_count = 1
-                run_number = 0
-                # Use anchored regex to avoid breaking on benchmarks with _n in name
-                m = re.match(r'^(.+)_n(\d+)_r(\d+)$', job_name)
-                if m:
-                    job_name = m.group(1)
-                    node_count = int(m.group(2))
-                    run_number = int(m.group(3))
-
-                statuses[job_id] = SlurmJobStatus(
-                    job_id=job_id,
-                    benchmark_name=job_name,
-                    run_number=run_number,
-                    node_count=node_count,
-                    state=parts[2],
-                    exit_code=exit_code,
-                    elapsed=parts[4],
-                    node_list=parts[5],
-                    start_time=parts[6],
-                    end_time=parts[7],
-                )
-
-        return statuses
-
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        pass
+    for attempt in range(3):
+        remaining = [job_id for job_id in job_ids if job_id not in statuses]
+        if not remaining:
+            break
+        try:
+            statuses.update(_query_sacct_statuses(remaining))
+        except subprocess.TimeoutExpired:
+            pass
+        if len(statuses) == len(job_ids):
+            break
+        if attempt < 2:
+            time.sleep(2)
 
     # Fallback: use scontrol for any jobs sacct didn't cover
     for job_id in job_ids:
         if job_id not in statuses:
-            state = _get_scontrol_state(job_id)
-            # Parse exit code from scontrol
-            exit_code = None
-            try:
-                result = subprocess.run(
-                    ["scontrol", "show", "job", job_id],
-                    capture_output=True, text=True, timeout=10,
-                )
-                for token in result.stdout.split():
-                    if token.startswith("ExitCode="):
-                        exit_parts = token.split("=", 1)[1].split(":")
-                        exit_code = int(exit_parts[0]) if exit_parts[0].isdigit() else None
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                pass
-
-            statuses[job_id] = SlurmJobStatus(
-                job_id=job_id,
-                benchmark_name="",
-                run_number=0,
-                node_count=1,
-                state=state,
-                exit_code=exit_code,
-            )
+            statuses[job_id] = _get_scontrol_status(job_id)
 
     return statuses
 
@@ -749,7 +799,13 @@ def wait_for_jobs_completion(
     if not job_ids:
         return job_statuses
 
-    terminal_states = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "UNKNOWN"}
+    def is_monitor_terminal(status: SlurmJobStatus) -> bool:
+        if status.state in TERMINAL_JOB_STATES:
+            return True
+        # Some SLURM installations briefly lose final accounting before sacct
+        # catches up. A completed per-run result artifact is sufficient to stop
+        # polling without treating UNKNOWN itself as terminal.
+        return status.state == "UNKNOWN" and _has_completed_run_artifact(status)
 
     def create_status_table() -> Table:
         """Create a status table for live display."""
@@ -799,7 +855,7 @@ def wait_for_jobs_completion(
 
                 # Check if all jobs are done
                 all_done = all(
-                    status.state in terminal_states
+                    is_monitor_terminal(status)
                     for status in job_statuses.values()
                 )
 
@@ -1173,7 +1229,20 @@ def collect_results(
                 # from job_result.py (for example, nodelist captured from
                 # SLURM_JOB_NODELIST in the batch script environment).
                 slurm_info = result.setdefault("slurm", {})
-                slurm_info["state"] = status.state
+                effective_state = status.state
+                if effective_state == "UNKNOWN" and result.get("status") == "PASS":
+                    effective_state = "COMPLETED"
+                    result.setdefault("diagnostics", {}).setdefault(
+                        "slurm_state_inference",
+                        {
+                            "state": "COMPLETED",
+                            "reason": (
+                                "Inferred from a successful result.json because "
+                                "SLURM accounting did not return a final state."
+                            ),
+                        },
+                    )
+                slurm_info["state"] = effective_state
                 if status.exit_code is not None:
                     slurm_info["exit_code"] = status.exit_code
                 if status.elapsed is not None:
