@@ -16,6 +16,7 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from benchmark_models import ExperimentStep  # noqa: E402
 from benchmark_report import generate_report_from_rows  # noqa: E402
 
 
@@ -315,7 +316,39 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
             ),
         ]
 
-        report_path = generate_report_from_rows(results, self.experiment_dir)
+        steps = [
+            ExperimentStep(
+                name="thread-sweep",
+                description="Single-node scaling study",
+                size="large",
+                threads="1,2",
+                nodes="1",
+                runs=5,
+            ),
+            ExperimentStep(
+                name="multinode-overhead-baseline",
+                description="Baseline multinode diagnostics",
+                size="extralarge",
+                threads="64",
+                nodes="2,4",
+                runs=1,
+                profile="profile-overhead.cfg",
+            ),
+            ExperimentStep(
+                name="multinode-overhead-distributed-db",
+                description="Distributed DB multinode diagnostics",
+                size="extralarge",
+                threads="64",
+                nodes="2,4",
+                runs=1,
+                profile="profile-overhead.cfg",
+                compile_args="--distributed-db",
+            ),
+        ]
+        setattr(steps[0], "_experiment_name", "report-fixture")
+        setattr(steps[0], "_experiment_description", "Synthetic workbook regression fixture")
+
+        report_path = generate_report_from_rows(results, self.experiment_dir, steps=steps)
         self.assertIsNotNone(report_path)
         workbook = load_workbook(report_path, data_only=False)
 
@@ -343,15 +376,33 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         guide_rows = list(workbook["Guide"].iter_rows(values_only=True))
         self.assertEqual(guide_rows[1][0], "Overview")
         self.assertEqual(guide_rows[1][3], '=HYPERLINK("#\'Overview\'!A1","Open")')
+        self.assertEqual(workbook["Guide"]["F4"].value, "Experiment")
+        self.assertEqual(workbook["Guide"]["F5"].value, "report-fixture")
+        self.assertEqual(
+            workbook["Guide"]["F6"].value,
+            "Synthetic workbook regression fixture",
+        )
+        self.assertEqual(workbook["Guide"].column_dimensions["F"].width, 64.0)
+        self.assertEqual(workbook["Guide"].sheet_properties.tabColor.rgb, "004472C4")
+        self.assertTrue(workbook["Guide"]["F6"].alignment.wrap_text)
 
         overview_rows = list(workbook["Overview"].iter_rows(values_only=True))
         overview_header = {name: idx for idx, name in enumerate(overview_rows[0])}
         thread_overview = next(row for row in overview_rows[1:] if row[overview_header["step"]] == "thread-sweep")
+        self.assertEqual(
+            thread_overview[overview_header["step_description"]],
+            "Single-node scaling study",
+        )
         self.assertEqual(thread_overview[overview_header["threads"]], "1,2")
         self.assertEqual(thread_overview[overview_header["nodes"]], "1")
         self.assertEqual(thread_overview[overview_header["rows"]], 2)
         self.assertEqual(thread_overview[overview_header["passed"]], 2)
         self.assertEqual(thread_overview[overview_header["verified"]], 2)
+        self.assertEqual(workbook["Overview"].column_dimensions["B"].width, 56.0)
+        self.assertEqual(workbook["Overview"].column_dimensions["K"].width, 34.0)
+        self.assertEqual(workbook["Overview"].column_dimensions["L"].width, 30.0)
+        self.assertEqual(workbook["Overview"].sheet_properties.tabColor.rgb, "005B9BD5")
+        self.assertTrue(workbook["Overview"]["B2"].alignment.wrap_text)
 
         thread_scaling_rows = list(workbook["ThreadScaling"].iter_rows(values_only=True))
         thread_header = {name: idx for idx, name in enumerate(thread_scaling_rows[0])}

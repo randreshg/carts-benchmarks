@@ -21,14 +21,20 @@ if TYPE_CHECKING:
 try:
     from openpyxl import Workbook
     from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import Alignment
+    from openpyxl.styles import Border
     from openpyxl.styles import Font
     from openpyxl.styles import PatternFill
+    from openpyxl.styles import Side
     from openpyxl.worksheet.table import Table, TableStyleInfo
 except ImportError:  # pragma: no cover - runtime dependency check
     Workbook = None  # type: ignore[assignment]
     CellIsRule = None  # type: ignore[assignment]
+    Alignment = None  # type: ignore[assignment]
+    Border = None  # type: ignore[assignment]
     Font = None  # type: ignore[assignment]
     PatternFill = None  # type: ignore[assignment]
+    Side = None  # type: ignore[assignment]
     Table = None  # type: ignore[assignment]
     TableStyleInfo = None  # type: ignore[assignment]
 
@@ -1938,10 +1944,12 @@ def _build_overview_sheet(
     workbook: Workbook,
     result_rows: List[Dict[str, Any]],
     steps: Optional[List["ExperimentStep"]],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     ws = workbook.create_sheet(title="Overview")
     columns = [
         "step",
+        "step_description",
         "size",
         "threads",
         "nodes",
@@ -1973,6 +1981,7 @@ def _build_overview_sheet(
         step_name: str,
         phase_rows: List[Dict[str, Any]],
         *,
+        description: Any,
         size: Any,
         threads: Any,
         nodes: Any,
@@ -2013,6 +2022,7 @@ def _build_overview_sheet(
         ws.append(
             [
                 step_name,
+                description,
                 size,
                 threads,
                 nodes,
@@ -2044,25 +2054,57 @@ def _build_overview_sheet(
         normalized = sorted({str(value) for value in filtered})
         return ",".join(normalized)
 
-    if steps:
-        for idx, step in enumerate(steps, start=1):
-            step_name = _phase_name(getattr(step, "name", None) or f"step_{idx}")
+    metadata_steps = None
+    if isinstance(metadata, dict):
+        raw_steps = metadata.get("experiment_steps")
+        if isinstance(raw_steps, list):
+            metadata_steps = raw_steps
+
+    if steps or metadata_steps:
+        if steps:
+            step_descriptors = [
+                {
+                    "name": getattr(step, "name", None) or f"step_{idx}",
+                    "description": getattr(step, "description", None),
+                    "benchmarks": getattr(step, "benchmarks", None),
+                    "size": getattr(step, "size", None),
+                    "threads": getattr(step, "threads", None),
+                    "nodes": getattr(step, "nodes", None),
+                    "runs": getattr(step, "runs", None),
+                    "compile_args": getattr(step, "compile_args", None),
+                    "debug": getattr(step, "debug", None),
+                    "perf": bool(getattr(step, "perf", False)),
+                    "perf_interval": (
+                        getattr(step, "perf_interval", None)
+                        if bool(getattr(step, "perf", False))
+                        else None
+                    ),
+                    "profile": getattr(step, "profile", None),
+                }
+                for idx, step in enumerate(steps, start=1)
+            ]
+        else:
+            step_descriptors = metadata_steps
+
+        for idx, step_desc in enumerate(step_descriptors, start=1):
+            step_name = _phase_name(step_desc.get("name") or f"step_{idx}")
             phase_rows = by_phase.get(step_name, [])
-            benchmarks = getattr(step, "benchmarks", None)
+            benchmarks = step_desc.get("benchmarks")
             benchmarks_run = ", ".join(benchmarks) if benchmarks else "all"
-            perf_enabled = bool(getattr(step, "perf", False))
+            perf_enabled = bool(step_desc.get("perf", False))
             append_overview_row(
                 step_name,
                 phase_rows,
-                size=getattr(step, "size", None),
-                threads=getattr(step, "threads", None),
-                nodes=getattr(step, "nodes", None),
-                runs=getattr(step, "runs", None),
-                compile_args=getattr(step, "compile_args", None),
-                debug=getattr(step, "debug", None),
+                description=step_desc.get("description"),
+                size=step_desc.get("size"),
+                threads=step_desc.get("threads"),
+                nodes=step_desc.get("nodes"),
+                runs=step_desc.get("runs"),
+                compile_args=step_desc.get("compile_args"),
+                debug=step_desc.get("debug"),
                 perf=perf_enabled,
-                perf_interval=getattr(step, "perf_interval", None) if perf_enabled else None,
-                profile=getattr(step, "profile", None),
+                perf_interval=step_desc.get("perf_interval") if perf_enabled else None,
+                profile=step_desc.get("profile"),
                 benchmarks_run=benchmarks_run,
             )
     else:
@@ -2071,6 +2113,7 @@ def _build_overview_sheet(
             append_overview_row(
                 step_name,
                 phase_rows,
+                description=None,
                 size=summarize([r.get("size") for r in phase_rows]),
                 threads=summarize([r.get("threads") for r in phase_rows]),
                 nodes=summarize([r.get("nodes") for r in phase_rows]),
@@ -2084,11 +2127,18 @@ def _build_overview_sheet(
             )
 
     _finalize_sheet(ws, columns)
+    _apply_wrapped_column_style(ws, columns, "step_description", width=56)
+    _apply_wrapped_column_style(ws, columns, "benchmarks_run", width=30)
+    _apply_wrapped_column_style(ws, columns, "profile", width=34)
+    _style_sheet_tab(ws, "5B9BD5")
 
 
 def _build_guide_sheet(
     workbook: Workbook,
     sheet_specs: List[Tuple[str, str, str]],
+    *,
+    experiment_name: Optional[str] = None,
+    experiment_description: Optional[str] = None,
 ) -> None:
     ws = workbook.create_sheet(title="Guide", index=0)
     columns = ["sheet", "purpose", "when_to_use", "open"]
@@ -2107,18 +2157,36 @@ def _build_guide_sheet(
 
     quick_flow_row = 1
     quick_flow_col = 6
-    ws.cell(row=quick_flow_row, column=quick_flow_col, value="Benchmark Report Guide")
-    if Font is not None:
-        ws.cell(row=quick_flow_row, column=quick_flow_col).font = Font(bold=True, size=14)
-        ws.cell(row=quick_flow_row + 1, column=quick_flow_col).font = Font(italic=True)
-    ws.cell(
-        row=quick_flow_row + 1,
-        column=quick_flow_col,
-        value="Filter the tables in each sheet rather than editing raw artifacts first.",
+    _style_guide_summary_block(
+        ws,
+        title_row=quick_flow_row,
+        title_col=quick_flow_col,
+        title="Benchmark Report Guide",
+        body_lines=[
+            "Filter the tables in each sheet rather than editing raw artifacts first.",
+        ],
     )
-    ws.cell(row=quick_flow_row + 3, column=quick_flow_col, value="Suggested review order")
-    if Font is not None:
-        ws.cell(row=quick_flow_row + 3, column=quick_flow_col).font = Font(bold=True)
+    review_start_row = quick_flow_row + 3
+    if experiment_name:
+        body_lines = [experiment_name]
+        if experiment_description:
+            body_lines.append(experiment_description)
+        _style_guide_summary_block(
+            ws,
+            title_row=review_start_row,
+            title_col=quick_flow_col,
+            title="Experiment",
+            body_lines=body_lines,
+        )
+        review_start_row += 4
+
+    _style_guide_summary_block(
+        ws,
+        title_row=review_start_row,
+        title_col=quick_flow_col,
+        title="Suggested review order",
+        body_lines=[],
+    )
     quick_flow = [
         "1. Overview: confirm the planned steps and pass counts.",
         "2. Issues: check failures, warnings, and incomplete artifacts first.",
@@ -2128,7 +2196,11 @@ def _build_guide_sheet(
         "6. Results: drill down to exact run artifacts when a row needs explanation.",
     ]
     for offset, text in enumerate(quick_flow, start=1):
-        ws.cell(row=quick_flow_row + 3 + offset, column=quick_flow_col, value=text)
+        cell = ws.cell(row=review_start_row + offset, column=quick_flow_col, value=text)
+        if PatternFill is not None:
+            cell.fill = PatternFill(fill_type="solid", fgColor="F7FAFC")
+        if Alignment is not None:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
 
     ws.freeze_panes = "A2"
     _apply_table_formats(ws, columns)
@@ -2149,6 +2221,12 @@ def _build_guide_sheet(
     else:
         ws.auto_filter.ref = f"A1:D{len(sheet_specs) + 1}"
     _autosize_columns(ws)
+    _apply_wrapped_column_style(ws, columns, "purpose", width=38)
+    _apply_wrapped_column_style(ws, columns, "when_to_use", width=44)
+    _set_column_width(ws, "A", 24)
+    _set_column_width(ws, "D", 12)
+    _set_column_width(ws, "F", 64)
+    _style_sheet_tab(ws, "4472C4")
 
 
 def _append_table_sheet(workbook: Workbook, title: str, columns: List[str], rows: List[Dict[str, Any]]) -> None:
@@ -2277,11 +2355,95 @@ def _autosize_columns(worksheet: Any, max_width: int = 48) -> None:
 def _style_header(worksheet: Any) -> None:
     if Font is None:
         return
-    fill = PatternFill(fill_type="solid", fgColor="E7EDF7") if PatternFill is not None else None
+    fill = PatternFill(fill_type="solid", fgColor="1F4E78") if PatternFill is not None else None
+    border = (
+        Border(bottom=Side(style="thin", color="D9E2F3"))
+        if Border is not None and Side is not None
+        else None
+    )
     for cell in worksheet[1]:
-        cell.font = Font(bold=True)
+        cell.font = Font(bold=True, color="FFFFFF")
         if fill is not None:
             cell.fill = fill
+        if border is not None:
+            cell.border = border
+        if Alignment is not None:
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+
+def _set_column_width(worksheet: Any, column_letter: str, width: float) -> None:
+    worksheet.column_dimensions[column_letter].width = width
+
+
+def _apply_wrapped_column_style(
+    worksheet: Any,
+    columns: List[str],
+    field_name: str,
+    *,
+    width: Optional[float] = None,
+) -> None:
+    if field_name not in columns:
+        return
+    idx = columns.index(field_name) + 1
+    column_letter = worksheet.cell(row=1, column=idx).column_letter
+    if width is not None:
+        _set_column_width(worksheet, column_letter, width)
+    if Alignment is None or worksheet.max_row < 2:
+        return
+    for row in range(2, worksheet.max_row + 1):
+        cell = worksheet.cell(row=row, column=idx)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def _style_guide_summary_block(
+    worksheet: Any,
+    *,
+    title_row: int,
+    title_col: int,
+    title: str,
+    body_lines: List[str],
+) -> None:
+    worksheet.cell(row=title_row, column=title_col, value=title)
+    border = (
+        Border(
+            left=Side(style="thin", color="D9E2F3"),
+            right=Side(style="thin", color="D9E2F3"),
+            top=Side(style="thin", color="D9E2F3"),
+            bottom=Side(style="thin", color="D9E2F3"),
+        )
+        if Border is not None and Side is not None
+        else None
+    )
+    if Font is not None:
+        worksheet.cell(row=title_row, column=title_col).font = Font(bold=True, size=12)
+    if PatternFill is not None:
+        worksheet.cell(row=title_row, column=title_col).fill = PatternFill(
+            fill_type="solid",
+            fgColor="D9EAF7",
+        )
+    if border is not None:
+        worksheet.cell(row=title_row, column=title_col).border = border
+    if Alignment is not None:
+        worksheet.cell(row=title_row, column=title_col).alignment = Alignment(
+            horizontal="left",
+            vertical="center",
+        )
+
+    for offset, text in enumerate(body_lines, start=1):
+        cell = worksheet.cell(row=title_row + offset, column=title_col, value=text)
+        if PatternFill is not None:
+            cell.fill = PatternFill(fill_type="solid", fgColor="F7FAFC")
+        if border is not None:
+            cell.border = border
+        if Alignment is not None:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def _style_sheet_tab(worksheet: Any, color: str) -> None:
+    try:
+        worksheet.sheet_properties.tabColor = color
+    except AttributeError:
+        return
 
 
 TIME_SUFFIXES = {"_e2e", "_e2e_mean", "_e2e_std", "_kernel", "_kernel_mean", "_init", "_init_mean"}
@@ -2653,6 +2815,8 @@ def _metadata_rows(
             rows.append((key, value))
 
     add("timestamp", metadata.get("timestamp"))
+    add("experiment_name", metadata.get("experiment_name"))
+    add("experiment_description", metadata.get("experiment_description"))
     add("hostname", metadata.get("hostname"))
     add("size", metadata.get("size"))
     add("duration_seconds", metadata.get("total_duration_seconds"))
@@ -2665,6 +2829,7 @@ def _metadata_rows(
     add("profile", metadata.get("profile"))
     add("perf", metadata.get("perf"))
     add("perf_interval", metadata.get("perf_interval"))
+    add("experiment_steps", metadata.get("experiment_steps"))
 
     add("thread_sweep", metadata.get("thread_sweep"))
     add("node_sweep", metadata.get("node_sweep"))
@@ -2726,6 +2891,9 @@ def _append_metadata_sheet(
 
     ws.freeze_panes = "A2"
     _finalize_sheet(ws, ["key", "value"])
+    _set_column_width(ws, "A", 28)
+    _apply_wrapped_column_style(ws, ["key", "value"], "value", width=68)
+    _style_sheet_tab(ws, "A5A5A5")
 
 
 def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2794,7 +2962,13 @@ def _write_report(
         return None
 
     report_path = experiment_dir / "report.xlsx"
-    metadata = metadata or _load_results_metadata(experiment_dir)
+    metadata = dict(metadata or _load_results_metadata(experiment_dir))
+    if steps:
+        metadata.setdefault("experiment_name", getattr(steps[0], "_experiment_name", None))
+        metadata.setdefault(
+            "experiment_description",
+            getattr(steps[0], "_experiment_description", None),
+        )
 
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -2920,7 +3094,7 @@ def _write_report(
         ]
     )
 
-    _build_overview_sheet(workbook, result_rows, steps)
+    _build_overview_sheet(workbook, result_rows, steps, metadata=metadata)
     _build_issues_sheet(workbook, result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
     _append_optional_table_sheet(
@@ -2971,7 +3145,20 @@ def _write_report(
         effective_command,
         report_summary=report_summary,
     )
-    _build_guide_sheet(workbook, sheet_specs)
+    experiment_name = metadata.get("experiment_name") if isinstance(metadata, dict) else None
+    experiment_description = (
+        metadata.get("experiment_description") if isinstance(metadata, dict) else None
+    )
+    _build_guide_sheet(
+        workbook,
+        sheet_specs,
+        experiment_name=(
+            str(experiment_name) if experiment_name is not None else None
+        ),
+        experiment_description=(
+            str(experiment_description) if experiment_description is not None else None
+        ),
+    )
 
     workbook.save(report_path)
     return report_path

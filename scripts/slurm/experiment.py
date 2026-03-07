@@ -684,8 +684,38 @@ class SlurmBatchExecutor:
         submitted_jobs: int,
         failed_submissions: int,
     ) -> Dict[str, Any]:
+        experiment_name = None
+        experiment_description = None
+        experiment_steps = None
+        if self.request.report_steps:
+            experiment_name = getattr(
+                self.request.report_steps[0], "_experiment_name", None
+            )
+            experiment_description = getattr(
+                self.request.report_steps[0], "_experiment_description", None
+            )
+            experiment_steps = [
+                {
+                    "name": step.name,
+                    "description": step.description,
+                    "benchmarks": list(step.benchmarks) if step.benchmarks else None,
+                    "size": step.size,
+                    "threads": step.threads,
+                    "nodes": step.nodes,
+                    "runs": step.runs,
+                    "compile_args": step.compile_args,
+                    "debug": step.debug,
+                    "perf": step.perf,
+                    "perf_interval": step.perf_interval if step.perf else None,
+                    "profile": step.profile,
+                }
+                for step in self.request.report_steps
+            ]
         return {
             "timestamp": experiment_dir.name,
+            "experiment_name": experiment_name,
+            "experiment_description": experiment_description,
+            "experiment_steps": experiment_steps,
             "size": self.request.size,
             "node_counts": self.request.node_counts,
             "threads": self.request.threads,

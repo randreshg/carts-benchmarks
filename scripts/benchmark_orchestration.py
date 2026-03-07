@@ -482,6 +482,7 @@ class StepResolver:
     ) -> ExperimentStep:
         step = ExperimentStep(
             name="default",
+            description=None,
             profile=str(profile.resolve()) if profile else None,
             debug=0,
             runs=runs,

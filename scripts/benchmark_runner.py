@@ -3277,6 +3277,9 @@ def export_json(
     fixed_nodes: Optional[int] = None,
     omp_threads_override: Optional[int] = None,
     arts_config_override: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+    experiment_description: Optional[str] = None,
+    experiment_steps: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Export results to JSON file with comprehensive reproducibility metadata."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3315,6 +3318,12 @@ def export_json(
         metadata["omp_threads_override"] = omp_threads_override
     if arts_config_override is not None:
         metadata["arts_config_override"] = arts_config_override
+    if experiment_name:
+        metadata["experiment_name"] = experiment_name
+    if experiment_description:
+        metadata["experiment_description"] = experiment_description
+    if experiment_steps:
+        metadata["experiment_steps"] = experiment_steps
     if weak_scaling:
         metadata["weak_scaling"] = {
             "enabled": True,
@@ -3627,6 +3636,11 @@ def _make_experiment_step(
 
     step = ExperimentStep(
         name=step_name,
+        description=(
+            str(normalized["description"])
+            if normalized.get("description") is not None
+            else None
+        ),
         benchmarks=_parse_step_benchmarks(normalized.get("benchmarks")),
         profile=_resolve_path(normalized.get("profile"), "profile"),
         debug=int(normalized.get("debug", 0) or 0),
@@ -3745,11 +3759,25 @@ def _load_experiment(
     with open(exp_path, "r") as f:
         payload = json.load(f)
 
+    experiment_name: Optional[str] = None
+    experiment_description: Optional[str] = None
+
     if isinstance(payload, dict):
         if "setup_commands" in payload:
             raise ValueError(
                 "Experiment field `setup_commands` is no longer supported."
             )
+        experiment_name = (
+            str(payload.get("name")).strip()
+            if payload.get("name") is not None and str(payload.get("name")).strip()
+            else exp_path.stem
+        )
+        experiment_description = (
+            str(payload.get("description")).strip()
+            if payload.get("description") is not None
+            and str(payload.get("description")).strip()
+            else None
+        )
         known_top_keys = {"name", "description", "steps"} | KNOWN_STEP_KEYS
         unknown_top = sorted(set(payload.keys()) - known_top_keys)
         if unknown_top:
@@ -3757,10 +3785,15 @@ def _load_experiment(
                 f"[yellow]Warning:[/] Unknown experiment keys: {', '.join(unknown_top)}"
             )
         raw_steps = payload.get("steps")
-        defaults = {k: v for k, v in payload.items() if k in KNOWN_STEP_KEYS}
+        defaults = {
+            k: v
+            for k, v in payload.items()
+            if k in KNOWN_STEP_KEYS and k not in {"name", "description"}
+        }
     elif isinstance(payload, list):
         raw_steps = payload
         defaults = {}
+        experiment_name = exp_path.stem
     else:
         raise ValueError(f"Invalid experiment format in {exp_path}")
 
@@ -3772,14 +3805,56 @@ def _load_experiment(
         if not isinstance(item, dict):
             raise ValueError(f"Step {idx} in {exp_path} must be an object")
         merged = {**defaults, **item}
-        steps.append(
-            _make_experiment_step(
-                merged,
-                default_name=f"step_{idx}",
-                base_dir=exp_path.parent,
-            )
+        step = _make_experiment_step(
+            merged,
+            default_name=f"step_{idx}",
+            base_dir=exp_path.parent,
         )
+        setattr(step, "_experiment_name", experiment_name)
+        setattr(step, "_experiment_description", experiment_description)
+        setattr(step, "_experiment_path", str(exp_path))
+        steps.append(step)
     return steps
+
+
+def _serialize_experiment_steps(
+    steps: Optional[List[ExperimentStep]],
+) -> Optional[List[Dict[str, Any]]]:
+    if not steps:
+        return None
+
+    serialized: List[Dict[str, Any]] = []
+    for step in steps:
+        serialized.append(
+            {
+                "name": step.name,
+                "description": step.description,
+                "benchmarks": list(step.benchmarks) if step.benchmarks else None,
+                "size": step.size,
+                "threads": step.threads,
+                "nodes": step.nodes,
+                "runs": step.runs,
+                "compile_args": step.compile_args,
+                "debug": step.debug,
+                "perf": step.perf,
+                "perf_interval": step.perf_interval if step.perf else None,
+                "profile": step.profile,
+            }
+        )
+    return serialized
+
+
+def _experiment_context_from_steps(
+    steps: Optional[List[ExperimentStep]],
+) -> Tuple[Optional[str], Optional[str], Optional[List[Dict[str, Any]]]]:
+    if not steps:
+        return None, None, None
+
+    return (
+        getattr(steps[0], "_experiment_name", None),
+        getattr(steps[0], "_experiment_description", None),
+        _serialize_experiment_steps(steps),
+    )
 
 
 def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
@@ -4471,6 +4546,7 @@ def run(
         console.print(create_summary_panel(results, total_duration))
 
     # Write results.json into the experiment directory
+    experiment_name, experiment_description, experiment_steps = _experiment_context_from_steps(steps)
     export_json(
         results,
         am.results_json_path,
@@ -4488,6 +4564,9 @@ def run(
         fixed_nodes=fixed_nodes_meta,
         omp_threads_override=omp_threads,
         arts_config_override=str(arts_config) if arts_config else None,
+        experiment_name=experiment_name,
+        experiment_description=experiment_description,
+        experiment_steps=experiment_steps,
     )
 
     report_path: Optional[Path] = None

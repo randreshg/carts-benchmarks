@@ -1,0 +1,52 @@
+{
+  "name": "all-benchmarks-multinode-extralarge",
+  "description": "Multinode extralarge-size study for the multinode-capable benchmark suite. This experiment answers what happens when the benchmarks leave a single node, whether they scale across nodes, and whether distributed DB ownership improves or harms scaling and balance.",
+  "steps": [
+    {
+      "name": "node-sweep-baseline",
+      "description": "Primary multinode baseline scaling study. Measure how the default CARTS/ARTS path scales across nodes without distributed DB ownership.",
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "2,4,8,16,32",
+      "debug": 0,
+      "runs": 5,
+      "perf": false
+    },
+    {
+      "name": "node-sweep-distributed-db",
+      "description": "Primary multinode distributed-DB scaling study. Compare directly against the baseline sweep to determine whether distributed DB ownership helps at each node count.",
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "2,4,8,16,32",
+      "debug": 0,
+      "runs": 5,
+      "perf": false,
+      "compile_args": "--distributed-db"
+    },
+    {
+      "name": "multinode-overhead-baseline",
+      "description": "Targeted multinode baseline diagnostics at representative medium and large node counts. Capture counters and perf together to explain communication, memory, and load-balance behavior behind the baseline timing curve.",
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "8,32",
+      "debug": 0,
+      "runs": 5,
+      "perf": true,
+      "perf_interval": 1.0,
+      "profile": "profile-overhead.cfg"
+    },
+    {
+      "name": "multinode-overhead-distributed-db",
+      "description": "Targeted multinode distributed-DB diagnostics at representative medium and large node counts. Use this paired with the baseline diagnostics to explain why distributed DB helps or hurts scaling.",
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "8,32",
+      "debug": 0,
+      "runs": 5,
+      "perf": true,
+      "perf_interval": 1.0,
+      "profile": "profile-overhead.cfg",
+      "compile_args": "--distributed-db"
+    }
+  ]
+}
