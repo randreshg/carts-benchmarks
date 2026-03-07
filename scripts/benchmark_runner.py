@@ -1027,18 +1027,6 @@ class BenchmarkRunner:
         omp_output_path = output_root / omp_exe_default.name
 
         env_overrides: Dict[str, str] = {}
-        effective_arts_config = arts_config
-        if variant != "openmp" and effective_arts_config is None:
-            # Keep build behavior independent of current working directory.
-            effective_arts_config = _resolve_effective_arts_config(bench_path)
-        if variant != "openmp" and effective_arts_config is not None:
-            effective_arts_config = effective_arts_config.resolve()
-            if build_output_dir is not None:
-                # Keep the exact compile-time config alongside the build artifacts.
-                local_cfg = output_root / "arts.cfg"
-                if effective_arts_config != local_cfg.resolve():
-                    shutil.copy2(effective_arts_config, local_cfg)
-                effective_arts_config = local_cfg
 
         if variant == "openmp":
             # Build only OpenMP variant using granular target
@@ -1116,22 +1104,6 @@ class BenchmarkRunner:
                     executable = str(expected_exe)
                 else:
                     executable = self._find_executable(bench_path, variant)
-                if variant != "openmp":
-                    config_error = _validate_embedded_arts_cfg(
-                        output_root, effective_arts_config
-                    )
-                    if config_error is not None:
-                        combined_output = (result.stdout + result.stderr).strip()
-                        output = (
-                            f"{combined_output}\n{config_error}".strip()
-                            if combined_output
-                            else config_error
-                        )
-                        return BuildResult(
-                            status=Status.FAIL,
-                            duration_sec=duration,
-                            output=output,
-                        )
                 return BuildResult(
                     status=Status.PASS,
                     duration_sec=duration,
@@ -1708,23 +1680,6 @@ class BenchmarkRunner:
             perf_output_dir: Directory for perf CSV output (default: executable's parent).
             arts_config: Optional path to arts.cfg for ARTS_CONFIG env var.
         """
-        result = self._run_process_request(
-            BenchmarkProcessRequest(
-                executable=executable,
-                timeout=timeout,
-                env=dict(env or {}),
-                launcher=launcher,
-                node_count=node_count,
-                threads=threads,
-                args=list(args or []),
-                log_file=log_file,
-                perf_enabled=perf_enabled,
-                perf_interval=perf_interval,
-                perf_output_name=perf_output_name,
-                perf_output_dir=perf_output_dir,
-                counter_dir=counter_dir,
-            )
-
         # Merge with current environment
         run_env = os.environ.copy()
         if env:
@@ -2513,41 +2468,23 @@ class BenchmarkRunner:
             if omp_log is not None:
                 artifacts.omp_log = str(omp_log)
 
-        total_duration = time.time() - start_time
-
         return BenchmarkResult(
             name=name,
+            suite=name.split("/")[0] if "/" in name else "",
             size=size,
-            bench_path=bench_path,
             config=config,
-            effective_arts_cfg=effective_arts_cfg,
-            desired_threads=desired_threads,
-            desired_nodes=desired_nodes,
-            desired_launcher=desired_launcher,
-            actual_omp_threads=actual_omp_threads,
-            effective_cflags=cflags,
-            build_output_dir=build_output_dir,
+            run_number=run_number,
+            build_arts=build_arts,
+            build_omp=build_omp,
+            run_arts=run_arts,
+            run_omp=run_omp,
+            timing=timing,
+            verification=verification,
+            artifacts=artifacts,
+            timestamp=datetime.now().isoformat(),
+            total_duration_sec=0.0,
+            size_params=self.get_size_params(bench_path, size),
         )
-        plan = self._create_execution_plan(
-            execution=execution,
-            timeout=timeout,
-            run_numbers=(run_number,),
-            verify=verify,
-            compile_args=compile_args,
-            perf_enabled=perf_enabled,
-            perf_interval=perf_interval,
-            counter_dir=counter_dir,
-            perf_dir=perf_dir,
-            run_timestamp=run_timestamp,
-            sweep_log_names=False,
-            report_speedup=(desired_nodes == 1),
-            env_overrides=self._create_common_env(),
-        )
-        hooks = ExecutionHooks(
-            phase_callback=phase_callback,
-            partial_results=partial_results,
-        )
-        return ConfigExecutionExecutor(self, plan).execute(hooks)[0]
 
     def run_all(
         self,
@@ -4170,11 +4107,43 @@ def _parse_nodes_spec(spec: str) -> List[int]:
 _STEP_RESOLVER = StepResolver(
     configs_dir=CONFIGS_DIR,
     profiles_dir=PROFILES_DIR,
-    parse_threads=parse_threads,
+    parse_threads=parse_workers,
     parse_nodes_spec=_parse_nodes_spec,
     parse_inline_steps=_parse_inline_steps,
     load_experiment=_load_experiment,
 )
+
+
+def _resolve_step_name(step: ExperimentStep, idx: int) -> str:
+    """Return a canonical, non-empty step name."""
+    resolved = (step.name or f"step_{idx}").strip()
+    return resolved if resolved else f"step_{idx}"
+
+
+def _resolve_step_bench_list(
+    step_name: str,
+    all_benchmarks: List[str],
+    step_benchmarks: Optional[List[str]],
+) -> List[str]:
+    """Resolve benchmark list for a step, validating explicit subsets."""
+    if not step_benchmarks:
+        return all_benchmarks
+    requested = [b.strip() for b in step_benchmarks if b and b.strip()]
+    if not requested:
+        raise ValueError(f"Step '{step_name}' has an empty `benchmarks` selection")
+    unknown = [b for b in requested if b not in all_benchmarks]
+    if unknown:
+        raise ValueError(
+            f"Step '{step_name}' has unknown benchmark(s): {', '.join(unknown)}"
+        )
+    seen: set = set()
+    ordered: List[str] = []
+    for bench in requested:
+        if bench in seen:
+            continue
+        seen.add(bench)
+        ordered.append(bench)
+    return ordered
 
 
 def _run_step(
@@ -4648,6 +4617,7 @@ def run(
     if not has_node_sweep and base_node_counts and len(base_node_counts) == 1:
         fixed_nodes_meta = int(base_node_counts[0])
 
+    all_results: List[BenchmarkResult] = []
     try:
         for idx, step_def in enumerate(steps, start=1):
             step_name = _resolve_step_name(step_def, idx)
@@ -4716,6 +4686,9 @@ def run(
 
             step_results = _run_step(
                 runner=runner,
+                bench_list=step_bench_list,
+                size=step_size,
+                timeout=step_timeout,
                 verify=verify,
                 workers_list=step_workers_list,
                 node_counts=step_node_counts,
@@ -4733,6 +4706,8 @@ def run(
         console.print(f"\n[red]Error:[/] {e}")
         raise typer.Exit(1)
     total_duration = time.time() - start_time
+
+    results = all_results
 
     # Display results
     console.print()

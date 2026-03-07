@@ -71,30 +71,8 @@ _POLL_SPINNER_FRAMES = ("|", "/", "-", "\\")
 
 
 # ============================================================================
-# Data Classes
+# Helpers
 # ============================================================================
-
-
-@dataclass
-class SlurmJobConfig:
-    """Configuration for a single SLURM job."""
-    benchmark_name: str
-    run_number: int
-    node_count: int
-    time_limit: str  # "HH:MM:SS" format
-    partition: Optional[str]
-    account: Optional[str]
-    executable_arts: Path
-    executable_omp: Optional[Path]
-    arts_config_path: Path
-    run_dir: Path
-    size: str
-    threads: int  # For OpenMP comparison (single-node only)
-    port: Optional[str] = None  # Per-job port override (e.g., "10001" or "[10001-10002]")
-    gdb: bool = False  # Wrap executable with gdb for backtrace on crash
-    perf: bool = False  # Enable perf stat profiling for cache metrics
-    exclude_nodes: Optional[str] = None  # SLURM nodes to exclude (e.g. "j006,j007")
-    job_label: Optional[str] = None  # Optional phase/step label to disambiguate job names
 
 
 def _create_submission_failure(
