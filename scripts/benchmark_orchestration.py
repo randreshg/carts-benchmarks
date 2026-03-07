@@ -58,7 +58,6 @@ class LocalStepExecutionRequest:
     """Shared context for executing resolved steps locally."""
 
     runner: object
-    verify: bool
     omp_threads: Optional[int]
     weak_scaling: bool
     base_size: Optional[int]
@@ -72,7 +71,6 @@ class LocalStepExecutionRequest:
 class SlurmStepExecutionRequest:
     """Shared context for executing resolved steps through SLURM."""
 
-    verify: bool
     partition: Optional[str]
     time_limit: str
     results_dir: Path

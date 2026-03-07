@@ -87,6 +87,8 @@ def _apply_run_config(result: Dict[str, Any], run_config: Dict[str, Any]) -> Non
             verification.setdefault("reference_checksum", reference.get("checksum"))
         if "source" in reference:
             verification.setdefault("reference_source", reference.get("source"))
+        if "omp_threads" in reference:
+            verification.setdefault("reference_omp_threads", reference.get("omp_threads"))
 
 
 def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, Any]) -> None:

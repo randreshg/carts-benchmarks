@@ -24,6 +24,13 @@ class Phase(str, Enum):
     DONE = "done"
 
 
+class VerificationMode(str, Enum):
+    """How a benchmark result was verified."""
+
+    DIRECT_OMP = "direct_omp"
+    STORED_OMP_REFERENCE = "stored_omp_reference"
+
+
 @dataclass
 class BuildResult:
     """Result of building a benchmark."""
@@ -159,8 +166,10 @@ class VerificationResult:
     omp_checksum: Optional[str]
     tolerance_used: float
     note: str
+    mode: Optional[str] = None
     reference_checksum: Optional[str] = None
     reference_source: Optional[str] = None
+    reference_omp_threads: Optional[int] = None
 
 
 @dataclass

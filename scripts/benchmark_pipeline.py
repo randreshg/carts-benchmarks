@@ -27,7 +27,6 @@ class ConfigExecutionPlan:
     execution: BenchmarkExecutionContext
     timeout: int
     run_numbers: Tuple[int, ...]
-    verify: bool
     compile_args: Optional[str]
     perf_enabled: bool
     perf_interval: float
@@ -323,15 +322,7 @@ class ConfigExecutionExecutor:
         run_omp: RunResult,
         tolerance: float,
     ) -> VerificationResult:
-        if self.plan.verify:
-            return self.host.verify_correctness(run_arts, run_omp, tolerance=tolerance)
-        return VerificationResult(
-            correct=False,
-            arts_checksum=run_arts.checksum,
-            omp_checksum=run_omp.checksum,
-            tolerance_used=0.0,
-            note="Verification disabled",
-        )
+        return self.host.verify_correctness(run_arts, run_omp, tolerance=tolerance)
 
     def _collect_artifacts(
         self,

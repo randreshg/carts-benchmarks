@@ -156,7 +156,6 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             defaults=defaults,
             request=LocalStepExecutionRequest(
                 runner=runner,
-                verify=True,
                 omp_threads=None,
                 weak_scaling=False,
                 base_size=None,
@@ -215,7 +214,6 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             bench_list=["polybench/gemm"],
             defaults=defaults,
             request=SlurmStepExecutionRequest(
-                verify=True,
                 partition="debug",
                 time_limit="00:10:00",
                 results_dir=self.root / "results",

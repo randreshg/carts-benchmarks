@@ -51,10 +51,12 @@ RESULTS_COLUMNS = [
     "has_counters",
     "has_perf",
     "verification_note",
+    "verification_mode",
     "arts_checksum",
     "omp_checksum",
     "reference_checksum",
     "reference_source",
+    "reference_omp_threads",
     "runtime_warning",
     "slurm_job_id",
     "slurm_state",
@@ -362,6 +364,7 @@ INT_FIELDS = {
     "fail_count",
     "warn_count",
     "verified_count",
+    "reference_omp_threads",
     "nodes_reported",
     "node_id",
     "total_threads",
@@ -936,10 +939,28 @@ def _verification_state(
     note_text = str(verification_note or "").strip().lower()
     if "mismatch" in note_text or "failed" in note_text:
         return False
+    if "cannot verify" in note_text:
+        return False
 
     if arts_checksum is not None and (omp_checksum is not None or reference_checksum is not None):
         return True
 
+    return None
+
+
+def _verification_mode_value(
+    explicit_mode: Any,
+    omp_checksum: Any,
+    reference_checksum: Any,
+) -> Optional[str]:
+    if explicit_mode is not None:
+        text = str(explicit_mode).strip()
+        if text:
+            return text
+    if reference_checksum is not None:
+        return "stored_omp_reference"
+    if omp_checksum is not None:
+        return "direct_omp"
     return None
 
 
@@ -977,10 +998,24 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
                 verification.reference_checksum,
             ),
             "verification_note": verification.note,
+            "verification_mode": _verification_mode_value(
+                verification.mode,
+                verification.omp_checksum,
+                verification.reference_checksum,
+            ),
             "arts_checksum": verification.arts_checksum,
             "omp_checksum": verification.omp_checksum,
             "reference_checksum": verification.reference_checksum,
             "reference_source": verification.reference_source,
+            "reference_omp_threads": (
+                verification.reference_omp_threads
+                if verification.reference_omp_threads is not None
+                else (
+                    result.config.arts_threads
+                    if verification.reference_checksum is not None
+                    else None
+                )
+            ),
             "runtime_warning": False,
             "slurm_job_id": None,
             "slurm_state": None,
@@ -1105,12 +1140,25 @@ def _flatten_result_serialized(
                 (result.get("verification") or {}).get("reference_checksum"),
             ),
             "verification_note": (result.get("verification") or {}).get("note"),
+            "verification_mode": _verification_mode_value(
+                (result.get("verification") or {}).get("mode"),
+                omp.get("checksum"),
+                (result.get("verification") or {}).get("reference_checksum"),
+            ),
             "arts_checksum": arts.get("checksum"),
             "omp_checksum": omp.get("checksum"),
             "reference_checksum": (result.get("verification") or {}).get("reference_checksum"),
             "reference_source": _remap_path_value(
                 (result.get("verification") or {}).get("reference_source"),
                 experiment_dir=experiment_dir,
+            ),
+            "reference_omp_threads": (
+                (result.get("verification") or {}).get("reference_omp_threads")
+                or (
+                    result.get("threads") or config.get("arts_threads")
+                    if (result.get("verification") or {}).get("reference_checksum") is not None
+                    else None
+                )
             ),
             "runtime_warning": detected_runtime_warning,
             "slurm_job_id": slurm.get("job_id"),

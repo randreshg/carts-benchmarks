@@ -56,7 +56,6 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
                 nodes="1",
                 size="small",
                 runs=1,
-                verify=True,
                 partition="debug",
                 time_limit="00:10:00",
                 account=None,

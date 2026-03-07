@@ -114,6 +114,10 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
             verification["reference_source"] = self._remoteize(
                 self.experiment_dir / "references" / phase / f"{threads}t_{nodes}n" / "reference.json"
             )
+            verification["reference_omp_threads"] = threads
+            verification["mode"] = "stored_omp_reference"
+        else:
+            verification["mode"] = "direct_omp"
         return {
             "benchmark": "polybench/gemm",
             "size": size,
@@ -401,6 +405,15 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         result_header = {cell.value: idx + 1 for idx, cell in enumerate(workbook["Results"][1])}
         run_config_cell = workbook["Results"].cell(row=2, column=result_header["artifact_run_config"])
         self.assertIsNotNone(run_config_cell.hyperlink)
+        self.assertEqual(workbook["Results"].cell(row=2, column=result_header["verification_mode"]).value, "direct_omp")
+
+        distributed_result_row = next(
+            row for row in workbook["Results"].iter_rows(min_row=2, values_only=True)
+            if row[result_header["run_phase"] - 1] == "multinode-overhead-distributed-db"
+            and row[result_header["nodes"] - 1] == 4
+        )
+        self.assertEqual(distributed_result_row[result_header["verification_mode"] - 1], "stored_omp_reference")
+        self.assertEqual(distributed_result_row[result_header["reference_omp_threads"] - 1], 64)
 
 
 if __name__ == "__main__":

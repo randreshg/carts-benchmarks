@@ -112,6 +112,7 @@ from benchmark_execution import (
     BenchmarkProcessRunner,
     BenchmarkRunFiles,
 )
+from benchmark_verification import verify_against_omp
 from benchmark_orchestration import (
     LocalStepExecutionRequest,
     ResolvedStepConfig,
@@ -1536,7 +1537,6 @@ class BenchmarkRunner:
         execution: BenchmarkExecutionContext,
         timeout: int,
         run_numbers: Tuple[int, ...],
-        verify: bool,
         compile_args: Optional[str],
         perf_enabled: bool,
         perf_interval: float,
@@ -1553,7 +1553,6 @@ class BenchmarkRunner:
             execution=execution,
             timeout=timeout,
             run_numbers=run_numbers,
-            verify=verify,
             compile_args=compile_args,
             perf_enabled=perf_enabled,
             perf_interval=perf_interval,
@@ -1697,7 +1696,6 @@ class BenchmarkRunner:
                     execution=execution,
                     timeout=timeout,
                     run_numbers=tuple(range(1, runs + 1)),
-                    verify=True,
                     compile_args=compile_args,
                     perf_enabled=perf_enabled,
                     perf_interval=perf_interval,
@@ -1849,55 +1847,13 @@ class BenchmarkRunner:
         tolerance: float = DEFAULT_TOLERANCE,
     ) -> VerificationResult:
         """Compare ARTS output against OpenMP reference."""
-        if arts_result.status != Status.PASS or omp_result.status != Status.PASS:
-            return VerificationResult(
-                correct=False,
-                arts_checksum=arts_result.checksum,
-                omp_checksum=omp_result.checksum,
-                tolerance_used=tolerance,
-                note="Cannot verify: one or both runs failed",
-            )
-
-        if arts_result.checksum is None or omp_result.checksum is None:
-            return VerificationResult(
-                correct=False,
-                arts_checksum=arts_result.checksum,
-                omp_checksum=omp_result.checksum,
-                tolerance_used=tolerance,
-                note="Cannot verify: checksum not found in output",
-            )
-
-        try:
-            arts_val = float(arts_result.checksum)
-            omp_val = float(omp_result.checksum)
-
-            if omp_val == 0:
-                correct = abs(arts_val) < tolerance
-            else:
-                correct = abs((arts_val - omp_val) / omp_val) < tolerance
-
-            if correct:
-                note = "Checksums match within tolerance"
-            else:
-                note = f"Checksums differ: ARTS={arts_val}, OMP={omp_val}"
-
-            return VerificationResult(
-                correct=correct,
-                arts_checksum=arts_result.checksum,
-                omp_checksum=omp_result.checksum,
-                tolerance_used=tolerance,
-                note=note,
-            )
-        except ValueError:
-            # String comparison fallback
-            correct = arts_result.checksum.strip() == omp_result.checksum.strip()
-            return VerificationResult(
-                correct=correct,
-                arts_checksum=arts_result.checksum,
-                omp_checksum=omp_result.checksum,
-                tolerance_used=tolerance,
-                note="String comparison" if correct else "String mismatch",
-            )
+        return verify_against_omp(
+            arts_result.status,
+            arts_result.checksum,
+            omp_result.status,
+            omp_result.checksum,
+            tolerance,
+        )
 
     def calculate_timing(
         self,
@@ -2038,7 +1994,6 @@ class BenchmarkRunner:
         name: str,
         size: str = DEFAULT_SIZE,
         timeout: int = DEFAULT_TIMEOUT,
-        verify: bool = True,
         arts_config: Optional[Path] = None,
         threads_override: Optional[int] = None,
         nodes_override: Optional[int] = None,
@@ -2154,7 +2109,6 @@ class BenchmarkRunner:
             execution=execution,
             timeout=timeout,
             run_numbers=(run_number,),
-            verify=verify,
             compile_args=compile_args,
             perf_enabled=perf_enabled,
             perf_interval=perf_interval,
@@ -2176,7 +2130,6 @@ class BenchmarkRunner:
         benchmarks: List[str],
         size: str = DEFAULT_SIZE,
         timeout: int = DEFAULT_TIMEOUT,
-        verify: bool = True,
         arts_config: Optional[Path] = None,
         threads_override: Optional[int] = None,
         nodes_override: Optional[int] = None,
@@ -2205,7 +2158,6 @@ class BenchmarkRunner:
                         bench,
                         size,
                         timeout,
-                        verify,
                         arts_config,
                         threads_override,
                         nodes_override,
@@ -2259,7 +2211,6 @@ class BenchmarkRunner:
                             bench,
                             size,
                             timeout,
-                            verify,
                             arts_config,
                             threads_override,
                             nodes_override,
@@ -2300,7 +2251,6 @@ class BenchmarkRunner:
         size: str,
         timeout: int,
         n_workers: int,
-        verify: bool,
         arts_config: Optional[Path],
     ) -> List[BenchmarkResult]:
         """Execute benchmarks in parallel using process pool."""
@@ -2320,7 +2270,6 @@ class BenchmarkRunner:
                         bench,
                         size,
                         timeout,
-                        verify,
                         str(arts_config) if arts_config else None,
                         clean=self.clean,
                     ): bench
@@ -2356,7 +2305,6 @@ class BenchmarkRunner:
                         bench,
                         size,
                         timeout,
-                        verify,
                         str(arts_config) if arts_config else None,
                         clean=self.clean,
                     ): bench
@@ -2613,7 +2561,6 @@ def _run_single_worker(
     name: str,
     size: str,
     timeout: int,
-    verify: bool,
     arts_config: Optional[str],
     threads_override: Optional[int] = None,
     nodes_override: Optional[int] = None,
@@ -2630,7 +2577,6 @@ def _run_single_worker(
         name,
         size,
         timeout,
-        verify,
         Path(arts_config) if arts_config else None,
         threads_override,
         nodes_override,
@@ -2834,8 +2780,6 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         # Correctness
         if r.verification.correct:
             correct = "[green]\u2713 YES[/]"
-        elif r.verification.note == "Verification disabled":
-            correct = "[dim]- N/A[/]"
         elif r.run_arts.status != Status.PASS or r.run_omp.status != Status.PASS:
             correct = "[dim]- N/A[/]"
         else:
@@ -3025,8 +2969,6 @@ def create_live_table(
             # Correctness (based on latest run)
             if r.verification.correct:
                 correct = "[green]\u2713 YES[/]"
-            elif r.verification.note == "Verification disabled":
-                correct = "[dim]- N/A[/]"
             elif r.run_arts.status != Status.PASS or r.run_omp.status != Status.PASS:
                 correct = "[dim]- N/A[/]"
             else:
@@ -3907,7 +3849,6 @@ def _run_step(
     bench_list: List[str],
     size: str,
     timeout: int,
-    verify: bool,
     arts_config: Optional[Path],
     threads_list: Optional[List[int]],
     node_counts: Optional[List[int]],
@@ -3984,7 +3925,6 @@ def _run_step(
                     bench_list,
                     size=size,
                     timeout=timeout,
-                    verify=verify,
                     arts_config=arts_config,
                     threads_override=threads_value,
                     nodes_override=nodes_value,
@@ -4004,7 +3944,6 @@ def _run_step(
         bench_list,
         size=size,
         timeout=timeout,
-        verify=verify,
         arts_config=arts_config,
         threads_override=threads_override,
         nodes_override=nodes_override,
@@ -4024,7 +3963,6 @@ def _run_step_slurm(
     size: str,
     node_counts: List[int],
     runs: int,
-    verify: bool,
     partition: Optional[str],
     time_limit: str,
     arts_config: Optional[Path],
@@ -4054,7 +3992,6 @@ def _run_step_slurm(
             nodes=nodes_arg,
             size=size,
             runs=runs,
-            verify=verify,
             partition=partition,
             time_limit=time_limit,
             account=None,
@@ -4102,7 +4039,6 @@ def _run_local_resolved_step(
         bench_list=step_config.bench_list,
         size=step_config.size,
         timeout=step_config.timeout,
-        verify=request.verify,
         arts_config=step_config.arts_config,
         threads_list=step_config.threads_list,
         node_counts=step_config.node_counts,
@@ -4132,7 +4068,6 @@ def _run_slurm_resolved_step(
         size=step_config.size,
         node_counts=step_config.node_counts or [],
         runs=step_config.runs,
-        verify=request.verify,
         partition=request.partition,
         time_limit=request.time_limit,
         arts_config=step_config.arts_config,
@@ -4196,8 +4131,6 @@ def run(
                              "-s", help=SIZE_HELP),
     timeout: int = typer.Option(
         DEFAULT_TIMEOUT, "--timeout", "-t", help="Execution timeout in seconds"),
-    no_verify: bool = typer.Option(
-        False, "--no-verify", help="Disable correctness verification"),
     no_clean: bool = typer.Option(
         False, "--no-clean", help="Skip cleaning before build (faster, but may use stale artifacts)"),
     arts_config: Optional[Path] = typer.Option(
@@ -4271,7 +4204,6 @@ def run(
         print_error(str(e))
         raise typer.Exit(2)
 
-    verify = not no_verify
     clean = not no_clean
     size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
 
@@ -4418,7 +4350,6 @@ def run(
                 bench_list=bench_list,
                 defaults=step_defaults,
                 request=SlurmStepExecutionRequest(
-                    verify=verify,
                     partition=partition,
                     time_limit=time_limit,
                     results_dir=results_dir,
@@ -4438,8 +4369,7 @@ def run(
 
     # Print header
     if not quiet:
-        config_items = [f"size={effective_size_label}", f"timeout={timeout}s",
-                        f"verify={verify}", f"clean={clean}"]
+        config_items = [f"size={effective_size_label}", f"timeout={timeout}s", f"clean={clean}"]
         if base_threads_list:
             config_items.append(f"threads={threads}")
         if launcher is not None:
@@ -4514,7 +4444,6 @@ def run(
             defaults=step_defaults,
             request=LocalStepExecutionRequest(
                 runner=runner,
-                verify=verify,
                 omp_threads=omp_threads,
                 weak_scaling=weak_scaling,
                 base_size=base_size,
@@ -4753,7 +4682,6 @@ def _execute_slurm_batch(
         help=SIZE_HELP),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of runs per benchmark"),
-    verify: bool = True,
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p",
         help="SLURM partition (uses cluster default if not specified)"),
@@ -4928,7 +4856,6 @@ def _execute_slurm_batch(
         node_counts=node_counts,
         size=size,
         runs=runs,
-        verify=verify,
         partition=partition,
         time_limit=time_limit,
         account=account,

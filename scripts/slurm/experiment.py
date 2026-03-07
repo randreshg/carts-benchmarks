@@ -40,7 +40,6 @@ class SlurmBatchRequest:
     node_counts: List[int]
     size: str
     runs: int
-    verify: bool
     partition: Optional[str]
     time_limit: str
     account: Optional[str]
@@ -296,7 +295,7 @@ class SlurmBatchExecutor:
             src_arts, src_omp = self.host.get_executable_paths(bench_path)
             results: List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]] = []
 
-            needs_multinode_reference = self.request.verify and any(
+            needs_multinode_reference = any(
                 node_count > 1 and bench not in multinode_disabled
                 for node_count in self.request.node_counts
             )
@@ -488,17 +487,17 @@ class SlurmBatchExecutor:
                     perf_interval=self.request.perf_interval if self.request.perf else None,
                     reference_checksum=(
                         reference_checksums.get(bench).checksum
-                        if self.request.verify and node_count > 1 and bench in reference_checksums
+                        if node_count > 1 and bench in reference_checksums
                         else None
                     ),
                     reference_source=(
                         reference_checksums.get(bench).source
-                        if self.request.verify and node_count > 1 and bench in reference_checksums
+                        if node_count > 1 and bench in reference_checksums
                         else None
                     ),
                     reference_threads=(
                         reference_checksums.get(bench).omp_threads
-                        if self.request.verify and node_count > 1 and bench in reference_checksums
+                        if node_count > 1 and bench in reference_checksums
                         else None
                     ),
                 )

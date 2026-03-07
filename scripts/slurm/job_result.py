@@ -41,6 +41,8 @@ from benchmark_common import (
     parse_init_timings,
     parse_counter_json,
 )
+from benchmark_models import Status, VerificationResult
+from benchmark_verification import verify_against_omp, verify_against_reference
 
 
 def read_slurm_output(output_dir: Path, job_id: str) -> Tuple[str, str]:
@@ -86,8 +88,10 @@ def determine_status(
     arts_checksum: Optional[str],
     omp_checksum: Optional[str],
     reference_checksum: Optional[str] = None,
+    reference_source: Optional[str] = None,
+    reference_omp_threads: Optional[int] = None,
     tolerance: float = 0.01,
-) -> Tuple[str, str]:
+) -> Tuple[str, VerificationResult]:
     """Determine overall status and verification result.
 
     Args:
@@ -98,54 +102,29 @@ def determine_status(
         tolerance: Tolerance for checksum comparison
 
     Returns:
-        Tuple of (status, verification_note)
+        Tuple of (status, verification_result)
     """
-    # Check for crash/failure
-    if arts_exit != 0:
-        return "FAIL", f"ARTS exited with code {arts_exit}"
-
-    # If OMP was skipped, compare against a stored multi-node reference checksum
-    # when available.
+    arts_status = Status.PASS if arts_exit == 0 else Status.FAIL
     if omp_exit == -1:
-        if arts_checksum and reference_checksum:
-            try:
-                arts_val = float(arts_checksum)
-                ref_val = float(reference_checksum)
+        verification = verify_against_reference(
+            arts_status,
+            arts_checksum,
+            reference_checksum,
+            tolerance,
+            reference_source=reference_source,
+            reference_omp_threads=reference_omp_threads,
+        )
+    else:
+        omp_status = Status.PASS if omp_exit == 0 else Status.FAIL
+        verification = verify_against_omp(
+            arts_status,
+            arts_checksum,
+            omp_status,
+            omp_checksum,
+            tolerance,
+        )
 
-                if abs(arts_val - ref_val) / max(abs(ref_val), 1e-10) <= tolerance:
-                    return "PASS", f"Checksum matches stored OMP reference within {tolerance*100:.1f}% tolerance"
-                return "FAIL", f"Checksum mismatch: ARTS={arts_checksum}, stored OMP reference={reference_checksum}"
-            except ValueError:
-                if arts_checksum == reference_checksum:
-                    return "PASS", "Checksum matches stored OMP reference exactly"
-                return "FAIL", f"Checksum mismatch: ARTS={arts_checksum}, stored OMP reference={reference_checksum}"
-        if arts_checksum:
-            return "PASS", "ARTS completed (OpenMP skipped; no stored OMP reference checksum)"
-        else:
-            return "PASS", "ARTS completed, no checksum found"
-
-    # OMP ran - check its status
-    if omp_exit != 0:
-        return "FAIL", f"OpenMP exited with code {omp_exit}"
-
-    # Both ran successfully - compare checksums if available
-    if arts_checksum and omp_checksum:
-        try:
-            arts_val = float(arts_checksum)
-            omp_val = float(omp_checksum)
-
-            if abs(arts_val - omp_val) / max(abs(omp_val), 1e-10) <= tolerance:
-                return "PASS", f"Checksums match within {tolerance*100:.1f}% tolerance"
-            else:
-                return "FAIL", f"Checksum mismatch: ARTS={arts_checksum}, OMP={omp_checksum}"
-        except ValueError:
-            # Non-numeric checksums - exact match
-            if arts_checksum == omp_checksum:
-                return "PASS", "Checksums match exactly"
-            else:
-                return "FAIL", f"Checksum mismatch: ARTS={arts_checksum}, OMP={omp_checksum}"
-
-    return "PASS", "Completed (no checksums to verify)"
+    return ("PASS" if verification.correct else "FAIL", verification)
 
 
 def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[str, Any]:
@@ -245,6 +224,7 @@ def generate_result(
         reference_payload = {}
     reference_checksum = reference_payload.get("checksum")
     reference_source = reference_payload.get("source")
+    reference_omp_threads = reference_payload.get("omp_threads")
 
     # Read SLURM output for parsing
     stdout, stderr = read_slurm_output(output_dir, slurm_job_id)
@@ -282,13 +262,19 @@ def generate_result(
         omp_init = parse_init_timings(omp_section)
 
     # Determine status
-    status, verification_note = determine_status(
+    status, verification_result = determine_status(
         arts_exit,
         omp_exit,
         arts_checksum,
         omp_checksum,
         reference_checksum=(
             str(reference_checksum) if reference_checksum is not None else None
+        ),
+        reference_source=(
+            str(reference_source) if reference_source is not None else None
+        ),
+        reference_omp_threads=(
+            int(reference_omp_threads) if reference_omp_threads is not None else None
         ),
     )
     diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != "PASS"))
@@ -301,15 +287,13 @@ def generate_result(
         "timestamp": datetime.now().isoformat(),
         "status": status,
         "verification": {
-            "note": verification_note,
-            "arts_checksum": arts_checksum,
-            "omp_checksum": omp_checksum,
-            "reference_checksum": (
-                str(reference_checksum) if reference_checksum is not None else None
-            ),
-            "reference_source": (
-                str(reference_source) if reference_source is not None else None
-            ),
+            "note": verification_result.note,
+            "arts_checksum": verification_result.arts_checksum,
+            "omp_checksum": verification_result.omp_checksum,
+            "reference_checksum": verification_result.reference_checksum,
+            "reference_source": verification_result.reference_source,
+            "mode": verification_result.mode,
+            "reference_omp_threads": verification_result.reference_omp_threads,
         },
         "arts": {
             "exit_code": arts_exit,
