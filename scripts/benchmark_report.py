@@ -145,6 +145,92 @@ SUMMARY_COLUMNS = [
     "rows_with_perf",
 ]
 
+THREAD_SCALING_COLUMNS = [
+    "benchmark",
+    "suite",
+    "size",
+    "run_phase",
+    "compile_args",
+    "fixed_nodes",
+    "baseline_threads",
+    "threads",
+    "num_runs",
+    "arts_e2e_mean",
+    "arts_e2e_std",
+    "arts_e2e_cv_pct",
+    "omp_e2e_mean",
+    "arts_vs_omp_speedup_mean",
+    "self_scaling",
+    "self_scaling_efficiency",
+    "verified_count",
+    "pass_count",
+    "rows_with_perf",
+]
+
+NODE_SCALING_COLUMNS = [
+    "benchmark",
+    "suite",
+    "size",
+    "run_phase",
+    "compile_args",
+    "fixed_threads",
+    "baseline_nodes",
+    "nodes",
+    "num_runs",
+    "arts_e2e_mean",
+    "arts_e2e_std",
+    "arts_e2e_cv_pct",
+    "self_scaling",
+    "self_scaling_efficiency",
+    "verified_count",
+    "pass_count",
+    "rows_with_counters",
+]
+
+DISTRIBUTED_DB_DELTA_COLUMNS = [
+    "benchmark",
+    "suite",
+    "size",
+    "phase_family",
+    "threads",
+    "nodes",
+    "baseline_phase",
+    "distributed_phase",
+    "baseline_arts_e2e_mean",
+    "distributed_arts_e2e_mean",
+    "time_delta_sec",
+    "time_delta_pct",
+    "time_ratio_dist_vs_base",
+    "baseline_initialization_time_ms",
+    "distributed_initialization_time_ms",
+    "init_delta_pct",
+    "baseline_remote_bytes_sent",
+    "distributed_remote_bytes_sent",
+    "remote_sent_delta_pct",
+    "remote_sent_ratio_dist_vs_base",
+    "baseline_remote_bytes_received",
+    "distributed_remote_bytes_received",
+    "remote_recv_delta_pct",
+    "remote_recv_ratio_dist_vs_base",
+    "baseline_memory_footprint_bytes",
+    "distributed_memory_footprint_bytes",
+    "memory_delta_pct",
+    "memory_ratio_dist_vs_base",
+    "baseline_remote_bytes_sent_cv_pct",
+    "distributed_remote_bytes_sent_cv_pct",
+    "remote_sent_cv_delta_pct",
+    "baseline_memory_footprint_cv_pct",
+    "distributed_memory_footprint_cv_pct",
+    "memory_cv_delta_pct",
+    "baseline_num_edts_created",
+    "distributed_num_edts_created",
+    "baseline_num_dbs_created",
+    "distributed_num_dbs_created",
+    "winner",
+    "baseline_counter_dir",
+    "distributed_counter_dir",
+]
+
 NODE_COUNTER_SUMMARY_COLUMNS = [
     "benchmark",
     "suite",
@@ -248,6 +334,10 @@ INT_FIELDS = {
     "threads",
     "nodes",
     "run",
+    "fixed_nodes",
+    "fixed_threads",
+    "baseline_threads",
+    "baseline_nodes",
     "cache_references",
     "cache_misses",
     "l1d_loads",
@@ -283,6 +373,7 @@ RATIO_FIELDS = {
     "l1d_load_miss_rate",
     "parallel_efficiency",
     "parallel_efficiency_mean",
+    "self_scaling_efficiency",
     "node_fraction",
 }
 
@@ -350,6 +441,24 @@ def _status_text(value: Any) -> str:
 def _phase_name(value: Any) -> str:
     phase = str(value or "default").strip()
     return phase or "default"
+
+
+def _phase_family(value: Any) -> str:
+    phase = _phase_name(value)
+    for suffix in ("-baseline", "-distributed-db"):
+        if phase.endswith(suffix):
+            return phase[: -len(suffix)]
+    return phase
+
+
+def _phase_variant(phase: Any, compile_args: Any) -> Optional[str]:
+    phase_name = _phase_name(phase)
+    compile_text = str(compile_args or "").strip()
+    if phase_name.endswith("-distributed-db") or compile_text == "--distributed-db":
+        return "distributed-db"
+    if phase_name.endswith("-baseline") or not compile_text:
+        return "baseline"
+    return None
 
 
 def _counter_dir_from_artifacts(artifacts: Any) -> Optional[Path]:
@@ -479,14 +588,44 @@ def _perf_dict(run: Any) -> Dict[str, Any]:
     return {}
 
 
-def _path_if_exists(value: Any) -> Optional[Path]:
+def _remap_artifact_path(path: Path, experiment_dir: Optional[Path]) -> Optional[Path]:
+    if experiment_dir is None:
+        return None
+
+    experiment_name = experiment_dir.name
+    parts = list(path.parts)
+    if experiment_name not in parts:
+        return None
+
+    index = parts.index(experiment_name)
+    suffix = parts[index + 1 :]
+    candidate = experiment_dir.joinpath(*suffix)
+    return candidate.resolve() if candidate.exists() else None
+
+
+def _path_if_exists(value: Any, experiment_dir: Optional[Path] = None) -> Optional[Path]:
     if value is None:
         return None
     text = str(value).strip()
     if not text:
         return None
     path = Path(text)
-    return path if path.exists() else None
+    if path.exists():
+        return path.resolve()
+    return _remap_artifact_path(path, experiment_dir)
+
+
+def _remap_path_value(value: Any, experiment_dir: Optional[Path] = None) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    path = Path(text)
+    if path.exists():
+        return str(path.resolve())
+    remapped = _remap_artifact_path(path, experiment_dir)
+    return str(remapped) if remapped is not None else text
 
 
 def _base_result_identity(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -502,11 +641,16 @@ def _base_result_identity(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _build_node_counter_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_node_counter_rows(
+    result_rows: List[Dict[str, Any]],
+    experiment_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
     for result_row in result_rows:
-        counter_dir = _path_if_exists(result_row.get("artifact_counter_dir"))
+        counter_dir = _path_if_exists(
+            result_row.get("artifact_counter_dir"), experiment_dir=experiment_dir
+        )
         if counter_dir is None:
             continue
 
@@ -532,9 +676,6 @@ def _build_node_counter_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str
 
             for counter_name, entry in counters.items():
                 if not isinstance(entry, dict):
-                    continue
-                capture_level = str(entry.get("captureLevel") or "")
-                if capture_level.upper() == "CLUSTER":
                     continue
 
                 value = _to_float(entry.get("value"))
@@ -609,8 +750,11 @@ def _build_node_counter_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str
     return rows
 
 
-def _build_node_counter_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    detail_rows = _build_node_counter_rows(result_rows)
+def _build_node_counter_summary_rows(
+    result_rows: List[Dict[str, Any]],
+    experiment_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    detail_rows = _build_node_counter_rows(result_rows, experiment_dir=experiment_dir)
     grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for row in detail_rows:
         key = (
@@ -696,11 +840,14 @@ def _build_node_counter_summary_rows(result_rows: List[Dict[str, Any]]) -> List[
     return summary_rows
 
 
-def _build_perf_file_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_perf_file_rows(
+    result_rows: List[Dict[str, Any]],
+    experiment_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
     for result_row in result_rows:
-        perf_dir = _path_if_exists(result_row.get("artifact_perf_dir"))
+        perf_dir = _path_if_exists(result_row.get("artifact_perf_dir"), experiment_dir=experiment_dir)
         if perf_dir is None:
             continue
 
@@ -961,7 +1108,10 @@ def _flatten_result_serialized(
             "arts_checksum": arts.get("checksum"),
             "omp_checksum": omp.get("checksum"),
             "reference_checksum": (result.get("verification") or {}).get("reference_checksum"),
-            "reference_source": (result.get("verification") or {}).get("reference_source"),
+            "reference_source": _remap_path_value(
+                (result.get("verification") or {}).get("reference_source"),
+                experiment_dir=experiment_dir,
+            ),
             "runtime_warning": detected_runtime_warning,
             "slurm_job_id": slurm.get("job_id"),
             "slurm_state": slurm.get("state"),
@@ -982,15 +1132,33 @@ def _flatten_result_serialized(
             "arts_total_sec": _to_float(arts.get("duration_sec")),
             "omp_total_sec": _to_float(omp.get("duration_sec")),
             "speedup": _to_float(result.get("speedup")),
-            "artifact_run_dir": (result.get("artifacts") or {}).get("run_dir"),
-            "artifact_run_config": (result.get("artifacts") or {}).get("run_config"),
-            "artifact_result_json": (result.get("artifacts") or {}).get("result_json"),
-            "artifact_slurm_out": (result.get("artifacts") or {}).get("slurm_out"),
-            "artifact_slurm_err": (result.get("artifacts") or {}).get("slurm_err"),
-            "artifact_build_dir": (result.get("artifacts") or {}).get("build_dir"),
-            "artifact_arts_config": (result.get("artifacts") or {}).get("arts_config"),
-            "artifact_counter_dir": (result.get("artifacts") or {}).get("counter_dir"),
-            "artifact_perf_dir": (result.get("artifacts") or {}).get("perf_dir"),
+            "artifact_run_dir": _remap_path_value(
+                (result.get("artifacts") or {}).get("run_dir"), experiment_dir=experiment_dir
+            ),
+            "artifact_run_config": _remap_path_value(
+                (result.get("artifacts") or {}).get("run_config"), experiment_dir=experiment_dir
+            ),
+            "artifact_result_json": _remap_path_value(
+                (result.get("artifacts") or {}).get("result_json"), experiment_dir=experiment_dir
+            ),
+            "artifact_slurm_out": _remap_path_value(
+                (result.get("artifacts") or {}).get("slurm_out"), experiment_dir=experiment_dir
+            ),
+            "artifact_slurm_err": _remap_path_value(
+                (result.get("artifacts") or {}).get("slurm_err"), experiment_dir=experiment_dir
+            ),
+            "artifact_build_dir": _remap_path_value(
+                (result.get("artifacts") or {}).get("build_dir"), experiment_dir=experiment_dir
+            ),
+            "artifact_arts_config": _remap_path_value(
+                (result.get("artifacts") or {}).get("arts_config"), experiment_dir=experiment_dir
+            ),
+            "artifact_counter_dir": _remap_path_value(
+                (result.get("artifacts") or {}).get("counter_dir"), experiment_dir=experiment_dir
+            ),
+            "artifact_perf_dir": _remap_path_value(
+                (result.get("artifacts") or {}).get("perf_dir"), experiment_dir=experiment_dir
+            ),
         }
     )
     perf_files = (result.get("artifacts") or {}).get("perf_files")
@@ -1187,6 +1355,402 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
     return summary_rows
 
 
+def _build_thread_scaling_rows(summary_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in summary_rows:
+        if row.get("benchmark") == "GEOMEAN":
+            continue
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("run_phase"),
+            row.get("compile_args"),
+            row.get("nodes"),
+        )
+        grouped[key].append(row)
+
+    rows: List[Dict[str, Any]] = []
+    for key in sorted(grouped.keys(), key=lambda item: tuple(str(part) for part in item)):
+        configs = grouped[key]
+        threads = sorted(
+            {
+                int(thread)
+                for thread in (_to_float(row.get("threads")) for row in configs)
+                if thread is not None
+            }
+        )
+        if len(threads) <= 1:
+            continue
+
+        baseline_threads = threads[0]
+        by_thread = {int(row.get("threads") or 0): row for row in configs}
+        baseline_e2e = by_thread.get(baseline_threads, {}).get("arts_e2e_mean")
+
+        for thread in threads:
+            row = by_thread.get(thread)
+            if row is None:
+                continue
+            scaling = _safe_div(_to_float(baseline_e2e), _to_float(row.get("arts_e2e_mean")))
+            relative_parallelism = thread / baseline_threads if baseline_threads else None
+            efficiency = (
+                _safe_div(_to_float(scaling), relative_parallelism)
+                if relative_parallelism not in (None, 0)
+                else None
+            )
+            rows.append(
+                {
+                    "benchmark": row.get("benchmark"),
+                    "suite": row.get("suite"),
+                    "size": row.get("size"),
+                    "run_phase": row.get("run_phase"),
+                    "compile_args": row.get("compile_args"),
+                    "fixed_nodes": row.get("nodes"),
+                    "baseline_threads": baseline_threads,
+                    "threads": thread,
+                    "num_runs": row.get("num_runs"),
+                    "arts_e2e_mean": row.get("arts_e2e_mean"),
+                    "arts_e2e_std": row.get("arts_e2e_std"),
+                    "arts_e2e_cv_pct": row.get("arts_e2e_cv_pct"),
+                    "omp_e2e_mean": row.get("omp_e2e_mean"),
+                    "arts_vs_omp_speedup_mean": row.get("speedup_mean"),
+                    "self_scaling": scaling,
+                    "self_scaling_efficiency": efficiency,
+                    "verified_count": row.get("verified_count"),
+                    "pass_count": row.get("pass_count"),
+                    "rows_with_perf": row.get("rows_with_perf"),
+                }
+            )
+
+    return rows
+
+
+def _build_node_scaling_rows(summary_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in summary_rows:
+        if row.get("benchmark") == "GEOMEAN":
+            continue
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("run_phase"),
+            row.get("compile_args"),
+            row.get("threads"),
+        )
+        grouped[key].append(row)
+
+    rows: List[Dict[str, Any]] = []
+    for key in sorted(grouped.keys(), key=lambda item: tuple(str(part) for part in item)):
+        configs = grouped[key]
+        nodes = sorted(
+            {
+                int(node)
+                for node in (_to_float(row.get("nodes")) for row in configs)
+                if node is not None
+            }
+        )
+        if len(nodes) <= 1:
+            continue
+
+        baseline_nodes = nodes[0]
+        by_node = {int(row.get("nodes") or 0): row for row in configs}
+        baseline_e2e = by_node.get(baseline_nodes, {}).get("arts_e2e_mean")
+
+        for node in nodes:
+            row = by_node.get(node)
+            if row is None:
+                continue
+            scaling = _safe_div(_to_float(baseline_e2e), _to_float(row.get("arts_e2e_mean")))
+            relative_parallelism = node / baseline_nodes if baseline_nodes else None
+            efficiency = (
+                _safe_div(_to_float(scaling), relative_parallelism)
+                if relative_parallelism not in (None, 0)
+                else None
+            )
+            rows.append(
+                {
+                    "benchmark": row.get("benchmark"),
+                    "suite": row.get("suite"),
+                    "size": row.get("size"),
+                    "run_phase": row.get("run_phase"),
+                    "compile_args": row.get("compile_args"),
+                    "fixed_threads": row.get("threads"),
+                    "baseline_nodes": baseline_nodes,
+                    "nodes": node,
+                    "num_runs": row.get("num_runs"),
+                    "arts_e2e_mean": row.get("arts_e2e_mean"),
+                    "arts_e2e_std": row.get("arts_e2e_std"),
+                    "arts_e2e_cv_pct": row.get("arts_e2e_cv_pct"),
+                    "self_scaling": scaling,
+                    "self_scaling_efficiency": efficiency,
+                    "verified_count": row.get("verified_count"),
+                    "pass_count": row.get("pass_count"),
+                    "rows_with_counters": row.get("rows_with_counters"),
+                }
+            )
+
+    return rows
+
+
+def _aggregate_node_counter_metrics(
+    node_counter_summary_rows: List[Dict[str, Any]],
+) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in node_counter_summary_rows:
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+            row.get("run_phase"),
+            row.get("compile_args"),
+            row.get("counter_name"),
+        )
+        grouped[key].append(row)
+
+    metrics: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for key, rows in grouped.items():
+        entry: Dict[str, Any] = {}
+        for field in (
+            "metric_total",
+            "metric_mean",
+            "metric_min",
+            "metric_max",
+            "metric_std",
+            "metric_cv_pct",
+            "max_to_min_ratio",
+            "nodes_reported",
+        ):
+            values = [_to_float(row.get(field)) for row in rows]
+            numeric_values = [value for value in values if value is not None]
+            if not numeric_values:
+                entry[field] = None
+                continue
+            entry[field] = mean(numeric_values)
+        metrics[key] = entry
+
+    return metrics
+
+
+def _build_distributed_db_delta_rows(
+    summary_rows: List[Dict[str, Any]],
+    result_rows: List[Dict[str, Any]],
+    node_counter_summary_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    paired_rows: Dict[Tuple[Any, ...], Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    for row in summary_rows:
+        if row.get("benchmark") == "GEOMEAN":
+            continue
+        variant = _phase_variant(row.get("run_phase"), row.get("compile_args"))
+        if variant not in {"baseline", "distributed-db"}:
+            continue
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+            _phase_family(row.get("run_phase")),
+        )
+        paired_rows[key][variant] = row
+
+    artifact_dirs: Dict[Tuple[Any, ...], str] = {}
+    for row in result_rows:
+        variant = _phase_variant(row.get("run_phase"), row.get("compile_args"))
+        if variant not in {"baseline", "distributed-db"}:
+            continue
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+            _phase_family(row.get("run_phase")),
+            variant,
+        )
+        if key in artifact_dirs:
+            continue
+        counter_dir = row.get("artifact_counter_dir")
+        if counter_dir:
+            artifact_dirs[key] = str(counter_dir)
+
+    aggregated_result_metrics: Dict[Tuple[Any, ...], Dict[str, Optional[float]]] = {}
+    metric_fields = (
+        "initialization_time_ms",
+        "remote_bytes_sent",
+        "remote_bytes_received",
+        "memory_footprint_bytes",
+        "num_edts_created",
+        "num_dbs_created",
+    )
+    grouped_result_rows: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in result_rows:
+        key = (
+            row.get("benchmark"),
+            row.get("suite"),
+            row.get("size"),
+            row.get("threads"),
+            row.get("nodes"),
+            row.get("run_phase"),
+            row.get("compile_args"),
+        )
+        grouped_result_rows[key].append(row)
+    for key, rows in grouped_result_rows.items():
+        metrics: Dict[str, Optional[float]] = {}
+        for field in metric_fields:
+            values = [_to_float(row.get(field)) for row in rows]
+            numeric_values = [value for value in values if value is not None]
+            metrics[field] = mean(numeric_values) if numeric_values else None
+        aggregated_result_metrics[key] = metrics
+
+    counter_metrics = _aggregate_node_counter_metrics(node_counter_summary_rows)
+
+    def counter_metric(summary_row: Dict[str, Any], counter_name: str, field: str) -> Any:
+        key = (
+            summary_row.get("benchmark"),
+            summary_row.get("suite"),
+            summary_row.get("size"),
+            summary_row.get("threads"),
+            summary_row.get("nodes"),
+            summary_row.get("run_phase"),
+            summary_row.get("compile_args"),
+            counter_name,
+        )
+        return counter_metrics.get(key, {}).get(field)
+
+    def result_metric(summary_row: Dict[str, Any], field: str) -> Optional[float]:
+        key = (
+            summary_row.get("benchmark"),
+            summary_row.get("suite"),
+            summary_row.get("size"),
+            summary_row.get("threads"),
+            summary_row.get("nodes"),
+            summary_row.get("run_phase"),
+            summary_row.get("compile_args"),
+        )
+        return aggregated_result_metrics.get(key, {}).get(field)
+
+    rows: List[Dict[str, Any]] = []
+    for key in sorted(paired_rows.keys(), key=lambda item: tuple(str(part) for part in item)):
+        variants = paired_rows[key]
+        baseline = variants.get("baseline")
+        distributed = variants.get("distributed-db")
+        if baseline is None or distributed is None:
+            continue
+
+        baseline_time = _to_float(baseline.get("arts_e2e_mean"))
+        distributed_time = _to_float(distributed.get("arts_e2e_mean"))
+        baseline_init = result_metric(baseline, "initialization_time_ms")
+        distributed_init = result_metric(distributed, "initialization_time_ms")
+        baseline_sent = result_metric(baseline, "remote_bytes_sent")
+        distributed_sent = result_metric(distributed, "remote_bytes_sent")
+        baseline_recv = result_metric(baseline, "remote_bytes_received")
+        distributed_recv = result_metric(distributed, "remote_bytes_received")
+        baseline_mem = result_metric(baseline, "memory_footprint_bytes")
+        distributed_mem = result_metric(distributed, "memory_footprint_bytes")
+        baseline_edts = result_metric(baseline, "num_edts_created")
+        distributed_edts = result_metric(distributed, "num_edts_created")
+        baseline_dbs = result_metric(baseline, "num_dbs_created")
+        distributed_dbs = result_metric(distributed, "num_dbs_created")
+
+        baseline_sent_cv = _to_float(counter_metric(baseline, "remoteBytesSent", "metric_cv_pct"))
+        distributed_sent_cv = _to_float(
+            counter_metric(distributed, "remoteBytesSent", "metric_cv_pct")
+        )
+        baseline_mem_cv = _to_float(counter_metric(baseline, "memoryFootprint", "metric_cv_pct"))
+        distributed_mem_cv = _to_float(
+            counter_metric(distributed, "memoryFootprint", "metric_cv_pct")
+        )
+
+        time_delta_sec = (
+            distributed_time - baseline_time
+            if distributed_time is not None and baseline_time is not None
+            else None
+        )
+        rows.append(
+            {
+                "benchmark": baseline.get("benchmark"),
+                "suite": baseline.get("suite"),
+                "size": baseline.get("size"),
+                "phase_family": key[-1],
+                "threads": baseline.get("threads"),
+                "nodes": baseline.get("nodes"),
+                "baseline_phase": baseline.get("run_phase"),
+                "distributed_phase": distributed.get("run_phase"),
+                "baseline_arts_e2e_mean": baseline.get("arts_e2e_mean"),
+                "distributed_arts_e2e_mean": distributed.get("arts_e2e_mean"),
+                "time_delta_sec": time_delta_sec,
+                "time_delta_pct": (
+                    _safe_div(time_delta_sec, baseline_time) * 100.0
+                    if time_delta_sec is not None and baseline_time not in (None, 0)
+                    else None
+                ),
+                "time_ratio_dist_vs_base": _safe_div(distributed_time, baseline_time),
+                "baseline_initialization_time_ms": baseline_init,
+                "distributed_initialization_time_ms": distributed_init,
+                "init_delta_pct": (
+                    _safe_div(distributed_init - baseline_init, baseline_init) * 100.0
+                    if distributed_init is not None and baseline_init not in (None, 0)
+                    else None
+                ),
+                "baseline_remote_bytes_sent": baseline_sent,
+                "distributed_remote_bytes_sent": distributed_sent,
+                "remote_sent_delta_pct": (
+                    _safe_div(distributed_sent - baseline_sent, baseline_sent) * 100.0
+                    if distributed_sent is not None and baseline_sent not in (None, 0)
+                    else None
+                ),
+                "remote_sent_ratio_dist_vs_base": _safe_div(distributed_sent, baseline_sent),
+                "baseline_remote_bytes_received": baseline_recv,
+                "distributed_remote_bytes_received": distributed_recv,
+                "remote_recv_delta_pct": (
+                    _safe_div(distributed_recv - baseline_recv, baseline_recv) * 100.0
+                    if distributed_recv is not None and baseline_recv not in (None, 0)
+                    else None
+                ),
+                "remote_recv_ratio_dist_vs_base": _safe_div(distributed_recv, baseline_recv),
+                "baseline_memory_footprint_bytes": baseline_mem,
+                "distributed_memory_footprint_bytes": distributed_mem,
+                "memory_delta_pct": (
+                    _safe_div(distributed_mem - baseline_mem, baseline_mem) * 100.0
+                    if distributed_mem is not None and baseline_mem not in (None, 0)
+                    else None
+                ),
+                "memory_ratio_dist_vs_base": _safe_div(distributed_mem, baseline_mem),
+                "baseline_remote_bytes_sent_cv_pct": baseline_sent_cv,
+                "distributed_remote_bytes_sent_cv_pct": distributed_sent_cv,
+                "remote_sent_cv_delta_pct": (
+                    distributed_sent_cv - baseline_sent_cv
+                    if distributed_sent_cv is not None and baseline_sent_cv is not None
+                    else None
+                ),
+                "baseline_memory_footprint_cv_pct": baseline_mem_cv,
+                "distributed_memory_footprint_cv_pct": distributed_mem_cv,
+                "memory_cv_delta_pct": (
+                    distributed_mem_cv - baseline_mem_cv
+                    if distributed_mem_cv is not None and baseline_mem_cv is not None
+                    else None
+                ),
+                "baseline_num_edts_created": baseline_edts,
+                "distributed_num_edts_created": distributed_edts,
+                "baseline_num_dbs_created": baseline_dbs,
+                "distributed_num_dbs_created": distributed_dbs,
+                "winner": (
+                    "distributed-db"
+                    if _to_float(_safe_div(distributed_time, baseline_time)) is not None
+                    and _safe_div(distributed_time, baseline_time) < 1.0
+                    else "baseline"
+                ),
+                "baseline_counter_dir": artifact_dirs.get((*key, "baseline")),
+                "distributed_counter_dir": artifact_dirs.get((*key, "distributed-db")),
+            }
+        )
+
+    return rows
+
+
 def _build_comparison_sheet(
     workbook: Workbook,
     result_rows: List[Dict[str, Any]],
@@ -1327,9 +1891,6 @@ def _build_overview_sheet(
     result_rows: List[Dict[str, Any]],
     steps: Optional[List["ExperimentStep"]],
 ) -> None:
-    if not steps:
-        return
-
     ws = workbook.create_sheet(title="Overview")
     columns = [
         "step",
@@ -1360,9 +1921,21 @@ def _build_overview_sheet(
     for row in result_rows:
         by_phase[_phase_name(row.get("run_phase"))].append(row)
 
-    for idx, step in enumerate(steps, start=1):
-        step_name = _phase_name(getattr(step, "name", None) or f"step_{idx}")
-        phase_rows = by_phase.get(step_name, [])
+    def append_overview_row(
+        step_name: str,
+        phase_rows: List[Dict[str, Any]],
+        *,
+        size: Any,
+        threads: Any,
+        nodes: Any,
+        runs: Any,
+        compile_args: Any,
+        debug: Any,
+        perf: Any,
+        perf_interval: Any,
+        profile: Any,
+        benchmarks_run: str,
+    ) -> None:
         statuses = [str(r.get("status") or "").upper() for r in phase_rows]
         passed = sum(1 for s in statuses if s == "PASS")
         verified = sum(1 for r in phase_rows if r.get("verified") is True)
@@ -1389,21 +1962,18 @@ def _build_overview_sheet(
                 )
             )
         )
-        benchmarks = getattr(step, "benchmarks", None)
-        benchmarks_run = ", ".join(benchmarks) if benchmarks else "all"
-
         ws.append(
             [
                 step_name,
-                getattr(step, "size", None),
-                getattr(step, "threads", None),
-                getattr(step, "nodes", None),
-                getattr(step, "runs", None),
-                getattr(step, "compile_args", None),
-                getattr(step, "debug", None),
-                bool(getattr(step, "perf", False)),
-                getattr(step, "perf_interval", None) if getattr(step, "perf", False) else None,
-                getattr(step, "profile", None),
+                size,
+                threads,
+                nodes,
+                runs,
+                compile_args,
+                debug,
+                perf,
+                perf_interval,
+                profile,
                 benchmarks_run,
                 len(phase_rows),
                 passed,
@@ -1416,7 +1986,121 @@ def _build_overview_sheet(
             ]
         )
 
+    def summarize(values: List[Any]) -> Optional[str]:
+        filtered = [value for value in values if value not in (None, "", False)]
+        if not filtered:
+            return None
+        if all(isinstance(value, (int, float)) and float(value).is_integer() for value in filtered):
+            normalized = sorted({int(value) for value in filtered})
+            return ",".join(str(value) for value in normalized)
+        normalized = sorted({str(value) for value in filtered})
+        return ",".join(normalized)
+
+    if steps:
+        for idx, step in enumerate(steps, start=1):
+            step_name = _phase_name(getattr(step, "name", None) or f"step_{idx}")
+            phase_rows = by_phase.get(step_name, [])
+            benchmarks = getattr(step, "benchmarks", None)
+            benchmarks_run = ", ".join(benchmarks) if benchmarks else "all"
+            perf_enabled = bool(getattr(step, "perf", False))
+            append_overview_row(
+                step_name,
+                phase_rows,
+                size=getattr(step, "size", None),
+                threads=getattr(step, "threads", None),
+                nodes=getattr(step, "nodes", None),
+                runs=getattr(step, "runs", None),
+                compile_args=getattr(step, "compile_args", None),
+                debug=getattr(step, "debug", None),
+                perf=perf_enabled,
+                perf_interval=getattr(step, "perf_interval", None) if perf_enabled else None,
+                profile=getattr(step, "profile", None),
+                benchmarks_run=benchmarks_run,
+            )
+    else:
+        for step_name in sorted(by_phase.keys()):
+            phase_rows = by_phase[step_name]
+            append_overview_row(
+                step_name,
+                phase_rows,
+                size=summarize([r.get("size") for r in phase_rows]),
+                threads=summarize([r.get("threads") for r in phase_rows]),
+                nodes=summarize([r.get("nodes") for r in phase_rows]),
+                runs=len({r.get("run") for r in phase_rows if r.get("run") is not None}) or None,
+                compile_args=summarize([r.get("compile_args") for r in phase_rows]),
+                debug=None,
+                perf=any(r.get("perf_enabled") for r in phase_rows),
+                perf_interval=summarize([r.get("perf_interval") for r in phase_rows]),
+                profile=summarize([r.get("profile") for r in phase_rows]),
+                benchmarks_run=summarize([r.get("benchmark") for r in phase_rows]) or "all",
+            )
+
     _finalize_sheet(ws, columns)
+
+
+def _build_guide_sheet(
+    workbook: Workbook,
+    sheet_specs: List[Tuple[str, str, str]],
+) -> None:
+    ws = workbook.create_sheet(title="Guide", index=0)
+    columns = ["sheet", "purpose", "when_to_use", "open"]
+    ws.append(columns)
+    _style_header(ws)
+
+    for sheet_name, purpose, when_to_use in sheet_specs:
+        ws.append(
+            [
+                sheet_name,
+                purpose,
+                when_to_use,
+                f'=HYPERLINK("#\'{sheet_name}\'!A1","Open")',
+            ]
+        )
+
+    quick_flow_row = 1
+    quick_flow_col = 6
+    ws.cell(row=quick_flow_row, column=quick_flow_col, value="Benchmark Report Guide")
+    if Font is not None:
+        ws.cell(row=quick_flow_row, column=quick_flow_col).font = Font(bold=True, size=14)
+        ws.cell(row=quick_flow_row + 1, column=quick_flow_col).font = Font(italic=True)
+    ws.cell(
+        row=quick_flow_row + 1,
+        column=quick_flow_col,
+        value="Filter the tables in each sheet rather than editing raw artifacts first.",
+    )
+    ws.cell(row=quick_flow_row + 3, column=quick_flow_col, value="Suggested review order")
+    if Font is not None:
+        ws.cell(row=quick_flow_row + 3, column=quick_flow_col).font = Font(bold=True)
+    quick_flow = [
+        "1. Overview: confirm the planned steps and pass counts.",
+        "2. Issues: check failures, warnings, and incomplete artifacts first.",
+        "3. Summary: compare aggregated timings and verification coverage.",
+        "4. ThreadScaling / NodeScaling / DistributedDbDelta: inspect scaling behavior.",
+        "5. NodeCounterSummary / PerfFiles: inspect balance and hardware counters.",
+        "6. Results: drill down to exact run artifacts when a row needs explanation.",
+    ]
+    for offset, text in enumerate(quick_flow, start=1):
+        ws.cell(row=quick_flow_row + 3 + offset, column=quick_flow_col, value=text)
+
+    ws.freeze_panes = "A2"
+    _apply_table_formats(ws, columns)
+    if Table is not None and TableStyleInfo is not None and len(sheet_specs) >= 1:
+        table = Table(
+            displayName=_excel_table_name(ws.title),
+            ref=f"A1:D{len(sheet_specs) + 1}",
+        )
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        ws.add_table(table)
+        ws.auto_filter.ref = table.ref
+    else:
+        ws.auto_filter.ref = f"A1:D{len(sheet_specs) + 1}"
+    _autosize_columns(ws)
 
 
 def _append_table_sheet(workbook: Workbook, title: str, columns: List[str], rows: List[Dict[str, Any]]) -> None:
@@ -1563,9 +2247,15 @@ def _classify_format(field: str) -> Optional[str]:
     for ratio_field in RATIO_FIELDS:
         if field == ratio_field or field.endswith(f"_{ratio_field}"):
             return "0.00%"
+    if field == "self_scaling" or field.endswith("_self_scaling"):
+        return "0.000"
+    if field.endswith("_ratio") or "_ratio_" in field:
+        return "0.000"
     for pct_field in PCT_POINT_FIELDS:
         if field == pct_field or field.endswith(f"_{pct_field}"):
             return "0.00"
+    if field.endswith("_delta_pct"):
+        return "0.00"
     for suffix in TIME_SUFFIXES:
         if field == suffix.lstrip("_") or field.endswith(suffix):
             return "0.000"
@@ -1595,17 +2285,24 @@ def _apply_speedup_rules(worksheet: Any, columns: List[str]) -> None:
     if CellIsRule is None or PatternFill is None:
         return
 
-    speedup_cols = [
+    positive_good_cols = [
         idx for idx, name in enumerate(columns, start=1)
-        if "speedup" in name and name not in {"peak_speedup"}
+        if (
+            ("speedup" in name and name not in {"peak_speedup"})
+            or "self_scaling" in name
+        )
     ]
-    if not speedup_cols or worksheet.max_row < 2:
+    negative_good_cols = [
+        idx for idx, name in enumerate(columns, start=1)
+        if name.endswith("_delta_pct") or name.endswith("_ratio_dist_vs_base")
+    ]
+    if (not positive_good_cols and not negative_good_cols) or worksheet.max_row < 2:
         return
 
     green_fill = PatternFill(fill_type="solid", fgColor="E7F5E7")
     red_fill = PatternFill(fill_type="solid", fgColor="FDECEC")
 
-    for idx in speedup_cols:
+    for idx in positive_good_cols:
         col = worksheet.cell(row=1, column=idx).column_letter
         rng = f"{col}2:{col}{worksheet.max_row}"
         worksheet.conditional_formatting.add(
@@ -1613,6 +2310,17 @@ def _apply_speedup_rules(worksheet: Any, columns: List[str]) -> None:
         )
         worksheet.conditional_formatting.add(
             rng, CellIsRule(operator="lessThan", formula=["1"], fill=red_fill)
+        )
+
+    for idx in negative_good_cols:
+        col = worksheet.cell(row=1, column=idx).column_letter
+        rng = f"{col}2:{col}{worksheet.max_row}"
+        threshold = "0" if worksheet.cell(row=1, column=idx).value.endswith("_delta_pct") else "1"
+        worksheet.conditional_formatting.add(
+            rng, CellIsRule(operator="lessThanOrEqual", formula=[threshold], fill=green_fill)
+        )
+        worksheet.conditional_formatting.add(
+            rng, CellIsRule(operator="greaterThan", formula=[threshold], fill=red_fill)
         )
 
 
@@ -1641,7 +2349,18 @@ def _apply_status_fill(worksheet: Any, columns: List[str]) -> None:
 
 
 def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]]) -> None:
-    ws = workbook.create_sheet(title="Scaling")
+    ws = workbook.create_sheet(title="ScalingMatrix")
+
+    def _self_scaling(base_e2e: Any, arts_e2e: Any) -> Optional[float]:
+        return _safe_div(_to_float(base_e2e), _to_float(arts_e2e))
+
+    def _scaling_efficiency(scale: Any, current: int, baseline: int) -> Optional[float]:
+        if baseline <= 0:
+            return None
+        relative_parallelism = current / baseline
+        if relative_parallelism == 0:
+            return None
+        return _safe_div(_to_float(scale), relative_parallelism)
 
     data_rows = [r for r in summary_rows if r.get("benchmark") != "GEOMEAN"]
     phase_threads: Dict[str, Set[int]] = defaultdict(set)
@@ -1694,68 +2413,75 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
     if has_thread_sweep and not has_node_sweep:
         headers = ["benchmark", "suite", "size", "run_phase", "compile_args"]
         for t in threads:
-            headers.extend([f"T{t}_arts_e2e", f"T{t}_speedup", f"T{t}_efficiency"])
-        headers.extend(["peak_speedup", "peak_threads", "arts_self_scaling"])
+            headers.extend([f"T{t}_arts_e2e", f"T{t}_self_scaling", f"T{t}_efficiency"])
+        headers.extend(["peak_self_scaling", "peak_threads", "max_thread_self_scaling"])
 
         for (benchmark, suite, size, run_phase, compile_args), configs in sorted(indexed.items()):
             row_values: List[Any] = [benchmark, suite, size, run_phase, compile_args]
-            speedup_candidates: List[Tuple[float, int]] = []
+            scaling_candidates: List[Tuple[float, int]] = []
+            phase_threads = sorted({t for (t, _n) in configs.keys()})
             phase_nodes = sorted({n for (_t, n) in configs.keys()})
+            baseline_thread = phase_threads[0] if phase_threads else threads[0]
             fixed_node = phase_nodes[0] if phase_nodes else nodes[0]
+            base_e2e = configs.get((baseline_thread, fixed_node), {}).get("arts_e2e_mean")
 
             for t in threads:
                 entry = configs.get((t, fixed_node), {})
                 arts_e2e = entry.get("arts_e2e_mean")
-                speedup = entry.get("speedup_mean")
-                efficiency = entry.get("parallel_efficiency_mean")
-                row_values.extend([arts_e2e, speedup, efficiency])
-                speedup_f = _to_float(speedup)
-                if speedup_f is not None and speedup_f > 0:
-                    speedup_candidates.append((speedup_f, t))
+                scaling = _self_scaling(base_e2e, arts_e2e)
+                efficiency = _scaling_efficiency(scaling, t, baseline_thread)
+                row_values.extend([arts_e2e, scaling, efficiency])
+                scaling_f = _to_float(scaling)
+                if scaling_f is not None and scaling_f > 0:
+                    scaling_candidates.append((scaling_f, t))
 
-            peak_speedup = max(speedup_candidates, key=lambda x: x[0])[0] if speedup_candidates else None
-            peak_threads = max(speedup_candidates, key=lambda x: x[0])[1] if speedup_candidates else None
+            peak_scaling = (
+                max(scaling_candidates, key=lambda x: x[0])[0] if scaling_candidates else None
+            )
+            peak_threads = (
+                max(scaling_candidates, key=lambda x: x[0])[1] if scaling_candidates else None
+            )
 
-            base_t1 = configs.get((1, fixed_node), {}).get("arts_e2e_mean")
             max_t = max(threads)
             max_t_value = configs.get((max_t, fixed_node), {}).get("arts_e2e_mean")
-            arts_self_scaling = _safe_div(_to_float(base_t1), _to_float(max_t_value))
+            max_thread_self_scaling = _self_scaling(base_e2e, max_t_value)
 
-            row_values.extend([peak_speedup, peak_threads, arts_self_scaling])
+            row_values.extend([peak_scaling, peak_threads, max_thread_self_scaling])
             matrix_rows.append(row_values)
 
     elif has_node_sweep and not has_thread_sweep:
         headers = ["benchmark", "suite", "size", "run_phase", "compile_args"]
         for n in nodes:
-            headers.extend([f"N{n}_arts_e2e", f"N{n}_speedup"])
-            if n != 1:
-                headers.append(f"N{n}_scaling_vs_N1")
-        headers.extend(["peak_speedup", "peak_nodes"])
+            headers.extend([f"N{n}_arts_e2e", f"N{n}_self_scaling", f"N{n}_efficiency"])
+        headers.extend(["peak_self_scaling", "peak_nodes"])
 
         for (benchmark, suite, size, run_phase, compile_args), configs in sorted(indexed.items()):
             row_values = [benchmark, suite, size, run_phase, compile_args]
-            speedup_candidates: List[Tuple[float, int]] = []
+            scaling_candidates: List[Tuple[float, int]] = []
             phase_threads = sorted({t for (t, _n) in configs.keys()})
+            phase_nodes = sorted({n for (_t, n) in configs.keys()})
             fixed_thread = phase_threads[0] if phase_threads else threads[0]
-            baseline_e2e = _to_float(configs.get((fixed_thread, 1), {}).get("arts_e2e_mean"))
+            baseline_node = phase_nodes[0] if phase_nodes else nodes[0]
+            baseline_e2e = configs.get((fixed_thread, baseline_node), {}).get("arts_e2e_mean")
 
             for n in nodes:
                 entry = configs.get((fixed_thread, n), {})
                 arts_e2e = entry.get("arts_e2e_mean")
-                speedup = entry.get("speedup_mean")
-                row_values.extend([arts_e2e, speedup])
+                scaling = _self_scaling(baseline_e2e, arts_e2e)
+                efficiency = _scaling_efficiency(scaling, n, baseline_node)
+                row_values.extend([arts_e2e, scaling, efficiency])
 
-                speedup_f = _to_float(speedup)
-                if speedup_f is not None and speedup_f > 0:
-                    speedup_candidates.append((speedup_f, n))
+                scaling_f = _to_float(scaling)
+                if scaling_f is not None and scaling_f > 0:
+                    scaling_candidates.append((scaling_f, n))
 
-                if n != 1:
-                    scale = _safe_div(baseline_e2e, _to_float(arts_e2e))
-                    row_values.append(scale)
-
-            peak_speedup = max(speedup_candidates, key=lambda x: x[0])[0] if speedup_candidates else None
-            peak_nodes = max(speedup_candidates, key=lambda x: x[0])[1] if speedup_candidates else None
-            row_values.extend([peak_speedup, peak_nodes])
+            peak_scaling = (
+                max(scaling_candidates, key=lambda x: x[0])[0] if scaling_candidates else None
+            )
+            peak_nodes = (
+                max(scaling_candidates, key=lambda x: x[0])[1] if scaling_candidates else None
+            )
+            row_values.extend([peak_scaling, peak_nodes])
             matrix_rows.append(row_values)
 
     else:
@@ -1766,28 +2492,38 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
                 headers.extend(
                     [
                         f"{prefix}_arts_e2e",
-                        f"{prefix}_speedup",
+                        f"{prefix}_self_scaling",
                         f"{prefix}_efficiency",
                     ]
                 )
-        headers.extend(["peak_speedup", "peak_threads", "peak_nodes"])
+        headers.extend(["peak_self_scaling", "peak_threads", "peak_nodes"])
 
         for (benchmark, suite, size, run_phase, compile_args), configs in sorted(indexed.items()):
             row_values = [benchmark, suite, size, run_phase, compile_args]
             peak_tuple: Optional[Tuple[float, int, int]] = None
+            phase_threads = sorted({t for (t, _n) in configs.keys()})
+            phase_nodes = sorted({n for (_t, n) in configs.keys()})
+            baseline_thread = phase_threads[0] if phase_threads else threads[0]
+            baseline_node = phase_nodes[0] if phase_nodes else nodes[0]
+            base_e2e = configs.get((baseline_thread, baseline_node), {}).get("arts_e2e_mean")
 
             for t in threads:
                 for n in nodes:
                     entry = configs.get((t, n), {})
                     arts_e2e = entry.get("arts_e2e_mean")
-                    speedup = entry.get("speedup_mean")
-                    efficiency = entry.get("parallel_efficiency_mean")
-                    row_values.extend([arts_e2e, speedup, efficiency])
+                    scaling = _self_scaling(base_e2e, arts_e2e)
+                    relative_parallelism = (t / baseline_thread) * (n / baseline_node)
+                    efficiency = (
+                        _safe_div(_to_float(scaling), relative_parallelism)
+                        if baseline_thread > 0 and baseline_node > 0 and relative_parallelism != 0
+                        else None
+                    )
+                    row_values.extend([arts_e2e, scaling, efficiency])
 
-                    speedup_f = _to_float(speedup)
-                    if speedup_f is not None and speedup_f > 0:
-                        candidate = (speedup_f, t, n)
-                        if peak_tuple is None or speedup_f > peak_tuple[0]:
+                    scaling_f = _to_float(scaling)
+                    if scaling_f is not None and scaling_f > 0:
+                        candidate = (scaling_f, t, n)
+                        if peak_tuple is None or scaling_f > peak_tuple[0]:
                             peak_tuple = candidate
 
             if peak_tuple is None:
@@ -2015,32 +2751,169 @@ def _write_report(
     workbook = Workbook()
     workbook.remove(workbook.active)
 
-    _build_overview_sheet(workbook, result_rows, steps)
-    _append_table_sheet(workbook, "Results", RESULTS_COLUMNS, result_rows)
-    _build_issues_sheet(workbook, result_rows)
-
     summary_rows = _build_summary_rows(result_rows)
+    node_counter_summary_rows = _build_node_counter_summary_rows(
+        result_rows, experiment_dir=experiment_dir
+    )
+    node_counter_rows = _build_node_counter_rows(result_rows, experiment_dir=experiment_dir)
+    perf_file_rows = _build_perf_file_rows(result_rows, experiment_dir=experiment_dir)
+    thread_scaling_rows = _build_thread_scaling_rows(summary_rows)
+    node_scaling_rows = _build_node_scaling_rows(summary_rows)
+    distributed_delta_rows = _build_distributed_db_delta_rows(
+        summary_rows,
+        result_rows,
+        node_counter_summary_rows,
+    )
+
+    sheet_specs: List[Tuple[str, str, str]] = [
+        (
+            "Overview",
+            "Step-level rollup with pass, verification, counter, and perf coverage.",
+            "Start here to confirm the experiment shape and high-level outcomes.",
+        )
+    ]
+    if any(
+        _status_text(row.get("status")) not in {"PASS", "SKIP"}
+        or _status_text(row.get("status_detail")) == "WARN"
+        or row.get("runtime_warning") is True
+        or (row.get("has_counters") is True and row.get("counter_complete") is False)
+        or row.get("verified") is False
+        for row in result_rows
+    ):
+        sheet_specs.append(
+            (
+                "Issues",
+                "Only failures, warnings, verification problems, and incomplete artifacts.",
+                "Use this sheet first when anything looks wrong.",
+            )
+        )
+    sheet_specs.extend(
+        [
+            (
+                "Summary",
+                "Aggregated timings and coverage grouped by benchmark configuration.",
+                "Use this for the main quantitative view before drilling into raw rows.",
+            )
+        ]
+    )
+    if thread_scaling_rows:
+        sheet_specs.append(
+            (
+                "ThreadScaling",
+                "Self-scaling view for single-node thread sweeps.",
+                "Use this when the experiment varies thread count at a fixed node count.",
+            )
+        )
+    if node_scaling_rows:
+        sheet_specs.append(
+            (
+                "NodeScaling",
+                "Self-scaling view for node sweeps at a fixed thread count.",
+                "Use this when the experiment varies node count.",
+            )
+        )
+    if distributed_delta_rows:
+        sheet_specs.append(
+            (
+                "DistributedDbDelta",
+                "Baseline vs --distributed-db deltas, including balance and communication counters.",
+                "Use this to decide whether distributed DB helps for a given node count.",
+            )
+        )
+    sheet_specs.extend(
+        [
+            (
+                "ScalingMatrix",
+                "Wide matrix view for mixed sweeps and geomean rollups.",
+                "Use this when you want a single matrix across many thread/node points.",
+            ),
+            (
+                "Comparison",
+                "Side-by-side aggregated comparison across experiment phases.",
+                "Use this to compare phases such as baseline vs distributed-db.",
+            ),
+        ]
+    )
+    if node_counter_summary_rows:
+        sheet_specs.append(
+            (
+                "NodeCounterSummary",
+                "Per-run node balance summary with min/max/std/CV statistics.",
+                "Use this to spot hotspotting and imbalance quickly.",
+            )
+        )
+        sheet_specs.append(
+            (
+                "NodeCounters",
+                "Raw per-node counter rows for detailed distribution analysis.",
+                "Use this when the node summary shows imbalance and you need the exact nodes.",
+            )
+        )
+    if perf_file_rows:
+        sheet_specs.append(
+            (
+                "PerfFiles",
+                "Parsed perf outputs from ARTS and OMP runs.",
+                "Use this for cache and L1 behavior after timing and correctness checks.",
+            )
+        )
+    sheet_specs.extend(
+        [
+            (
+                "Results",
+                "Raw run rows with artifact paths, scheduler fields, counters, and verification.",
+                "Use this to drill down to individual runs and artifacts.",
+            ),
+            (
+                "Metadata",
+                "Experiment metadata, commits, command line, and report coverage totals.",
+                "Use this for reproducibility and provenance.",
+            ),
+        ]
+    )
+
+    _build_overview_sheet(workbook, result_rows, steps)
+    _build_issues_sheet(workbook, result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
+    _append_optional_table_sheet(
+        workbook,
+        "ThreadScaling",
+        THREAD_SCALING_COLUMNS,
+        thread_scaling_rows,
+    )
+    _append_optional_table_sheet(
+        workbook,
+        "NodeScaling",
+        NODE_SCALING_COLUMNS,
+        node_scaling_rows,
+    )
+    _append_optional_table_sheet(
+        workbook,
+        "DistributedDbDelta",
+        DISTRIBUTED_DB_DELTA_COLUMNS,
+        distributed_delta_rows,
+    )
     _build_scaling_sheet(workbook, summary_rows)
     _build_comparison_sheet(workbook, result_rows, steps=steps)
     _append_optional_table_sheet(
         workbook,
         "NodeCounterSummary",
         NODE_COUNTER_SUMMARY_COLUMNS,
-        _build_node_counter_summary_rows(result_rows),
+        node_counter_summary_rows,
     )
     _append_optional_table_sheet(
         workbook,
         "NodeCounters",
         NODE_COUNTER_COLUMNS,
-        _build_node_counter_rows(result_rows),
+        node_counter_rows,
     )
     _append_optional_table_sheet(
         workbook,
         "PerfFiles",
         PERF_FILE_COLUMNS,
-        _build_perf_file_rows(result_rows),
+        perf_file_rows,
     )
+    _append_table_sheet(workbook, "Results", RESULTS_COLUMNS, result_rows)
 
     effective_command = command or _load_manifest_command(experiment_dir)
     report_summary = _build_report_summary(result_rows)
@@ -2050,6 +2923,7 @@ def _write_report(
         effective_command,
         report_summary=report_summary,
     )
+    _build_guide_sheet(workbook, sheet_specs)
 
     workbook.save(report_path)
     return report_path
