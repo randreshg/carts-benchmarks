@@ -1083,10 +1083,10 @@ def _flatten_result_serialized(
 ) -> Dict[str, Any]:
     row = _empty_result_row()
 
-    benchmark = result.get("benchmark")
+    benchmark = result.get("benchmark") or result.get("name")
     config = result.get("config") or {}
-    arts = result.get("arts") or {}
-    omp = result.get("omp") or {}
+    arts = result.get("arts") or result.get("run_arts") or {}
+    omp = result.get("omp") or result.get("run_omp") or {}
     slurm = result.get("slurm") or {}
     diagnostics = result.get("diagnostics") or {}
     slurm_stderr = diagnostics.get("slurm_stderr") if isinstance(diagnostics, dict) else {}
@@ -1096,11 +1096,11 @@ def _flatten_result_serialized(
     if not isinstance(runtime_warning, dict):
         runtime_warning = {}
 
-    suite: Optional[str] = None
-    if isinstance(benchmark, str) and "/" in benchmark:
+    suite: Optional[str] = result.get("suite") if isinstance(result.get("suite"), str) else None
+    if suite is None and isinstance(benchmark, str) and "/" in benchmark:
         suite = benchmark.split("/", 1)[0]
 
-    status = _status_text(result.get("status"))
+    status = _status_text(result.get("status") or arts.get("status"))
     status_detail = _status_text(result.get("status_detail")) or status
     detected_runtime_warning = bool(runtime_warning.get("has_warning"))
     if not detected_runtime_warning:
@@ -1135,18 +1135,18 @@ def _flatten_result_serialized(
             "verified": _verification_state(
                 status,
                 (result.get("verification") or {}).get("note"),
-                arts.get("checksum"),
-                omp.get("checksum"),
+                (result.get("verification") or {}).get("arts_checksum", arts.get("checksum")),
+                (result.get("verification") or {}).get("omp_checksum", omp.get("checksum")),
                 (result.get("verification") or {}).get("reference_checksum"),
             ),
             "verification_note": (result.get("verification") or {}).get("note"),
             "verification_mode": _verification_mode_value(
                 (result.get("verification") or {}).get("mode"),
-                omp.get("checksum"),
+                (result.get("verification") or {}).get("omp_checksum", omp.get("checksum")),
                 (result.get("verification") or {}).get("reference_checksum"),
             ),
-            "arts_checksum": arts.get("checksum"),
-            "omp_checksum": omp.get("checksum"),
+            "arts_checksum": (result.get("verification") or {}).get("arts_checksum", arts.get("checksum")),
+            "omp_checksum": (result.get("verification") or {}).get("omp_checksum", omp.get("checksum")),
             "reference_checksum": (result.get("verification") or {}).get("reference_checksum"),
             "reference_source": _remap_path_value(
                 (result.get("verification") or {}).get("reference_source"),
@@ -3009,7 +3009,7 @@ def generate_report_from_rows(
     normalized_rows: List[Dict[str, Any]] = []
     experiment_dir_path = Path(experiment_dir)
     for result in result_rows:
-        if isinstance(result, dict) and "arts" in result:
+        if isinstance(result, dict) and ("arts" in result or "run_arts" in result):
             normalized_rows.append(
                 _flatten_result_serialized(result, experiment_dir=experiment_dir_path)
             )

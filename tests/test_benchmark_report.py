@@ -415,6 +415,67 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         self.assertEqual(distributed_result_row[result_header["verification_mode"] - 1], "stored_omp_reference")
         self.assertEqual(distributed_result_row[result_header["reference_omp_threads"] - 1], 64)
 
+    def test_generate_report_from_local_result_schema(self) -> None:
+        report_path = generate_report_from_rows(
+            [
+                {
+                    "name": "polybench/gemm",
+                    "suite": "polybench",
+                    "size": "small",
+                    "run_phase": "single-node",
+                    "config": {
+                        "arts_threads": 4,
+                        "arts_nodes": 1,
+                        "omp_threads": 4,
+                        "launcher": "local",
+                    },
+                    "run_number": 1,
+                    "run_arts": {
+                        "status": "PASS",
+                        "duration_sec": 1.0,
+                        "exit_code": 0,
+                        "checksum": "10.0",
+                        "kernel_timings": {},
+                        "e2e_timings": {"gemm": 1.0},
+                        "init_timings": {},
+                    },
+                    "run_omp": {
+                        "status": "PASS",
+                        "duration_sec": 1.2,
+                        "exit_code": 0,
+                        "checksum": "10.0",
+                        "kernel_timings": {},
+                        "e2e_timings": {"gemm": 1.2},
+                        "init_timings": {},
+                    },
+                    "timing": {
+                        "arts_time_sec": 1.0,
+                        "omp_time_sec": 1.2,
+                        "speedup": 1.2,
+                        "speedup_basis": "e2e",
+                    },
+                    "verification": {
+                        "correct": True,
+                        "note": "Checksums match within tolerance",
+                        "arts_checksum": "10.0",
+                        "omp_checksum": "10.0",
+                        "mode": "direct_omp",
+                    },
+                    "artifacts": {
+                        "run_dir": str(self.experiment_dir / "single-node" / "run_1"),
+                    },
+                }
+            ],
+            self.experiment_dir,
+        )
+        self.assertIsNotNone(report_path)
+        workbook = load_workbook(report_path, data_only=False)
+        result_rows = list(workbook["Results"].iter_rows(values_only=True))
+        result_header = {name: idx for idx, name in enumerate(result_rows[0])}
+        self.assertEqual(result_rows[1][result_header["benchmark"]], "polybench/gemm")
+        self.assertEqual(result_rows[1][result_header["verified"]], True)
+        self.assertEqual(result_rows[1][result_header["verification_mode"]], "direct_omp")
+
 
 if __name__ == "__main__":
     unittest.main()
