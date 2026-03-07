@@ -30,6 +30,7 @@ class SlurmJobConfig:
     executable_arts: Path
     executable_omp: Optional[Path]
     arts_config_path: Path
+    python_executable: Path
     run_dir: Path
     size: str
     threads: int

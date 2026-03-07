@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -519,6 +520,7 @@ class SlurmBatchExecutor:
                     executable_arts=arts_exe,
                     executable_omp=omp_exe,
                     arts_config_path=build_arts_cfg,
+                    python_executable=Path(sys.executable).resolve(),
                     run_dir=run_dir,
                     size=self.request.size,
                     threads=self.request.threads,

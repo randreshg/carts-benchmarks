@@ -228,7 +228,7 @@ echo "End: $(date -Iseconds)"
 echo "=========================================="
 
 # Generate result JSON
-python3 "{slurm_job_result_script}" \\
+"{python_executable}" "{slurm_job_result_script}" \\
     --benchmark "{benchmark_name}" \\
     --run-number {run_number} \\
     --size "{size}" \\
@@ -313,6 +313,7 @@ def generate_sbatch_script(
     arts_config_abs = config.arts_config_path.resolve() if config.arts_config_path else None
     executable_arts_abs = config.executable_arts.resolve() if config.executable_arts else None
     executable_omp_abs = config.executable_omp.resolve() if config.executable_omp else None
+    python_executable_abs = config.python_executable.resolve()
     slurm_job_result_abs = slurm_job_result_script.resolve()
 
     # Perf directory section for sbatch template
@@ -402,6 +403,7 @@ def generate_sbatch_script(
         executable_arts=executable_arts_abs,
         srun_command=srun_command,
         omp_section=omp_section,
+        python_executable=python_executable_abs,
         slurm_job_result_script=slurm_job_result_abs,
         size=config.size,
         threads=config.threads,

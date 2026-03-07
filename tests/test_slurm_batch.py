@@ -15,8 +15,8 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from slurm.batch import poll_jobs  # noqa: E402
-from slurm.models import SlurmJobStatus  # noqa: E402
+from slurm.batch import generate_sbatch_script, poll_jobs  # noqa: E402
+from slurm.models import SlurmJobConfig, SlurmJobStatus  # noqa: E402
 
 
 class SlurmBatchPollingTest(unittest.TestCase):
@@ -99,6 +99,49 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 with patch("slurm.batch._get_scontrol_status", return_value=unknown):
                     states = poll_jobs(job_statuses)
             self.assertEqual(states["301"], "UNKNOWN")
+
+    def test_generate_sbatch_script_uses_configured_python_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            executable_omp = root / "gemm_omp"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (
+                job_result_script,
+                arts_cfg,
+                executable_arts,
+                executable_omp,
+                python_executable,
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=2,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=executable_omp,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="small",
+                threads=4,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn(f'"{python_executable.resolve()}" "{job_result_script.resolve()}"', content)
+            self.assertNotIn('python3 "', content)
 
 
 if __name__ == "__main__":
