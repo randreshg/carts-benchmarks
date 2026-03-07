@@ -26,12 +26,13 @@ static void init_array(int nx, int ny, DATA_TYPE **A, DATA_TYPE *r,
                        DATA_TYPE *p) {
   int i, j;
 
+  uint64_t rng = carts_rand_seed(nx, ny, 0, 0);
   for (i = 0; i < ny; i++)
-    p[i] = i * M_PI;
+    p[i] = carts_rand_double(&rng, -1.0, 1.0);
   for (i = 0; i < nx; i++) {
-    r[i] = i * M_PI;
+    r[i] = carts_rand_double(&rng, -1.0, 1.0);
     for (j = 0; j < ny; j++)
-      A[i][j] = ((DATA_TYPE)i * (j + 1)) / nx;
+      A[i][j] = carts_rand_double(&rng, -1.0, 1.0);
   }
 }
 

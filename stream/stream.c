@@ -36,14 +36,14 @@
 /* Number of kernels */
 #define NUM_KERNELS 4
 
-/* Initialize arrays with deterministic values */
+/* Initialize arrays with deterministic pseudo-random values */
 static void init_arrays(STREAM_TYPE *a, STREAM_TYPE *b, STREAM_TYPE *c,
                         size_t array_size) {
-#pragma omp parallel for schedule(static)
+  uint64_t rng = carts_rand_seed(array_size, 0, 0, 0);
   for (size_t j = 0; j < array_size; j++) {
-    a[j] = 1.0;
-    b[j] = 2.0;
-    c[j] = 0.0;
+    a[j] = carts_rand_double(&rng, 0.5, 2.5);
+    b[j] = carts_rand_double(&rng, 0.5, 2.5);
+    c[j] = carts_rand_double(&rng, 0.5, 2.5);
   }
 }
 

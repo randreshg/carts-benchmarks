@@ -10,7 +10,9 @@
 #   LDFLAGS      - linker flags (e.g., -lm)
 #   CFLAGS       - additional compiler flags
 #   EXTRA_CFLAGS - extra flags appended to CFLAGS
-#   ARTS_CFG     - path to arts.cfg (auto-detected if present)
+#   WORKER_COUNT - per-node worker count for compilation (default: 1)
+#   NODE_COUNT   - number of nodes for compilation (default: 1)
+#   ARTS_CONFIG  - path to arts.cfg for runtime (set via env var)
 ################################################################################
 
 SHELL := $(shell command -v bash 2>/dev/null || echo /bin/bash)
@@ -34,11 +36,12 @@ ARTS_BINARY := $(EXAMPLE_NAME)_arts
 OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp
 OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
 
-# Auto-detect arts.cfg
-CARTS_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
-ARTS_CFG ?= $(firstword $(wildcard arts.cfg) $(wildcard $(CARTS_ROOT)/external/carts-benchmarks/configs/local.cfg))
-ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
-ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),artsConfig=$(ARTS_CFG),)
+# Compilation: worker/node count (required by carts-compile)
+WORKER_COUNT ?= 1
+NODE_COUNT ?= 1
+COMPILE_WORKER_ARGS = --worker-count $(WORKER_COUNT) --node-count $(NODE_COUNT)
+
+# Runtime: ARTS_CONFIG env var must be set by the caller (benchmark runner or user)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
@@ -54,7 +57,7 @@ OMP_FLAGS := -fopenmp -O3 $(INCLUDES) $(CFLAGS) -lm -lcartsbenchmarks
 all: | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
 	@$(CARTS) compile $(SRC) -O3 $(LDFLAGS) \
-		$(ARTS_CFG_ARG) $(EXECUTE_FLAGS) $(COMPILE_ARGS) \
+		$(COMPILE_WORKER_ARGS) $(EXECUTE_FLAGS) $(COMPILE_ARGS) \
 		> $(LOG_DIR)/build.log 2>&1 || (cat $(LOG_DIR)/build.log >&2; exit 1)
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 
@@ -140,19 +143,19 @@ extralarge:
 # Build only ARTS with size
 small-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with SMALL size"
-	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)"
 
 medium-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with MEDIUM size"
-	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)"
 
 large-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with LARGE size"
-	$(MAKE) all CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 extralarge-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with EXTRALARGE size"
-	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 # Build only OpenMP with size
 small-openmp:

@@ -203,10 +203,10 @@ static void softmax(float *x, int n) {
  * Initialize test data with range covering negative and positive values
  */
 static void init_data(float *x, int n) {
+  uint64_t rng = carts_rand_seed(n, 0, 0, 0);
   int i;
   for (i = 0; i < n; ++i) {
-    // Range from -3 to 3
-    x[i] = -3.0f + 6.0f * ((float)i / n);
+    x[i] = carts_rand_float(&rng, -3.0f, 3.0f);
   }
 }
 
@@ -215,6 +215,7 @@ static void init_data(float *x, int n) {
  */
 static void copy_array(float *dst, float *src, int n) {
   int i;
+#pragma omp parallel for
   for (i = 0; i < n; ++i) {
     dst[i] = src[i];
   }

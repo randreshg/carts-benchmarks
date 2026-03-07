@@ -18,7 +18,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # Constants
 # ============================================================================
 
-DEFAULT_TIMEOUT = 60
+DEFAULT_TIMEOUT = 120
 DEFAULT_SIZE = "small"
 DEFAULT_TOLERANCE = 1e-2  # 1% tolerance for FP operation ordering differences
 DEFAULT_ARTS_PORT = 34739

@@ -188,7 +188,6 @@ class Artifacts:
     arts_metadata_mlir: Optional[str] = None   # *_arts_metadata.mlir
     executable_arts: Optional[str] = None
     executable_omp: Optional[str] = None
-    arts_config: Optional[str] = None          # arts.cfg
 
     # Per-run artifacts (in results/{experiment}/{benchmark}/build/{config}/runs/{N}/)
     run_dir: Optional[str] = None
@@ -213,10 +212,8 @@ class ExperimentStep:
     name: str
     benchmarks: Optional[List[str]] = None
     profile: Optional[str] = None
-    debug: int = 0
     runs: int = 1
     perf: bool = False
-    perf_interval: float = 0.1
     size: Optional[str] = None
     threads: Optional[str] = None
     nodes: Optional[str] = None
@@ -224,8 +221,6 @@ class ExperimentStep:
     cflags: Optional[str] = None
     compile_args: Optional[str] = None
     exclude_nodes: Optional[str] = None
-    arts_config: Optional[str] = None
-    launcher: Optional[str] = None
 
 
 @dataclass

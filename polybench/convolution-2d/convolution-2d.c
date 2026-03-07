@@ -24,9 +24,10 @@
 static void init_array(int ni, int nj, DATA_TYPE **A) {
   int i, j;
 
+  uint64_t rng = carts_rand_seed(ni, nj, 0, 0);
   for (i = 0; i < ni; i++)
     for (j = 0; j < nj; j++) {
-      A[i][j] = ((DATA_TYPE)(i + j) / nj);
+      A[i][j] = carts_rand_double(&rng, -1.0, 1.0);
     }
 }
 

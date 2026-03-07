@@ -27,11 +27,12 @@ static void init_array(int tmax, int nx, int ny, DATA_TYPE **ex, DATA_TYPE **ey,
 
   for (i = 0; i < tmax; i++)
     _fict_[i] = (DATA_TYPE)i;
+  uint64_t rng = carts_rand_seed(nx, ny, tmax, 0);
   for (i = 0; i < nx; i++)
     for (j = 0; j < ny; j++) {
-      ex[i][j] = ((DATA_TYPE)i * (j + 1)) / nx;
-      ey[i][j] = ((DATA_TYPE)i * (j + 2)) / ny;
-      hz[i][j] = ((DATA_TYPE)i * (j + 3)) / nx;
+      ex[i][j] = carts_rand_double(&rng, -0.5, 0.5);
+      ey[i][j] = carts_rand_double(&rng, -0.5, 0.5);
+      hz[i][j] = carts_rand_double(&rng, -0.5, 0.5);
     }
 }
 

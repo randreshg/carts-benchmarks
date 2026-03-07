@@ -16,12 +16,13 @@
 #endif
 
 static void init(float **A, float **B, float **C) {
+  uint64_t rng = carts_rand_seed(NI, NJ, NK, 0);
   for (int i = 0; i < NI; i++)
     for (int k = 0; k < NK; k++)
-      A[i][k] = (float)((i + k) % 13) * 0.01f;
+      A[i][k] = carts_rand_float(&rng, -1.0f, 1.0f);
   for (int k = 0; k < NK; k++)
     for (int j = 0; j < NJ; j++)
-      B[k][j] = (float)((k * 3 + j) % 17) * 0.02f;
+      B[k][j] = carts_rand_float(&rng, -1.0f, 1.0f);
   for (int i = 0; i < NI; i++)
     for (int j = 0; j < NJ; j++)
       C[i][j] = 0.0f;
@@ -42,7 +43,6 @@ static void gemm(float **C, const float **A, const float **B, float alpha,
 
 static double checksum(float **C) {
   double s = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : s)
   for (int i = 0; i < NI; i++) {
     for (int j = 0; j < NJ; j++) {
       s += C[i][j];
@@ -76,8 +76,6 @@ int main(void) {
   gemm(C, (const float **)A, (const float **)B, 1.0f, 0.0f);
   // CARTS_KERNEL_TIMER_STOP("gemm");
 
-  // Verification: parallel checksum so output C is consumed through the
-  // EDT/acquire path and can be distributed safely.
   double checksum_value = checksum(C);
   CARTS_BENCH_CHECKSUM(checksum_value);
 

@@ -29,11 +29,12 @@ int main(int argc, char **argv) {
     }
   }
 
-  /* Initialize array A */
+  /* Initialize array A with deterministic pseudo-random values */
+  uint64_t rng = carts_rand_seed(ni, nj, nk, 0);
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nj; j++) {
       for (int k = 0; k < nk; k++) {
-        A[i][j][k] = (DATA_TYPE)(i % 12 + 2 * (j % 7) + 3 * (k % 13));
+        A[i][j][k] = carts_rand_float(&rng, -1.0f, 1.0f);
         B[i][j][k] = 0.0f;
       }
     }

@@ -27,10 +27,11 @@ int main(void) {
     B[i] = (float *)malloc(N * sizeof(float));
   }
 
-  // Initialize arrays inline
+  // Initialize arrays with deterministic pseudo-random values
+  uint64_t rng = carts_rand_seed(N, TSTEPS, 0, 0);
   for (int i = 0; i < N; i++) {
     for (int j = 0; j < N; j++) {
-      A[i][j] = (float)((i + j) % 256) * 0.001f;
+      A[i][j] = carts_rand_float(&rng, 0.0f, 1.0f);
       B[i][j] = 0.0f;
     }
   }

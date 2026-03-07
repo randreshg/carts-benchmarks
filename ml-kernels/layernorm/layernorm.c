@@ -16,11 +16,10 @@
 #endif
 
 static void init(float **x, float *gamma, float *beta) {
-  int idx = 0;
+  uint64_t rng = carts_rand_seed(BATCH, HIDDEN, 0, 0);
   for (int b = 0; b < BATCH; ++b) {
     for (int h = 0; h < HIDDEN; ++h) {
-      x[b][h] = ((float)(idx % 113) - 50.0f) * 0.03125f;
-      idx++;
+      x[b][h] = carts_rand_float(&rng, -3.0f, 3.0f);
     }
   }
   for (int h = 0; h < HIDDEN; ++h) {

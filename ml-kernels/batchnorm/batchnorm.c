@@ -218,15 +218,13 @@ static void batchnorm_forward(float ***x, float ***output, float *scales, float 
 static void init_data(float ***x, float *scales, float *biases, int batch, int channels,
                int spatial) {
   int b, c, i;
-  int total = batch * channels * spatial;
-  int idx = 0;
 
-  // Initialize input with some pattern
+  // Initialize input with deterministic pseudo-random values
+  uint64_t rng = carts_rand_seed(batch, channels, (uint64_t)spatial, 0);
   for (b = 0; b < batch; ++b) {
     for (c = 0; c < channels; ++c) {
       for (i = 0; i < spatial; ++i) {
-        x[b][c][i] = ((float)idx / total) * 2.0f - 1.0f; // Range [-1, 1]
-        idx++;
+        x[b][c][i] = carts_rand_float(&rng, -3.0f, 3.0f);
       }
     }
   }
@@ -312,16 +310,32 @@ int main(int argc, char **argv) {
 
   printf("\nBatch normalization completed successfully!\n");
 
+  // Per-channel checksum for batch 0 to find which channels are wrong
+  for (int c = 0; c < channels; c++) {
+    double csum = 0.0;
+    for (int s = 0; s < spatial; s++) {
+      csum += fabs((double)output[0][c][s]);
+    }
+    // Normal channels have sum ~890, wrong ones have much larger
+    if (csum > 2000.0) {
+      fprintf(stderr, "[WRONG] b=0 c=%d sum=%.6e mean=%.6e var=%.6e\n",
+              c, csum, (double)mean[c], (double)variance[c]);
+    }
+  }
+
   // Compute checksum inline using sum of absolute values for stability.
   // Normalized data is centered around 0, so plain sum would be ~0
   // and highly sensitive to floating-point rounding differences.
   double checksum = 0.0;
   for (int b = 0; b < batch; b++) {
+    double bsum = 0.0;
     for (int c = 0; c < channels; c++) {
       for (int s = 0; s < spatial; s++) {
-        checksum += fabs((double)output[b][c][s]);
+        bsum += fabs((double)output[b][c][s]);
       }
     }
+    printf("  batch[%d] checksum: %.6e\n", b, bsum);
+    checksum += bsum;
   }
   CARTS_BENCH_CHECKSUM(checksum);
 

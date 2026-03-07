@@ -31,10 +31,11 @@ int main(int argc, char **argv) {
     A[i] = (DATA_TYPE *)malloc(n * sizeof(DATA_TYPE));
   }
 
-  /* Initialize array inline */
+  /* Initialize array with deterministic pseudo-random values */
+  uint64_t rng = carts_rand_seed(n, tsteps, 0, 0);
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < n; j++) {
-      A[i][j] = ((DATA_TYPE)i * (j + 2) + 2) / n;
+      A[i][j] = carts_rand_double(&rng, 0.1, 1.0);
     }
   }
 

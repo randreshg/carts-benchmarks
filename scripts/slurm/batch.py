@@ -74,16 +74,27 @@ _POLL_SPINNER_FRAMES = ("|", "/", "-", "\\")
 # Data Classes
 # ============================================================================
 
-def _create_pending_job_status(job_id: str, config: SlurmJobConfig) -> SlurmJobStatus:
-    """Create the initial in-memory status for a newly submitted job."""
-    return SlurmJobStatus(
-        job_id=job_id,
-        benchmark_name=config.benchmark_name,
-        run_number=config.run_number,
-        node_count=config.node_count,
-        state="PENDING",
-        run_dir=config.run_dir,
-    )
+
+@dataclass
+class SlurmJobConfig:
+    """Configuration for a single SLURM job."""
+    benchmark_name: str
+    run_number: int
+    node_count: int
+    time_limit: str  # "HH:MM:SS" format
+    partition: Optional[str]
+    account: Optional[str]
+    executable_arts: Path
+    executable_omp: Optional[Path]
+    arts_config_path: Path
+    run_dir: Path
+    size: str
+    threads: int  # For OpenMP comparison (single-node only)
+    port: Optional[str] = None  # Per-job port override (e.g., "10001" or "[10001-10002]")
+    gdb: bool = False  # Wrap executable with gdb for backtrace on crash
+    perf: bool = False  # Enable perf stat profiling for cache metrics
+    exclude_nodes: Optional[str] = None  # SLURM nodes to exclude (e.g. "j006,j007")
+    job_label: Optional[str] = None  # Optional phase/step label to disambiguate job names
 
 
 def _create_submission_failure(
@@ -329,7 +340,7 @@ def generate_sbatch_script(
     if config.node_count == 1 and executable_omp_abs:
         if config.perf and perf_dir:
             events = ",".join(PERF_CACHE_EVENTS)
-            interval_ms = int(config.perf_interval * 1000)
+            interval_ms = 100  # 0.1s sampling interval
             omp_run_command = (
                 f"perf stat -e {events} -I {interval_ms} -x , "
                 f"-o {run_dir}/perf/omp.csv "
@@ -369,7 +380,7 @@ def generate_sbatch_script(
         )
     elif config.perf and perf_dir:
         events = ",".join(PERF_CACHE_EVENTS)
-        interval_ms = int(config.perf_interval * 1000)
+        interval_ms = 100  # 0.1s sampling interval
         # Single quotes: run_dir/perf is baked as absolute path at generation time,
         # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
         srun_command = (
@@ -418,114 +429,6 @@ def generate_sbatch_script(
     script_path.chmod(0o755)
 
 
-def generate_arts_config_for_node(
-    base_config: Path,
-    build_node_dir: Path,
-    node_count: int,
-    threads: int,
-) -> Path:
-    """Generate a node-specific arts.cfg for compilation (goes in build/ directory).
-
-    This config is used at compile time to embed nodeCount into the executable.
-    counterFolder is set to a placeholder - the sbatch script will override it per-run
-    when creating the runtime arts.cfg in each run directory.
-
-    Args:
-        base_config: Base arts.cfg to use as template
-        build_node_dir: Build directory (build/{benchmark}/nodes_{N}/{T}T/)
-        node_count: Number of nodes
-        threads: Thread count
-
-    Returns:
-        Path to the generated config file (build/{benchmark}/nodes_{N}/{T}T/arts.cfg)
-    """
-    content = base_config.read_text()
-
-    # CRITICAL: Use absolute paths - jobs run from different working directories
-    # counterFolder placeholder - sbatch script sets actual path per run
-    counter_dir_placeholder = (build_node_dir / "counters").resolve()
-
-    # Update or add counterFolder (placeholder, will be overridden per-run)
-    if re.search(r'^counterFolder\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^counterFolder\s*=.*$',
-            f'counterFolder={counter_dir_placeholder}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\ncounterFolder={counter_dir_placeholder}')
-
-    # Update or add counterStartPoint
-    if re.search(r'^counterStartPoint\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^counterStartPoint\s*=.*$',
-            'counterStartPoint=1',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', '[ARTS]\ncounterStartPoint=1')
-
-    # Update nodeCount
-    if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^nodeCount\s*=.*$',
-            f'nodeCount={node_count}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
-
-    # Update threads to match this build combination.
-    # (SLURM runtime still exports SLURM_CPUS_PER_TASK, but keeping the config
-    # aligned with the combination makes artifacts self-describing.)
-    if re.search(r'^threads\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^threads\s*=.*$',
-            f'threads={threads}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
-
-    # Ensure launcher is slurm
-    if re.search(r'^launcher\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^launcher\s*=.*$',
-            'launcher=slurm',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', '[ARTS]\nlauncher=slurm')
-
-    # Clear nodes and masterNode - SLURM launcher ignores these
-    # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)
-    if re.search(r'^nodes\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^nodes\s*=.*$',
-            '# nodes= (managed by SLURM)',
-            content,
-            flags=re.MULTILINE
-        )
-
-    if re.search(r'^masterNode\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^masterNode\s*=.*$',
-            '# masterNode= (managed by SLURM)',
-            content,
-            flags=re.MULTILINE
-        )
-
-    # Write to build directory (use absolute path)
-    config_path = (build_node_dir / "arts.cfg").resolve()
-    build_node_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(content)
-
-    return config_path
 
 
 # ============================================================================

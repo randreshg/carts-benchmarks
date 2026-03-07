@@ -161,10 +161,12 @@ static void initialize_test_data(float **token_embedding_table,
                                  float ***wq, float ***wk, float ***wv,
                                  float ***wo, float ***w1, float ***w2,
                                  float ***w3, float *rms_final_weight) {
+  uint64_t rng = carts_rand_seed(DIM, HIDDEN_DIM, N_LAYERS, N_HEADS);
+
   // Token embedding table [VOCAB_SIZE][DIM]
   for (int i = 0; i < VOCAB_SIZE; i++) {
     for (int j = 0; j < DIM; j++) {
-      token_embedding_table[i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+      token_embedding_table[i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
     }
   }
 
@@ -179,31 +181,31 @@ static void initialize_test_data(float **token_embedding_table,
     // wq, wo [N_LAYERS][DIM][DIM]
     for (int i = 0; i < DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        wq[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        wo[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        wq[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
+        wo[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
       }
     }
 
     // wk, wv [N_LAYERS][KV_DIM][DIM]
     for (int i = 0; i < KV_DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        wk[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        wv[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        wk[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
+        wv[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
       }
     }
 
     // w1, w3 [N_LAYERS][HIDDEN_DIM][DIM]
     for (int i = 0; i < HIDDEN_DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        w1[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        w3[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        w1[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
+        w3[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
       }
     }
 
     // w2 [N_LAYERS][DIM][HIDDEN_DIM]
     for (int i = 0; i < DIM; i++) {
       for (int j = 0; j < HIDDEN_DIM; j++) {
-        w2[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        w2[l][i][j] = carts_rand_float(&rng, -0.02f, 0.02f);
       }
     }
   }
@@ -402,7 +404,6 @@ int main(void) {
   // Initialize
   initialize_state(x, xb, xb2, hb, hb2, q_buf, att_buf, logits, key_cache,
                    value_cache);
-  srand(42);
   initialize_test_data(token_embedding_table, rms_att_weight, rms_ffn_weight,
                        wq, wk, wv, wo, w1, w2, w3, rms_final_weight);
 

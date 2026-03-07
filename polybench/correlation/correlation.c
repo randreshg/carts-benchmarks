@@ -20,9 +20,10 @@ static void print_array(int m, int n, DATA_TYPE **corr, const char *name) {
 }
 
 static void init_array(int m, int n, DATA_TYPE **data) {
+  uint64_t rng = carts_rand_seed(m, n, 0, 0);
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < n; j++) {
-      data[i][j] = (DATA_TYPE)(i * j) / (DATA_TYPE)M + (DATA_TYPE)i / (j + 1);
+      data[i][j] = carts_rand_double(&rng, 0.1, 10.0);
     }
   }
 }
@@ -102,7 +103,6 @@ int main(int argc, char **argv) {
 
   /* Verification */
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < m; j++) {
       checksum += corr[i][j];

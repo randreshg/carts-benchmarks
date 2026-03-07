@@ -66,12 +66,18 @@ int main(void) {
     unew[i] = (double *)malloc(ny * sizeof(double));
   }
 
-  // Initialize arrays
+  // Initialize arrays with deterministic pseudo-random values
+  uint64_t rng = carts_rand_seed(nx, ny, 0, 0);
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
-      f[i][j] = 0.0;
+      if (i == 0 || j == 0 || i == nx - 1 || j == ny - 1) {
+        f[i][j] = carts_rand_double(&rng, 0.0, 1.0);
+        unew[i][j] = f[i][j];
+      } else {
+        f[i][j] = carts_rand_double(&rng, -0.1, 0.1);
+        unew[i][j] = 0.0;
+      }
       u[i][j] = 0.0;
-      unew[i][j] = 0.0;
     }
   }
 

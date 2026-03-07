@@ -213,10 +213,6 @@ int main(void) {
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew);
   // CARTS_KERNEL_TIMER_STOP("sweep");
 
-#ifdef POISSON_DEBUG
-  checkpoint("task_unew", nx, ny, unew);
-#endif
-
   // Save result
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
@@ -234,9 +230,6 @@ int main(void) {
 
   printf("Running sequential sweep...\n");
   sweep_seq(nx, ny, dx, dy, f, itold, itnew, u, unew);
-#ifdef POISSON_DEBUG
-  checkpoint("seq_unew", nx, ny, unew);
-#endif
 
   // Compare
   double error = 0.0;

@@ -20,10 +20,12 @@
 
 static void init(float ***vx, float ***vy, float ***vz, float ***rho, float ***sxx,
                  float ***syy, float ***szz, float ***sxy, float ***sxz, float ***syz) {
-  int idx = 0;
-  for (int i = 0; i < NX; ++i) {
-    for (int j = 0; j < NY; ++j) {
-      for (int k = 0; k < NZ; ++k) {
+  int i, j, k;
+#pragma omp parallel for private(j, i)
+  for (k = 0; k < NZ; ++k) {
+    for (j = 0; j < NY; ++j) {
+      for (i = 0; i < NX; ++i) {
+        int idx = i * NY * NZ + j * NZ + k;
         vx[i][j][k] = 0.0f;
         vy[i][j][k] = 0.0f;
         vz[i][j][k] = 0.0f;
@@ -34,7 +36,6 @@ static void init(float ***vx, float ***vy, float ***vz, float ***rho, float ***s
         sxy[i][j][k] = 0.005f * (float)((idx * 5) % 29);
         sxz[i][j][k] = 0.004f * (float)((idx * 3) % 31);
         syz[i][j][k] = 0.006f * (float)((idx * 2) % 37);
-        idx++;
       }
     }
   }
@@ -135,9 +136,10 @@ int main(void) {
 
   // Compute checksum
   double checksum = 0.0;
-  for (int i = 0; i < NX; ++i) {
+#pragma omp parallel for reduction(+:checksum)
+  for (int k = 0; k < NZ; ++k) {
     for (int j = 0; j < NY; ++j) {
-      for (int k = 0; k < NZ; ++k) {
+      for (int i = 0; i < NX; ++i) {
         checksum += fabs(vx[i][j][k]) + fabs(vy[i][j][k]) + fabs(vz[i][j][k]);
       }
     }

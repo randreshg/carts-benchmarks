@@ -15,7 +15,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import logging
 import os
 import platform
 import re
@@ -28,7 +27,6 @@ import sys
 import tempfile
 import time
 
-logger = logging.getLogger(__name__)
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
@@ -92,7 +90,7 @@ from benchmark_common import (
     parse_kernel_timings,
     parse_e2e_timings,
     parse_init_timings,
-    parse_perf_csv as _shared_parse_perf_csv,
+    parse_counter_json,
 )
 
 # ============================================================================
@@ -166,7 +164,6 @@ def get_carts_dir() -> Path:
 BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = BENCHMARKS_DIR / "configs"
 PROFILES_DIR = CONFIGS_DIR / "profiles"
-DEFAULT_ARTS_CONFIG = CONFIGS_DIR / "local.cfg"
 SUPPORTED_SIZES: Tuple[str, ...] = (
     "small",
     "medium",
@@ -195,8 +192,8 @@ def get_benchmarks_dir() -> Path:
 # ============================================================================
 
 
-def parse_threads(spec: str) -> List[int]:
-    """Parse thread specification into list of thread counts.
+def parse_workers(spec: str) -> List[int]:
+    """Parse worker count specification into a list.
 
     Supports comma-separated: "1,2,4,8"
     Supports range format: "1:16:2" (start:stop:step)
@@ -211,14 +208,14 @@ def parse_threads(spec: str) -> List[int]:
         elif len(parts) == 3:
             start, stop, step = parts
         else:
-            raise ValueError(f"Invalid thread range format: {spec}")
+            raise ValueError(f"Invalid worker range format: {spec}")
         values = list(range(start, stop + 1, step))
     else:
         # Single thread count
         values = [int(spec)]
 
     if any(v < 1 for v in values):
-        raise ValueError(f"Thread counts must be >= 1: {spec}")
+        raise ValueError(f"Worker counts must be >= 1: {spec}")
     return values
 
 
@@ -431,165 +428,38 @@ def append_perf_to_main_csv(
     temp_perf_file.unlink(missing_ok=True)
 
 
-def _sanitize_config_token(value: str, fallback: str = "default") -> str:
-    """Create a filesystem-safe token for generated config names."""
-    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
-    return token or fallback
 
-
-def generate_arts_config(
-    base_path: Path,
-    threads: int,
-    counter_dir: Optional[Path] = None,
-    launcher: str = "ssh",
-    nodes_override: Optional[int] = None,
-    benchmark_name: Optional[str] = None,
-) -> Path:
-    """Generate temporary arts.cfg with specific configuration from a template.
-
-    The base_path must be a valid config file that serves as a template.
-    This ensures proper node hostnames are preserved for the SSH launcher.
-
-    Args:
-        base_path: Template config file (required). Must contain nodes= with hostnames.
-        threads: Worker thread count per node.
-        counter_dir: Optional directory for counter output.
-        launcher: ARTS launcher type (ssh, slurm, lsf, local).
-        nodes_override: If set, use only the first N nodes from the template's nodes= list.
-
-    Note: For Slurm, nodeCount in config is IGNORED - ARTS reads SLURM_NNODES
-    from environment (set by srun). The launcher controls HOW we invoke the
-    executable, not just what's in the config.
-    """
-    if not base_path.exists():
-        raise ValueError(f"Config template not found: {base_path}")
-
-    content = base_path.read_text()
-
-    # Update threads
-    if re.search(r'^threads\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^threads\s*=\s*\d+', f'threads={threads}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
-
-    # Handle nodes override: truncate the nodes= list and update nodeCount
-    if nodes_override is not None:
-        all_nodes = get_arts_cfg_nodes(base_path)
-        if nodes_override > len(all_nodes):
-            raise ValueError(
-                f"Requested --nodes {nodes_override} but config '{base_path}' only has {len(all_nodes)} node(s).\n"
-                f"Use --arts-config to specify a config template with sufficient nodes.\n"
-                f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
-            )
-        truncated = all_nodes[:nodes_override]
-        truncated_str = ",".join(truncated)
-
-        # Update nodes= line
-        if re.search(r'^nodes\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^nodes\s*=.*$', f'nodes={truncated_str}', content, flags=re.MULTILINE)
-        else:
-            content = content.replace(
-                '[ARTS]', f'[ARTS]\nnodes={truncated_str}')
-
-        # Update nodeCount
-        if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^nodeCount\s*=\s*\d+', f'nodeCount={nodes_override}', content, flags=re.MULTILINE)
-        else:
-            content = content.replace(
-                '[ARTS]', f'[ARTS]\nnodeCount={nodes_override}')
-
-        # Update masterNode to first node in truncated list
-        if re.search(r'^masterNode\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^masterNode\s*=.*$', f'masterNode={truncated[0]}', content, flags=re.MULTILINE)
-
-    # Update launcher
-    if re.search(r'^launcher\s*=', content, re.MULTILINE):
-        content = re.sub(r'^launcher\s*=\s*\w+',
-                         f'launcher={launcher}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nlauncher={launcher}')
-
-    # Add counter settings if requested
-    if counter_dir:
-        # Remove any existing counterFolder/counterStartPoint lines to avoid duplicates
-        content = re.sub(r'^counterFolder\s*=.*\n?', '', content, flags=re.MULTILINE)
-        content = re.sub(r'^counterStartPoint\s*=.*\n?', '', content, flags=re.MULTILINE)
-        content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
-
-    # Determine node count for filename
-    node_count = nodes_override if nodes_override else get_arts_cfg_int(
-        base_path, "nodeCount") or 1
-
-    # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
-    # The carts-benchmarks directory is shared across all nodes via mounted volume.
-    # Filename encodes the effective combination so configs are not overwritten
-    # when different benchmarks/launchers/templates are built in one run.
-    generated_configs_dir = Path(__file__).parent / ".generated_configs"
-    generated_configs_dir.mkdir(exist_ok=True)
-    source_hash = hashlib.sha1(str(base_path.resolve()).encode("utf-8")).hexdigest()[:8]
-    counter_tag = (
-        hashlib.sha1(str(counter_dir.resolve()).encode("utf-8")).hexdigest()[:8]
-        if counter_dir is not None
-        else "nocounter"
+def _generate_arts_config(workers: int, nodes: int, dest: Path) -> Path:
+    """Generate minimal arts.cfg for benchmark execution."""
+    nodes_list = ",".join(["localhost"] * nodes)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(
+        f"[ARTS]\n"
+        f"worker_threads={workers}\n"
+        f"launcher=local\n"
+        f"node_count={nodes}\n"
+        f"nodes={nodes_list}\n"
+        f"default_ports=50000\n"
+        f"core_dump=1\n"
     )
-    bench_tag = _sanitize_config_token(benchmark_name or "global")
-    launcher_tag = _sanitize_config_token(launcher)
-    temp_path = (
-        generated_configs_dir
-        / f"arts_{bench_tag}_{launcher_tag}_{threads}t_{node_count}n_{source_hash}_{counter_tag}.cfg"
-    )
-    temp_path.write_text(content)
-    return temp_path
-
-
-def _resolve_effective_arts_config(
-    bench_path: Path,
-    override_config: Optional[Path] = None,
-) -> Path:
-    """Resolve the arts.cfg template for a benchmark."""
-    if override_config is not None:
-        return override_config.resolve()
-
-    for candidate in [
-        bench_path / "arts.cfg",
-        bench_path.parent / "arts.cfg",
-        BENCHMARKS_DIR / "arts.cfg",
-        DEFAULT_ARTS_CONFIG,
-    ]:
-        if candidate.exists():
-            return candidate.resolve()
-
-    return DEFAULT_ARTS_CONFIG.resolve()
+    return dest
 
 
 def _validate_thread_network_topology(
-    arts_cfg_path: Optional[Path],
-    threads: int,
+    workers: int,
     node_count: int,
     benchmark_name: str,
 ) -> None:
-    """Validate that at least one worker thread remains after network threads."""
-    if node_count <= 1:
-        return
+    """Validate that worker count is valid.
 
-    outgoing = get_arts_cfg_int(arts_cfg_path, "outgoing")
-    incoming = get_arts_cfg_int(arts_cfg_path, "incoming")
-    sender_threads = outgoing if outgoing is not None else 1
-    receiver_threads = incoming if incoming is not None else 1
-    min_threads = sender_threads + receiver_threads + 1
-
-    if threads < min_threads:
-        cfg_display = str(arts_cfg_path) if arts_cfg_path else "<default>"
+    In ARTS v2, worker_threads specifies worker-only threads. The runtime
+    automatically adds sender/receiver threads for multi-node, so the only
+    constraint is workers >= 1.
+    """
+    if workers < 1:
         raise ValueError(
-            f"Invalid thread topology for '{benchmark_name}' (nodes={node_count}): "
-            f"threads={threads}, outgoing={sender_threads}, incoming={receiver_threads}. "
-            f"Need threads >= {min_threads} so at least one worker thread remains "
-            f"(threads > outgoing + incoming). "
-            f"Adjust step threads or update outgoing/incoming in {cfg_display}."
+            f"Need at least 1 worker thread for '{benchmark_name}' "
+            f"(got workers={workers})."
         )
 
 
@@ -774,19 +644,11 @@ class BenchmarkRunner:
     def __init__(
         self,
         console: Console,
-        verbose: bool = False,
-        quiet: bool = False,
-        trace: bool = False,
         clean: bool = True,
-        debug: int = 0,
         artifact_manager: Optional[ArtifactManager] = None,
     ):
         self.console = console
-        self.verbose = verbose
-        self.quiet = quiet
-        self.trace = trace
         self.clean = clean
-        self.debug = debug
         self.artifact_manager = artifact_manager
         self.carts_dir = get_carts_dir()
         self.benchmarks_dir = get_benchmarks_dir()
@@ -1114,7 +976,8 @@ class BenchmarkRunner:
         name: str,
         size: str,
         variant: str = "arts",
-        arts_config: Optional[Path] = None,
+        worker_count: int = 1,
+        node_count: int = 1,
         cflags: str = "",
         compile_args: Optional[str] = None,
         build_output_dir: Optional[Path] = None,
@@ -1205,22 +1068,15 @@ class BenchmarkRunner:
             # Keep compiler intermediates out of source benchmark directories.
             env_overrides["CARTS_COMPILE_WORKDIR"] = str(output_root)
 
-        # Add ARTS config override if provided
-        if effective_arts_config and variant != "openmp":
-            cmd.append(f"ARTS_CFG={effective_arts_config.resolve()}")
+        # Pass worker/node counts for compilation
+        if variant != "openmp":
+            cmd.append(f"WORKER_COUNT={worker_count}")
+            cmd.append(f"NODE_COUNT={node_count}")
         if compile_args and variant != "openmp":
             escaped_args = compile_args.replace("\\", "\\\\").replace(" ", "\\ ")
             cmd.append(f"COMPILE_ARGS={escaped_args}")
 
-        # Debug output level 1: show commands
-        if self.debug >= 1:
-            env_prefix = " ".join(f"{k}={v}" for k, v in env_overrides.items())
-            if env_prefix:
-                self.console.print(
-                    f"[dim]$ cd {bench_path} && {env_prefix} {' '.join(cmd)}[/]"
-                )
-            else:
-                self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
+        self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
 
         start = time.time()
 
@@ -1237,19 +1093,21 @@ class BenchmarkRunner:
             )
             duration = time.time() - start
 
-            # Debug output level 2: write build log to file
-            if self.debug >= 2:
-                log_file = logs_dir_override / f"build_{variant}.log"
-                with open(log_file, "w") as f:
-                    f.write(f"# Command: {' '.join(cmd)}\n")
-                    f.write(f"# Duration: {duration:.3f}s\n")
-                    f.write(f"# Exit code: {result.returncode}\n\n")
-                    if result.stdout:
-                        f.write(result.stdout)
-                    if result.stderr:
-                        f.write("=== STDERR ===\n")
-                        f.write(result.stderr)
-                self.console.print(f"[dim]  Log: {log_file}[/]")
+            # Always write build log to file
+            logs_dir = bench_path / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_file = logs_dir / f"build_{variant}.log"
+            with open(log_file, "w") as f:
+                f.write(f"# Command: {' '.join(cmd)}\n")
+                f.write(f"# Duration: {duration:.3f}s\n")
+                f.write(f"# Exit code: {result.returncode}\n\n")
+                if result.stdout:
+                    f.write("=== STDOUT ===\n")
+                    f.write(result.stdout)
+                if result.stderr:
+                    f.write("=== STDERR ===\n")
+                    f.write(result.stderr)
+            self.console.print(f"[dim]  Log: {log_file}[/]")
 
             if result.returncode == 0:
                 expected_exe = arts_output_path if variant != "openmp" else omp_output_path
@@ -1575,19 +1433,12 @@ class BenchmarkRunner:
         name: str,
         size: str,
         threads_list: List[Optional[int]],
-        base_config: Optional[Path],
         cflags: str = "",
-        counter_dir: Optional[Path] = None,
         timeout: int = DEFAULT_TIMEOUT,
-        omp_threads: Optional[int] = None,
-        launcher: Optional[str] = None,
         node_counts: Optional[List[Optional[int]]] = None,
-        weak_scaling: bool = False,
-        base_size: Optional[int] = None,
         runs: int = 1,
         compile_args: Optional[str] = None,
         perf_enabled: bool = False,
-        perf_interval: float = 0.1,
     ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
@@ -1605,26 +1456,24 @@ class BenchmarkRunner:
             self.clean_benchmark(name)
 
         bench_path = self.benchmarks_dir / name
-        # Determine effective config template
-        effective_config = _resolve_effective_arts_config(bench_path, base_config)
+        run_args = self.get_run_args(bench_path, size)
+        verify_tolerance = self.get_verify_tolerance(bench_path)
 
-        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
-        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
-        base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
-        desired_launcher = launcher if launcher is not None else base_launcher
+        default_threads = 1
+        default_nodes = 1
 
-        effective_node_counts = [n if n is not None else base_nodes
-                                 for n in node_counts] if node_counts else [base_nodes]
+        effective_node_counts = [n if n is not None else default_nodes
+                                 for n in node_counts] if node_counts else [default_nodes]
 
         for desired_nodes in effective_node_counts:
             # Skip benchmarks disabled for multi-node
             if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
-                first_threads = threads_list[0] if threads_list[0] is not None else base_threads
+                first_threads = threads_list[0] if threads_list[0] is not None else default_threads
                 skip_config = BenchmarkConfig(
                     arts_threads=first_threads,
                     arts_nodes=desired_nodes,
                     omp_threads=first_threads,
-                    launcher=desired_launcher,
+                    launcher="local",
                 )
                 results.append(self._make_skip_result(
                     name, size,
@@ -1634,82 +1483,197 @@ class BenchmarkRunner:
                 continue
 
             for threads_or_none in threads_list:
-                threads = threads_or_none if threads_or_none is not None else base_threads
-                actual_omp_threads = omp_threads if omp_threads else threads
+                threads = threads_or_none if threads_or_none is not None else default_threads
                 config = BenchmarkConfig(
                     arts_threads=threads,
                     arts_nodes=desired_nodes,
-                    omp_threads=actual_omp_threads,
-                    launcher=desired_launcher,
+                    omp_threads=threads,
+                    launcher="local",
                 )
                 _validate_thread_network_topology(
-                    effective_config, threads, desired_nodes, name
+                    threads, desired_nodes, name
                 )
 
-                # Counter directory: artifact_manager path or explicit --counter-dir
-                run_counter_dir: Optional[Path] = None
-                if am:
-                    # Always set counterFolder so counters land in place
-                    run_counter_dir = am.get_counter_dir(name, config, 1)
-                elif counter_dir is not None:
-                    run_counter_dir = counter_dir
-
-                # Generate arts.cfg with thread count, launcher, node count, counter dir
-                arts_cfg = generate_arts_config(
-                    effective_config, threads, run_counter_dir,
-                    desired_launcher, desired_nodes, benchmark_name=name
-                )
-
-                # Compute effective cflags (may include weak scaling size overrides)
                 effective_cflags = cflags
-                if weak_scaling and base_size:
-                    weak_cflags = get_weak_scaling_cflags(
-                        name, base_size, threads, desired_nodes, base_parallelism=1
-                    )
-                    if weak_cflags:
-                        effective_cflags = f"{cflags} {weak_cflags}".strip()
 
-                env = self._create_common_env()
-                env["OMP_NUM_THREADS"] = str(actual_omp_threads)
+                env = {"OMP_NUM_THREADS": str(threads)}
                 if "OMP_WAIT_POLICY" not in os.environ:
                     env["OMP_WAIT_POLICY"] = "ACTIVE"
 
-                build_output_dir: Optional[Path] = None
-                if am:
-                    # Build directly in artifacts directory to keep outputs self-contained.
-                    build_output_dir = am.get_artifacts_dir(name, config)
-                    build_output_dir.mkdir(parents=True, exist_ok=True)
+                # Build ARTS variant
+                build_arts = self.build_benchmark(
+                    name, size, "arts", worker_count=threads,
+                    node_count=desired_nodes, cflags=effective_cflags,
+                    compile_args=compile_args)
 
-                execution = self._create_execution_context(
-                    name=name,
-                    size=size,
-                    bench_path=bench_path,
-                    config=config,
-                    effective_arts_cfg=arts_cfg,
-                    desired_threads=threads,
-                    desired_nodes=desired_nodes,
-                    desired_launcher=desired_launcher,
-                    actual_omp_threads=actual_omp_threads,
-                    effective_cflags=effective_cflags,
-                    build_output_dir=build_output_dir,
-                )
-                plan = self._create_execution_plan(
-                    execution=execution,
-                    timeout=timeout,
-                    run_numbers=tuple(range(1, runs + 1)),
-                    verify=True,
-                    compile_args=compile_args,
-                    perf_enabled=perf_enabled,
-                    perf_interval=perf_interval,
-                    counter_dir=counter_dir,
-                    perf_dir=None,
-                    run_timestamp="",
-                    sweep_log_names=True,
-                    report_speedup=(desired_nodes == 1),
-                    env_overrides=env,
-                    persisted_env_overrides=env,
-                )
-                results.extend(ConfigExecutionExecutor(self, plan).execute())
+                # Build OpenMP variant (single-node reference for correctness).
+                build_omp = self.build_benchmark(
+                    name, size, "openmp", cflags=effective_cflags)
+
+                # Copy build artifacts ONCE per config (via artifact manager)
+                artifact_paths: Dict[str, Optional[str]] = {}
+                if am:
+                    artifact_paths = am.copy_build_artifacts(
+                        bench_path, name, config)
+
+                # Generate arts.cfg for this config
+                arts_cfg_path: Optional[Path] = None
+                if am:
+                    arts_cfg_path = _generate_arts_config(
+                        threads, desired_nodes,
+                        am.get_artifacts_dir(name, config) / "arts.cfg",
+                    )
+
+                # Run multiple times per configuration
+                for run_num in range(1, runs + 1):
+                    arts_log: Optional[Path] = None
+                    omp_log: Optional[Path] = None
+
+                    if am:
+                        run_dir = am.get_run_dir(name, config, run_num)
+                        arts_log = run_dir / "arts.log"
+                        omp_log = run_dir / "omp.log"
+                    else:
+                        logs_dir = bench_path / "logs"
+                        run_suffix = f"_r{run_num}" if runs > 1 else ""
+                        arts_log = logs_dir / f"arts_{threads}t{run_suffix}.log"
+                        omp_log = logs_dir / f"omp_{threads}t{run_suffix}.log"
+
+                    # Perf setup
+                    arts_perf_name = omp_perf_name = None
+                    perf_output_dir: Optional[Path] = None
+                    if perf_enabled and am:
+                        perf_output_dir = am.get_perf_dir(name, config, run_num)
+                        arts_perf_name = "arts_cache.csv"
+                        omp_perf_name = "omp_cache.csv"
+
+                    # Clean up stale ARTS port before run
+                    self._cleanup_port()
+
+                    # Run ARTS version
+                    if build_arts.status == Status.PASS and build_arts.executable:
+                        run_arts = self.run_benchmark(
+                            build_arts.executable,
+                            timeout,
+                            env=env,
+                            launcher="local",
+                            node_count=desired_nodes,
+                            threads=threads,
+                            args=run_args,
+                            log_file=arts_log,
+                            perf_enabled=perf_enabled,
+                            perf_output_name=arts_perf_name or "perf_cache_arts.csv",
+                            perf_output_dir=perf_output_dir,
+                            arts_config=arts_cfg_path,
+                        )
+                    else:
+                        run_arts = RunResult(
+                            status=Status.SKIP, duration_sec=0.0,
+                            exit_code=-1, stdout="", stderr="Build failed",
+                        )
+
+                    # Run OpenMP version
+                    if build_omp.status == Status.PASS and build_omp.executable:
+                        run_omp = self.run_benchmark(
+                            build_omp.executable,
+                            timeout,
+                            env=env,
+                            args=run_args,
+                            log_file=omp_log,
+                            perf_enabled=perf_enabled,
+                            perf_output_name=omp_perf_name or "perf_cache_omp.csv",
+                            perf_output_dir=perf_output_dir,
+                        )
+                    else:
+                        run_omp = RunResult(
+                            status=Status.SKIP, duration_sec=0.0,
+                            exit_code=-1, stdout="", stderr="Build failed",
+                        )
+
+                    timing = self.calculate_timing(
+                        run_arts, run_omp, report_speedup=(desired_nodes == 1)
+                    )
+                    verification = self.verify_correctness(
+                        run_arts, run_omp, tolerance=verify_tolerance)
+                    artifacts = self.collect_artifacts(bench_path)
+
+                    # Update artifacts with paths inside experiment directory
+                    has_counters = False
+                    has_perf = False
+                    if am:
+                        run_dir = am.get_run_dir(name, config, run_num)
+                        artifacts_dir = am.get_artifacts_dir(name, config)
+
+                        # Build artifact paths
+                        for key, attr in [
+                            ("carts_metadata", "carts_metadata"),
+                            ("arts_metadata_mlir", "arts_metadata_mlir"),
+                            ("executable_arts", "executable_arts"),
+                            ("executable_omp", "executable_omp"),
+                        ]:
+                            if artifact_paths.get(key):
+                                setattr(artifacts, attr, artifact_paths[key])
+                        artifacts.build_dir = str(artifacts_dir)
+                        artifacts.run_dir = str(run_dir)
+                        artifacts.arts_log = str(arts_log) if arts_log else None
+                        artifacts.omp_log = str(omp_log) if omp_log else None
+
+                        # Counter files (ARTS writes to ./counters/ relative to executable)
+                        exe_counters = bench_path / "counters"
+                        if exe_counters.exists():
+                            counter_files = sorted(exe_counters.glob("*.json"))
+                            if counter_files:
+                                has_counters = True
+                                # Move counters to artifact manager's run directory
+                                am_counter_dir = am.get_counter_dir(name, config, run_num)
+                                am_counter_dir.mkdir(parents=True, exist_ok=True)
+                                for cf in counter_files:
+                                    shutil.copy2(cf, am_counter_dir / cf.name)
+                                artifacts.counters_dir = str(am_counter_dir)
+                                artifacts.counter_files = [str(am_counter_dir / cf.name) for cf in counter_files]
+                                init_sec, e2e_sec = parse_counter_json(am_counter_dir)
+                                run_arts.counter_init_sec = init_sec
+                                run_arts.counter_e2e_sec = e2e_sec
+                                # Clean up for next run
+                                shutil.rmtree(exe_counters, ignore_errors=True)
+
+                        # Perf
+                        if perf_enabled and perf_output_dir and perf_output_dir.exists():
+                            perf_files = list(perf_output_dir.glob("*.csv"))
+                            if perf_files:
+                                has_perf = True
+
+                        am.record_run(name, config, run_num,
+                                      has_counters=has_counters, has_perf=has_perf)
+
+                        # Save run_config.json per-run
+                        am.save_run_config(
+                            name, config, run_num,
+                            arts_cfg_path=arts_cfg_path,
+                            env_overrides=env if env else None,
+                            size=size,
+                            cflags=effective_cflags or None,
+                            compile_args=compile_args or None,
+                        )
+
+                    result = BenchmarkResult(
+                        name=name,
+                        suite=name.split("/")[0] if "/" in name else "",
+                        size=size,
+                        config=config,
+                        run_number=run_num,
+                        build_arts=build_arts,
+                        build_omp=build_omp,
+                        run_arts=run_arts,
+                        run_omp=run_omp,
+                        timing=timing,
+                        verification=verification,
+                        artifacts=artifacts,
+                        timestamp=datetime.now().isoformat(),
+                        total_duration_sec=0.0,
+                        size_params=self.get_size_params(bench_path, size),
+                    )
+                    results.append(result)
 
         return results
 
@@ -1724,10 +1688,9 @@ class BenchmarkRunner:
         args: Optional[List[str]] = None,
         log_file: Optional[Path] = None,
         perf_enabled: bool = False,
-        perf_interval: float = 0.1,
         perf_output_name: str = "perf_cache.csv",
         perf_output_dir: Optional[Path] = None,
-        counter_dir: Optional[Path] = None,
+        arts_config: Optional[Path] = None,
     ) -> RunResult:
         """Execute a benchmark and capture output.
 
@@ -1739,13 +1702,11 @@ class BenchmarkRunner:
             node_count: Number of nodes for distributed execution (slurm only).
             threads: Number of threads per node (for srun --cpus-per-task).
             args: Optional list of command-line arguments to pass to the executable.
-            log_file: Optional path to write full output (for debug=2).
+            log_file: Optional path to write full output.
             perf_enabled: Enable perf stat profiling for cache metrics.
-            perf_interval: Interval in seconds for perf stat sampling (default: 0.1).
             perf_output_name: Filename for perf CSV output (default: perf_cache.csv).
             perf_output_dir: Directory for perf CSV output (default: executable's parent).
-            counter_dir: Optional path to override the embedded counterFolder config value
-                via the ARTS per-variable env var mechanism.
+            arts_config: Optional path to arts.cfg for ARTS_CONFIG env var.
         """
         result = self._run_process_request(
             BenchmarkProcessRequest(
@@ -1763,11 +1724,261 @@ class BenchmarkRunner:
                 perf_output_dir=perf_output_dir,
                 counter_dir=counter_dir,
             )
-        )
-        if result.status == Status.TIMEOUT:
+
+        # Merge with current environment
+        run_env = os.environ.copy()
+        if env:
+            run_env.update(env)
+        if arts_config:
+            run_env["ARTS_CONFIG"] = str(arts_config)
+
+        # Build command based on launcher
+        if launcher == "slurm" and node_count > 1:
+            # For Slurm multi-node: wrap in srun
+            # ARTS reads SLURM_NNODES and SLURM_CPUS_PER_TASK from environment
+            cmd = [
+                "srun",
+                f"-N{node_count}",
+                "--ntasks-per-node=1",
+                f"--cpus-per-task={threads}",
+                executable,
+            ]
+        else:
+            # Local or SSH launcher: run directly (ARTS handles distribution for SSH)
+            cmd = [executable]
+        if args:
+            cmd.extend(args)
+
+        # Wrap with perf stat if enabled and available
+        perf_output: Optional[Path] = None
+        perf_available = False
+        if perf_enabled:
+            # Check if perf is available and has permission
+            try:
+                test_result = subprocess.run(
+                    ["perf", "stat", "-e", "cycles", "--", "/bin/true"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if test_result.returncode == 0 or "counted" in test_result.stderr.lower():
+                    perf_available = True
+                else:
+                    self.console.print(
+                        "[yellow]Warning: perf not available (permission denied or not installed). "
+                        "Running without perf profiling.[/]"
+                    )
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                self.console.print(
+                    "[yellow]Warning: perf not found. Running without perf profiling.[/]"
+                )
+
+        if perf_enabled and perf_available:
+            output_dir = perf_output_dir if perf_output_dir else Path(executable).parent
+            perf_output = output_dir / perf_output_name
+            events = ",".join(PERF_CACHE_EVENTS)
+            interval_ms = 100  # 0.1s sampling interval
+            # perf stat: -e events, -I interval_ms, -x separator, -o output file
+            perf_cmd = [
+                "perf", "stat",
+                "-e", events,
+                "-I", str(interval_ms),
+                "-x", ",",
+                "-o", str(perf_output),
+                "--"
+            ]
+            cmd = perf_cmd + cmd
+
+        env_str = " ".join(f"{k}={v}" for k, v in (env or {}).items())
+        if env_str:
+            self.console.print(f"[dim]$ {env_str} {' '.join(cmd)}[/]")
+        else:
+            self.console.print(f"[dim]$ {' '.join(cmd)}[/]")
+
+        start = time.time()
+        def to_text(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return str(value)
+
+        def write_run_log(
+            duration: float,
+            exit_code: int,
+            stdout_text: str,
+            stderr_text: str,
+            timed_out: bool = False,
+            note: Optional[str] = None,
+        ) -> None:
+            if not log_file:
+                return
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "w") as f:
+                f.write(f"# Command: {' '.join(cmd)}\n")
+                f.write(f"# Duration: {duration:.3f}s\n")
+                f.write(f"# Exit code: {exit_code}\n")
+                if timed_out:
+                    f.write("# Timed out: true\n")
+                if note:
+                    f.write(f"# Note: {note}\n")
+                f.write("\n")
+                if stdout_text:
+                    f.write("=== STDOUT ===\n")
+                    f.write(stdout_text)
+                    if not stdout_text.endswith("\n"):
+                        f.write("\n")
+                if stderr_text:
+                    f.write("=== STDERR ===\n")
+                    f.write(stderr_text)
+                    if not stderr_text.endswith("\n"):
+                        f.write("\n")
+
+        proc: Optional[subprocess.Popen[str]] = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=Path(executable).parent,
+                env=run_env,
+                start_new_session=True,
+            )
+            stdout_text, stderr_text = proc.communicate(timeout=timeout)
+            duration = time.time() - start
+            return_code = proc.returncode if proc.returncode is not None else -1
+
+            # Always write log file when path is provided
+            if log_file:
+                write_run_log(
+                    duration=duration,
+                    exit_code=return_code,
+                    stdout_text=stdout_text or "",
+                    stderr_text=stderr_text or "",
+                )
+                self.console.print(f"[dim]  Log: {log_file}[/]")
+            else:
+                lines = ((stdout_text or "") + (stderr_text or "")).strip().split('\n')
+                if len(lines) > 10:
+                    self.console.print(
+                        f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]")
+                elif lines and lines[0]:
+                    for line in lines[:10]:
+                        self.console.print(f"[dim]  {line}[/]")
+
+            # Determine status based on exit code
+            if return_code == 0:
+                status = Status.PASS
+            elif return_code in (139, 134, 136):  # SEGV, ABRT, FPE
+                status = Status.CRASH
+            else:
+                status = Status.FAIL
+
+            checksum = self.extract_checksum(stdout_text)
+            kernel_timings = self.extract_kernel_timings(stdout_text)
+            e2e_timings = self.extract_e2e_timings(stdout_text)
+            init_timings = self.extract_init_timings(stdout_text)
+            parallel_task_timing = self.extract_parallel_task_timings(stdout_text)
+
+            # Parse perf metrics if enabled
+            perf_metrics = None
+            perf_csv_path = None
+            if perf_enabled and perf_output and perf_output.exists():
+                perf_metrics = self.parse_perf_csv(perf_output)
+                perf_csv_path = str(perf_output)
+
+            return RunResult(
+                status=status,
+                duration_sec=duration,
+                exit_code=return_code,
+                stdout=stdout_text or "",
+                stderr=stderr_text or "",
+                checksum=checksum,
+                kernel_timings=kernel_timings,
+                e2e_timings=e2e_timings,
+                init_timings=init_timings,
+                parallel_task_timing=parallel_task_timing,
+                perf_metrics=perf_metrics,
+                perf_csv_path=perf_csv_path,
+            )
+        except subprocess.TimeoutExpired as e:
+            duration = time.time() - start
+            timeout_stdout = to_text(e.stdout)
+            timeout_stderr = to_text(e.stderr)
+            timeout_note = f"Execution timed out after {timeout} seconds"
+
+            if proc is not None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                except Exception:
+                    pass
+
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+
+                try:
+                    collected_stdout, collected_stderr = proc.communicate(timeout=2)
+                    if collected_stdout:
+                        timeout_stdout = to_text(collected_stdout)
+                    if collected_stderr:
+                        timeout_stderr = to_text(collected_stderr)
+                except subprocess.TimeoutExpired:
+                    pass
+                except Exception:
+                    pass
+
             self._cleanup_port()
             time.sleep(0.5)
-        return result
+
+            if log_file:
+                write_run_log(
+                    duration=duration,
+                    exit_code=124,
+                    stdout_text=timeout_stdout,
+                    stderr_text=f"{timeout_stderr}\n{timeout_note}".strip(),
+                    timed_out=True,
+                    note=timeout_note,
+                )
+                self.console.print(f"[dim]  Log: {log_file}[/]")
+            return RunResult(
+                status=Status.TIMEOUT,
+                duration_sec=duration,
+                exit_code=124,
+                stdout=timeout_stdout,
+                stderr=f"{timeout_stderr}\n{timeout_note}".strip(),
+            )
+        except Exception as e:
+            duration = time.time() - start
+            if log_file:
+                write_run_log(
+                    duration=duration,
+                    exit_code=-1,
+                    stdout_text="",
+                    stderr_text=str(e),
+                    note="Runner exception",
+                )
+                self.console.print(f"[dim]  Log: {log_file}[/]")
+            return RunResult(
+                status=Status.FAIL,
+                duration_sec=duration,
+                exit_code=-1,
+                stdout="",
+                stderr=str(e),
+            )
 
     def extract_checksum(self, output: str) -> Optional[str]:
         """Extract checksum/result from benchmark output.
@@ -2019,11 +2230,6 @@ class BenchmarkRunner:
             artifacts.arts_metadata_mlir = str(mlir)
             break
 
-        # Find arts.cfg (ARTS runtime configuration)
-        arts_cfg = bench_path / "arts.cfg"
-        if arts_cfg.exists():
-            artifacts.arts_config = str(arts_cfg)
-
         # Collect counter files
         if counters_dir.exists():
             artifacts.counters_dir = str(counters_dir)
@@ -2039,17 +2245,12 @@ class BenchmarkRunner:
         size: str = DEFAULT_SIZE,
         timeout: int = DEFAULT_TIMEOUT,
         verify: bool = True,
-        arts_config: Optional[Path] = None,
         threads_override: Optional[int] = None,
         nodes_override: Optional[int] = None,
-        launcher_override: Optional[str] = None,
-        omp_threads_override: Optional[int] = None,
-        counter_dir: Optional[Path] = None,
         compile_args: Optional[str] = None,
         phase_callback: Optional[Callable[[Phase], None]] = None,
         partial_results: Optional[Dict[str, Any]] = None,
         perf_enabled: bool = False,
-        perf_interval: float = 0.1,
         run_number: int = 1,
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
@@ -2064,29 +2265,17 @@ class BenchmarkRunner:
         """
         bench_path = self.benchmarks_dir / name
 
-        # Determine effective config template.
-        effective_config = _resolve_effective_arts_config(bench_path, arts_config)
+        desired_threads = threads_override if threads_override is not None else 1
+        desired_nodes = nodes_override if nodes_override is not None else 1
 
-        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
-        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
-        base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
-
-        desired_threads = threads_override if threads_override is not None else base_threads
-        desired_nodes = nodes_override if nodes_override is not None else base_nodes
-        desired_launcher = launcher_override if launcher_override is not None else base_launcher
-
-        # Compute config early (needed by artifact_manager)
-        actual_omp_threads = (
-            omp_threads_override if omp_threads_override is not None else desired_threads
-        )
         config = BenchmarkConfig(
             arts_threads=desired_threads,
             arts_nodes=desired_nodes,
-            omp_threads=actual_omp_threads,
-            launcher=desired_launcher,
+            omp_threads=desired_threads,
+            launcher="local",
         )
         _validate_thread_network_topology(
-            effective_config, desired_threads, desired_nodes, name
+            desired_threads, desired_nodes, name
         )
         am = self.artifact_manager  # shorthand (may be None)
 
@@ -2097,47 +2286,236 @@ class BenchmarkRunner:
                 "Benchmark disabled for multi-node (has .disable-multinode marker)",
                 config,
             )
-        run_counter_dir: Optional[Path] = None
-        if am:
-            run_counter_dir = am.get_counter_dir(name, config, run_number)
-        elif counter_dir is not None:
-            run_counter_dir = counter_dir
-
-        # Generate config with overrides only if values actually differ from base
-        need_generated = False
-        if threads_override is not None and threads_override != base_threads:
-            need_generated = True
-        if nodes_override is not None and nodes_override != base_nodes:
-            need_generated = True
-        if launcher_override is not None and launcher_override != base_launcher:
-            need_generated = True
-        if run_counter_dir is not None:
-            need_generated = True
-
-        effective_arts_cfg: Path
-        if need_generated:
-            effective_arts_cfg = generate_arts_config(
-                effective_config,
-                desired_threads,
-                run_counter_dir,
-                desired_launcher,
-                nodes_override,
-                benchmark_name=name,
-            )
-        else:
-            effective_arts_cfg = effective_config
 
         # Clean before building to avoid stale artifacts
         if self.clean:
             self.clean_benchmark(name)
 
-        build_output_dir: Optional[Path] = None
-        if am:
-            # Build directly in artifacts directory to keep outputs self-contained.
-            build_output_dir = am.get_artifacts_dir(name, config)
-            build_output_dir.mkdir(parents=True, exist_ok=True)
+        # Build ARTS version
+        if phase_callback:
+            phase_callback(Phase.BUILD_ARTS)
+        build_arts = self.build_benchmark(
+            name, size, "arts", worker_count=desired_threads,
+            node_count=desired_nodes, cflags=cflags, compile_args=compile_args)
+        if partial_results is not None:
+            partial_results["build_arts"] = build_arts
 
-        execution = self._create_execution_context(
+        # Build OpenMP version (single-node reference for correctness).
+        if phase_callback:
+            phase_callback(Phase.BUILD_OMP)
+        build_omp = self.build_benchmark(name, size, "openmp", cflags=cflags)
+        if partial_results is not None:
+            partial_results["build_omp"] = build_omp
+
+        # Copy build artifacts via artifact manager (ONCE per config)
+        artifact_paths: Dict[str, Optional[str]] = {}
+        if am:
+            artifact_paths = am.copy_build_artifacts(
+                bench_path, name, config)
+
+        # Generate arts.cfg for this config
+        arts_cfg_path: Optional[Path] = None
+        if am:
+            arts_cfg_path = _generate_arts_config(
+                desired_threads, desired_nodes,
+                am.get_artifacts_dir(name, config) / "arts.cfg",
+            )
+
+        # Setup log files
+        arts_log: Optional[Path] = None
+        omp_log: Optional[Path] = None
+        if am:
+            run_dir = am.get_run_dir(name, config, run_number)
+            arts_log = run_dir / "arts.log"
+            omp_log = run_dir / "omp.log"
+        else:
+            logs_dir = bench_path / "logs"
+            arts_log = logs_dir / "arts.log"
+            omp_log = logs_dir / "omp.log"
+
+        run_args = self.get_run_args(bench_path, size)
+        verify_tolerance = self.get_verify_tolerance(bench_path)
+
+        # Ensure init timing is reported and align OMP wait/spin policy with ARTS.
+        common_env: Dict[str, str] = {}
+        if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
+            common_env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
+
+        # Setup perf output paths
+        perf_output_dir: Optional[Path] = None
+        arts_perf_name = omp_perf_name = None
+        arts_perf_main = arts_perf_temp = omp_perf_main = omp_perf_temp = None
+
+        if perf_enabled and am:
+            # Perf CSVs land inside the run directory
+            perf_output_dir = am.get_perf_dir(name, config, run_number)
+            arts_perf_name = "arts_cache.csv"
+            omp_perf_name = "omp_cache.csv"
+        elif perf_enabled:
+            effective_perf_dir = perf_dir or Path("./perfs")
+            if run_timestamp:
+                perf_timestamp_dir = effective_perf_dir / run_timestamp
+                perf_timestamp_dir.mkdir(parents=True, exist_ok=True)
+                perf_output_dir = perf_timestamp_dir
+                arts_perf_main = perf_timestamp_dir / f"{safe_bench_name}_arts.csv"
+                arts_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_arts_{run_number}.csv"
+                omp_perf_main = perf_timestamp_dir / f"{safe_bench_name}_omp.csv"
+                omp_perf_temp = perf_timestamp_dir / f"_temp_{safe_bench_name}_omp_{run_number}.csv"
+                arts_perf_name = arts_perf_temp.name
+                omp_perf_name = omp_perf_temp.name
+            else:
+                effective_perf_dir.mkdir(parents=True, exist_ok=True)
+                perf_output_dir = effective_perf_dir
+
+        # Clean up stale ARTS port before run
+        self._cleanup_port()
+
+        # Run ARTS version
+        if phase_callback:
+            phase_callback(Phase.RUN_ARTS)
+        if build_arts.status == Status.PASS and build_arts.executable:
+            run_arts = self.run_benchmark(
+                build_arts.executable,
+                timeout,
+                env=common_env,
+                launcher="local",
+                node_count=desired_nodes,
+                threads=desired_threads,
+                args=run_args,
+                log_file=arts_log,
+                perf_enabled=perf_enabled,
+                perf_output_name=arts_perf_name or "perf_cache_arts.csv",
+                perf_output_dir=perf_output_dir,
+                arts_config=arts_cfg_path,
+            )
+            # Append temp perf data to main CSV (legacy path, not used with artifact_manager)
+            if perf_enabled and arts_perf_temp and arts_perf_main:
+                append_perf_to_main_csv(arts_perf_temp, arts_perf_main, run_number)
+        else:
+            run_arts = RunResult(
+                status=Status.SKIP, duration_sec=0.0,
+                exit_code=-1, stdout="", stderr="Build failed",
+            )
+
+        # Parse counter JSON from ARTS default counter_folder (./counters relative to executable)
+        if build_arts.executable:
+            exe_counter_dir = Path(build_arts.executable).parent / "counters"
+            if exe_counter_dir.exists():
+                init_sec, e2e_sec = parse_counter_json(exe_counter_dir)
+                run_arts.counter_init_sec = init_sec
+                run_arts.counter_e2e_sec = e2e_sec
+
+        if partial_results is not None:
+            partial_results["run_arts"] = run_arts
+
+        # Run OpenMP version
+        if phase_callback:
+            phase_callback(Phase.RUN_OMP)
+        if build_omp.status == Status.PASS and build_omp.executable:
+            omp_env = dict(common_env)
+            omp_env["OMP_NUM_THREADS"] = str(desired_threads)
+            if "OMP_WAIT_POLICY" not in os.environ:
+                omp_env["OMP_WAIT_POLICY"] = "ACTIVE"
+            run_omp = self.run_benchmark(
+                build_omp.executable,
+                timeout,
+                env=omp_env,
+                args=run_args,
+                log_file=omp_log,
+                perf_enabled=perf_enabled,
+                perf_output_name=omp_perf_name or "perf_cache_omp.csv",
+                perf_output_dir=perf_output_dir,
+            )
+            # Append temp perf data to main CSV (legacy path)
+            if perf_enabled and omp_perf_temp and omp_perf_main:
+                append_perf_to_main_csv(omp_perf_temp, omp_perf_main, run_number)
+        else:
+            run_omp = RunResult(
+                status=Status.SKIP, duration_sec=0.0,
+                exit_code=-1, stdout="", stderr="Build failed",
+            )
+
+        # Calculate timing
+        timing = self.calculate_timing(
+            run_arts, run_omp, report_speedup=(desired_nodes == 1)
+        )
+
+        # Verify correctness
+        if verify:
+            verification = self.verify_correctness(
+                run_arts, run_omp, tolerance=verify_tolerance
+            )
+        else:
+            verification = VerificationResult(
+                correct=False,
+                arts_checksum=run_arts.checksum,
+                omp_checksum=run_omp.checksum,
+                tolerance_used=0.0,
+                note="Verification disabled",
+            )
+
+        # Collect artifacts
+        artifacts = self.collect_artifacts(bench_path)
+
+        # Update artifacts with experiment directory paths when using artifact_manager
+        has_counters = False
+        has_perf = False
+        if am:
+            run_dir = am.get_run_dir(name, config, run_number)
+            artifacts_dir = am.get_artifacts_dir(name, config)
+            for key, attr in [
+                ("carts_metadata", "carts_metadata"),
+                ("arts_metadata_mlir", "arts_metadata_mlir"),
+                ("executable_arts", "executable_arts"),
+                ("executable_omp", "executable_omp"),
+            ]:
+                if artifact_paths.get(key):
+                    setattr(artifacts, attr, artifact_paths[key])
+            artifacts.build_dir = str(artifacts_dir)
+            artifacts.run_dir = str(run_dir)
+            artifacts.arts_log = str(arts_log) if arts_log else None
+            artifacts.omp_log = str(omp_log) if omp_log else None
+
+            # Counter files (ARTS writes to ./counters/ relative to executable)
+            exe_counters = bench_path / "counters"
+            if exe_counters.exists():
+                counter_files = sorted(exe_counters.glob("*.json"))
+                if counter_files:
+                    has_counters = True
+                    am_counter_dir = am.get_counter_dir(name, config, run_number)
+                    am_counter_dir.mkdir(parents=True, exist_ok=True)
+                    for cf in counter_files:
+                        shutil.copy2(cf, am_counter_dir / cf.name)
+                    artifacts.counters_dir = str(am_counter_dir)
+                    artifacts.counter_files = [str(am_counter_dir / cf.name) for cf in counter_files]
+                    shutil.rmtree(exe_counters, ignore_errors=True)
+
+            # Perf
+            if perf_enabled and perf_output_dir and perf_output_dir.exists():
+                if list(perf_output_dir.glob("*.csv")):
+                    has_perf = True
+
+            am.record_run(name, config, run_number,
+                          has_counters=has_counters, has_perf=has_perf)
+
+            # Save run_config.json per-run
+            am.save_run_config(
+                name, config, run_number,
+                arts_cfg_path=arts_cfg_path,
+                env_overrides=common_env if common_env else None,
+                size=size,
+                cflags=cflags or None,
+                compile_args=compile_args or None,
+            )
+        else:
+            if arts_log is not None:
+                artifacts.arts_log = str(arts_log)
+            if omp_log is not None:
+                artifacts.omp_log = str(omp_log)
+
+        total_duration = time.time() - start_time
+
+        return BenchmarkResult(
             name=name,
             size=size,
             bench_path=bench_path,
@@ -2177,15 +2555,10 @@ class BenchmarkRunner:
         size: str = DEFAULT_SIZE,
         timeout: int = DEFAULT_TIMEOUT,
         verify: bool = True,
-        arts_config: Optional[Path] = None,
         threads_override: Optional[int] = None,
         nodes_override: Optional[int] = None,
-        launcher_override: Optional[str] = None,
-        omp_threads_override: Optional[int] = None,
-        counter_dir: Optional[Path] = None,
         compile_args: Optional[str] = None,
         perf_enabled: bool = False,
-        perf_interval: float = 0.1,
         runs: int = 1,
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
@@ -2196,33 +2569,6 @@ class BenchmarkRunner:
         results_dict: Dict[str, List[BenchmarkResult]] = {}
         results_list: List[BenchmarkResult] = []
         start_time = time.time()
-
-        if self.quiet:
-            # Quiet mode - no live display
-            for bench in benchmarks:
-                for run_num in range(1, runs + 1):
-                    result = self.run_single(
-                        bench,
-                        size,
-                        timeout,
-                        verify,
-                        arts_config,
-                        threads_override,
-                        nodes_override,
-                        launcher_override,
-                        omp_threads_override,
-                        counter_dir,
-                        compile_args,
-                        perf_enabled=perf_enabled,
-                        perf_interval=perf_interval,
-                        run_number=run_num,
-                        run_timestamp=run_timestamp,
-                        perf_dir=perf_dir,
-                        cflags=cflags,
-                    )
-                    results_list.append(result)
-            self.results = results_list
-            return results_list
 
         # Live display mode - show table that updates as benchmarks complete
         # Track current phase for live display updates
@@ -2260,17 +2606,12 @@ class BenchmarkRunner:
                             size,
                             timeout,
                             verify,
-                            arts_config,
                             threads_override,
                             nodes_override,
-                            launcher_override,
-                            omp_threads_override,
-                            counter_dir,
                             compile_args,
                             phase_callback,
                             current_partial[0],
                             perf_enabled=perf_enabled,
-                            perf_interval=perf_interval,
                             run_number=run_num,
                             run_timestamp=run_timestamp,
                             perf_dir=perf_dir,
@@ -2301,7 +2642,6 @@ class BenchmarkRunner:
         timeout: int,
         n_workers: int,
         verify: bool,
-        arts_config: Optional[Path],
     ) -> List[BenchmarkResult]:
         """Execute benchmarks in parallel using process pool."""
         results_dict: Dict[str, BenchmarkResult] = {}
@@ -2309,37 +2649,6 @@ class BenchmarkRunner:
         start_time = time.time()
         # All benchmarks start as in-progress
         in_progress: set = set(benchmarks)
-
-        if self.quiet:
-            # Quiet mode - no live display
-            with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                futures = {
-                    executor.submit(
-                        _run_single_worker,
-                        str(self.benchmarks_dir),
-                        bench,
-                        size,
-                        timeout,
-                        verify,
-                        str(arts_config) if arts_config else None,
-                        clean=self.clean,
-                    ): bench
-                    for bench in benchmarks
-                }
-
-                for future in as_completed(futures):
-                    bench = futures[future]
-                    try:
-                        result = future.result()
-                        results_list.append(result)
-                    except Exception as e:
-                        self.console.print(
-                            f"[red]Error running {bench}:[/] {e}")
-                        results_list.append(
-                            self._make_error_result(bench, size, str(e)))
-
-            self.results = results_list
-            return results_list
 
         # Live display mode - show table that updates as benchmarks complete
         with Live(
@@ -2357,7 +2666,6 @@ class BenchmarkRunner:
                         size,
                         timeout,
                         verify,
-                        str(arts_config) if arts_config else None,
                         clean=self.clean,
                     ): bench
                     for bench in benchmarks
@@ -2614,29 +2922,21 @@ def _run_single_worker(
     size: str,
     timeout: int,
     verify: bool,
-    arts_config: Optional[str],
     threads_override: Optional[int] = None,
     nodes_override: Optional[int] = None,
-    launcher_override: Optional[str] = None,
-    omp_threads_override: Optional[int] = None,
-    counter_dir: Optional[str] = None,
     clean: bool = True,
 ) -> BenchmarkResult:
     """Worker function for parallel benchmark execution."""
     runner = BenchmarkRunner(
-        Console(force_terminal=False), quiet=True, clean=clean)
+        Console(force_terminal=False), clean=clean)
     runner.benchmarks_dir = Path(benchmarks_dir)
     return runner.run_single(
         name,
         size,
         timeout,
         verify,
-        Path(arts_config) if arts_config else None,
         threads_override,
         nodes_override,
-        launcher_override,
-        omp_threads_override,
-        Path(counter_dir) if counter_dir else None,
     )
 
 
@@ -3326,15 +3626,10 @@ def export_json(
     threads_list: Optional[List[int]] = None,
     nodes_list: Optional[List[int]] = None,
     cflags: Optional[str] = None,
-    launcher: Optional[str] = None,
-    weak_scaling: bool = False,
-    base_size: Optional[int] = None,
     runs_per_config: int = 1,
     artifacts_directory: Optional[str] = None,
     fixed_threads: Optional[int] = None,
     fixed_nodes: Optional[int] = None,
-    omp_threads_override: Optional[int] = None,
-    arts_config_override: Optional[str] = None,
 ) -> None:
     """Export results to JSON file with comprehensive reproducibility metadata."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3365,19 +3660,8 @@ def export_json(
         metadata["fixed_threads"] = fixed_threads
     if cflags:
         metadata["cflags"] = cflags
-    if launcher:
-        metadata["launcher"] = launcher
     if fixed_nodes is not None:
         metadata["fixed_nodes"] = fixed_nodes
-    if omp_threads_override is not None:
-        metadata["omp_threads_override"] = omp_threads_override
-    if arts_config_override is not None:
-        metadata["arts_config_override"] = arts_config_override
-    if weak_scaling:
-        metadata["weak_scaling"] = {
-            "enabled": True,
-            "base_size": base_size,
-        }
     if artifacts_directory:
         metadata["artifacts_directory"] = artifacts_directory
 
@@ -3617,10 +3901,8 @@ KNOWN_STEP_KEYS = {
     "name",
     "benchmarks",
     "profile",
-    "debug",
     "runs",
     "perf",
-    "perf_interval",
     "size",
     "threads",
     "nodes",
@@ -3628,8 +3910,6 @@ KNOWN_STEP_KEYS = {
     "cflags",
     "compile_args",
     "exclude_nodes",
-    "arts_config",
-    "launcher",
     "description",
 }
 
@@ -3659,9 +3939,7 @@ def _make_experiment_step(
             return str(p.resolve())
 
         search_dirs: List[Path] = []
-        if field == "arts_config":
-            search_dirs = [CONFIGS_DIR]
-        elif field == "profile":
+        if field == "profile":
             search_dirs = [PROFILES_DIR]
 
         for search_dir in search_dirs:
@@ -3681,10 +3959,8 @@ def _make_experiment_step(
         name=step_name,
         benchmarks=_parse_step_benchmarks(normalized.get("benchmarks")),
         profile=_resolve_path(normalized.get("profile"), "profile"),
-        debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
         perf=_parse_bool_flag(normalized.get("perf", False)),
-        perf_interval=float(normalized.get("perf_interval", 0.1) or 0.1),
         size=parse_size(str(normalized["size"]), f"step '{step_name}' size")
         if normalized.get("size") is not None else None,
         threads=str(normalized["threads"]) if normalized.get("threads") is not None else None,
@@ -3693,16 +3969,9 @@ def _make_experiment_step(
         cflags=str(normalized["cflags"]) if normalized.get("cflags") is not None else None,
         compile_args=str(normalized["compile_args"]) if normalized.get("compile_args") is not None else None,
         exclude_nodes=str(normalized["exclude_nodes"]) if normalized.get("exclude_nodes") is not None else None,
-        arts_config=_resolve_path(normalized.get("arts_config"), "arts_config"),
-        launcher=str(normalized["launcher"]) if normalized.get("launcher") is not None else None,
     )
     setattr(step, "_has_runs", "runs" in normalized and normalized.get("runs") is not None)
     setattr(step, "_has_perf", "perf" in normalized and normalized.get("perf") is not None)
-    setattr(
-        step,
-        "_has_perf_interval",
-        "perf_interval" in normalized and normalized.get("perf_interval") is not None,
-    )
     setattr(step, "_has_size", "size" in normalized and normalized.get("size") is not None)
     setattr(step, "_has_threads", "threads" in normalized and normalized.get("threads") is not None)
     setattr(step, "_has_nodes", "nodes" in normalized and normalized.get("nodes") is not None)
@@ -3720,11 +3989,6 @@ def _make_experiment_step(
     )
     setattr(
         step,
-        "_has_arts_config",
-        "arts_config" in normalized and normalized.get("arts_config") is not None,
-    )
-    setattr(
-        step,
         "_has_profile",
         "profile" in normalized and normalized.get("profile") is not None,
     )
@@ -3733,17 +3997,11 @@ def _make_experiment_step(
         "_has_benchmarks",
         "benchmarks" in normalized and normalized.get("benchmarks") is not None,
     )
-    setattr(
-        step,
-        "_has_launcher",
-        "launcher" in normalized and normalized.get("launcher") is not None,
-    )
     return step
 
 
 def _rebuild_arts(
     console: Console,
-    debug: int = 0,
     profile: Path = PROFILES_DIR / "profile-none.cfg",
 ) -> None:
     """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
@@ -3754,13 +4012,9 @@ def _rebuild_arts(
     cmd = [
         "carts", "build", "--arts",
         f"--profile={profile}",
-        f"--debug={debug}",
     ]
 
-    details: List[str] = []
-    if debug > 0:
-        details.append(f"debug={debug}")
-    details.append(f"profile={profile}")
+    details: List[str] = [f"profile={profile}"]
 
     detail_text = ", ".join(details)
     print_warning(f"Rebuilding ARTS ({detail_text})")
@@ -3834,8 +4088,17 @@ def _load_experiment(
     return steps
 
 
-def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
-    """Parse repeatable --step options into ExperimentStep objects."""
+def _parse_inline_steps(
+    step_args: Optional[List[str]],
+    configs_dir: Optional[Path] = None,
+) -> List[ExperimentStep]:
+    """Parse repeatable --step options into ExperimentStep objects.
+
+    Supports three formats:
+    - '@file.json' or '@name': load experiment JSON file
+    - '{...}': inline JSON object
+    - 'name:key=value,...': inline key=value definition
+    """
     if not step_args:
         return []
 
@@ -3843,6 +4106,18 @@ def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
     for idx, raw_arg in enumerate(step_args, start=1):
         raw = raw_arg.strip()
         if not raw:
+            continue
+
+        # @file.json or @experiment_name: delegate to _load_experiment
+        if raw.startswith("@"):
+            experiment_ref = raw[1:].strip()
+            if not experiment_ref:
+                raise ValueError(f"--step #{idx}: empty '@' reference")
+            file_steps = _load_experiment(
+                experiment_ref,
+                configs_dir or CONFIGS_DIR,
+            )
+            steps.extend(file_steps)
             continue
 
         if raw.startswith("{"):
@@ -3888,7 +4163,7 @@ def _parse_inline_steps(step_args: Optional[List[str]]) -> List[ExperimentStep]:
 def _parse_nodes_spec(spec: str) -> List[int]:
     """Parse node spec with support for both thread-style and SLURM-style ranges."""
     try:
-        return parse_threads(spec)
+        return parse_workers(spec)
     except ValueError:
         return parse_node_spec(spec)
 
@@ -3908,91 +4183,67 @@ def _run_step(
     size: str,
     timeout: int,
     verify: bool,
-    arts_config: Optional[Path],
-    threads_list: Optional[List[int]],
+    workers_list: Optional[List[int]],
     node_counts: Optional[List[int]],
-    launcher: Optional[str],
-    omp_threads: Optional[int],
-    weak_scaling: bool,
-    base_size: Optional[int],
     runs: int,
     compile_args: Optional[str],
     perf: bool,
-    perf_interval: float,
     run_timestamp: str,
     cflags: Optional[str],
-    quiet: bool,
 ) -> List[BenchmarkResult]:
     """Execute one resolved step using existing run dispatch rules."""
-    has_thread_sweep = bool(threads_list and len(threads_list) > 1)
+    has_worker_sweep = bool(workers_list and len(workers_list) > 1)
     has_node_sweep = bool(node_counts and len(node_counts) > 1)
-    has_sweep = has_thread_sweep or has_node_sweep
+    has_sweep = has_worker_sweep or has_node_sweep
 
-    threads_override: Optional[int] = None
+    workers_override: Optional[int] = None
     nodes_override: Optional[int] = None
-    if not has_thread_sweep and threads_list and len(threads_list) == 1:
-        threads_override = int(threads_list[0])
+    if not has_worker_sweep and workers_list and len(workers_list) == 1:
+        workers_override = int(workers_list[0])
     if not has_node_sweep and node_counts and len(node_counts) == 1:
         nodes_override = int(node_counts[0])
 
     if len(bench_list) == 1 and has_sweep:
-        effective_threads = threads_list if threads_list else [None]
+        effective_workers = workers_list if workers_list else [None]
         effective_nodes = node_counts if node_counts else [None]
         return runner.run_with_thread_sweep(
             bench_list[0],
             size,
-            effective_threads,
-            arts_config,
+            effective_workers,
             cflags or "",
-            None,  # counter_dir (auto-managed by ArtifactManager)
             timeout,
-            omp_threads,
-            launcher,
             node_counts=effective_nodes,
-            weak_scaling=weak_scaling,
-            base_size=base_size,
             runs=runs,
             compile_args=compile_args,
             perf_enabled=perf,
-            perf_interval=perf_interval,
         )
 
     if len(bench_list) > 1 and has_sweep:
-        if weak_scaling:
-            raise ValueError(
-                "`--weak-scaling` is only supported for single-benchmark sweeps."
-            )
-
-        effective_threads = threads_list if threads_list else [None]
+        effective_workers = workers_list if workers_list else [None]
         effective_nodes = node_counts if node_counts else [None]
-        total_configs = len(effective_threads) * len(effective_nodes)
+        total_configs = len(effective_workers) * len(effective_nodes)
         results: List[BenchmarkResult] = []
         config_idx = 0
 
         for nodes_value in effective_nodes:
-            for threads_value in effective_threads:
+            for workers_value in effective_workers:
                 config_idx += 1
-                if not quiet:
-                    threads_label = threads_value if threads_value is not None else "cfg"
-                    nodes_label = nodes_value if nodes_value is not None else "cfg"
-                    console.print(
-                        f"[bold]Sweep config {config_idx}/{total_configs}:[/] "
-                        f"threads={threads_label}, nodes={nodes_label}"
-                    )
+                workers_label = workers_value if workers_value is not None else "cfg"
+                nodes_label = nodes_value if nodes_value is not None else "cfg"
+                console.print(
+                    f"[bold]Sweep config {config_idx}/{total_configs}:[/] "
+                    f"workers={workers_label}, nodes={nodes_label}"
+                )
 
                 config_results = runner.run_all(
                     bench_list,
                     size=size,
                     timeout=timeout,
                     verify=verify,
-                    arts_config=arts_config,
-                    threads_override=threads_value,
+                    threads_override=workers_value,
                     nodes_override=nodes_value,
-                    launcher_override=launcher,
-                    omp_threads_override=omp_threads,
                     compile_args=compile_args,
                     perf_enabled=perf,
-                    perf_interval=perf_interval,
                     runs=runs,
                     run_timestamp=run_timestamp,
                     cflags=cflags or "",
@@ -4005,14 +4256,10 @@ def _run_step(
         size=size,
         timeout=timeout,
         verify=verify,
-        arts_config=arts_config,
-        threads_override=threads_override,
+        threads_override=workers_override,
         nodes_override=nodes_override,
-        launcher_override=launcher,
-        omp_threads_override=omp_threads,
         compile_args=compile_args,
         perf_enabled=perf,
-        perf_interval=perf_interval,
         runs=runs,
         run_timestamp=run_timestamp,
         cflags=cflags or "",
@@ -4027,15 +4274,12 @@ def _run_step_slurm(
     verify: bool,
     partition: Optional[str],
     time_limit: str,
-    arts_config: Optional[Path],
     threads_list: Optional[List[int]],
     results_dir: Path,
-    verbose: bool,
     cflags: Optional[str],
     compile_args: Optional[str],
     exclude_nodes: Optional[str],
     perf: bool,
-    perf_interval: float,
     artifact_manager: Optional[ArtifactManager] = None,
     step_name: Optional[str] = None,
     max_jobs: int = 0,
@@ -4048,7 +4292,7 @@ def _run_step_slurm(
     nodes_arg = ",".join(str(n) for n in node_counts)
     thread_values = threads_list if threads_list else [None]
 
-    for slurm_threads in thread_values:
+    for slurm_workers in thread_values:
         _execute_slurm_batch(
             benchmarks=bench_list,
             nodes=nodes_arg,
@@ -4058,19 +4302,16 @@ def _run_step_slurm(
             partition=partition,
             time_limit=time_limit,
             account=None,
-            arts_config=arts_config,
-            threads=int(slurm_threads) if slurm_threads is not None else None,
+            workers=int(slurm_workers) if slurm_workers is not None else None,
             output_dir=results_dir,
             suite=None,
             dry_run=False,
             no_build=False,
-            verbose=verbose,
             cflags=cflags,
             compile_args=compile_args,
             gdb=False,
             profile=None,
             perf=perf,
-            perf_interval=perf_interval,
             exclude_nodes=exclude_nodes,
             exclude=None,
             max_jobs=max_jobs,
@@ -4196,64 +4437,29 @@ def run(
                              "-s", help=SIZE_HELP),
     timeout: int = typer.Option(
         DEFAULT_TIMEOUT, "--timeout", "-t", help="Execution timeout in seconds"),
-    no_verify: bool = typer.Option(
-        False, "--no-verify", help="Disable correctness verification"),
-    no_clean: bool = typer.Option(
-        False, "--no-clean", help="Skip cleaning before build (faster, but may use stale artifacts)"),
-    arts_config: Optional[Path] = typer.Option(
-        None, "--arts-config", help="Custom arts.cfg file"),
+    skip_verify: bool = typer.Option(
+        False, "--skip-verify", help="Skip correctness verification"),
+    skip_clean: bool = typer.Option(
+        False, "--skip-clean", help="Skip cleaning before build (faster, but may use stale artifacts)"),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Verbose output"),
-    quiet: bool = typer.Option(
-        False, "--quiet", "-q", help="Minimal output (CI mode)"),
-    trace: bool = typer.Option(
-        False, "--trace", help="Show benchmark output (kernel timing and checksum)"),
-    threads: Optional[str] = typer.Option(
-        None, "--threads", help="Thread counts: '1,2,4,8' or '1:16:2' for thread sweep"),
-    omp_threads: Optional[int] = typer.Option(
-        None, "--omp-threads", help="OpenMP thread count (default: same as ARTS threads)"),
-    launcher: Optional[str] = typer.Option(
-        None, "--launcher", "-l", help="Override ARTS launcher: ssh, slurm, lsf, local (default: from arts.cfg)"),
+    workers: Optional[str] = typer.Option(
+        None, "--workers", help="Worker threads per node: '1,2,4,8' or '1:16:2' for sweep"),
     nodes: Optional[str] = typer.Option(
         None, "--nodes", "-n", help="Node counts: single (2), list (1,2,4), range (1:8:2)"),
-    weak_scaling: bool = typer.Option(
-        False, "--weak-scaling", help="Enable weak scaling: auto-scale problem size with parallelism"),
-    base_size: Optional[int] = typer.Option(
-        None, "--base-size", help="Base problem size for weak scaling (at base parallelism)"),
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
     compile_args: Optional[str] = typer.Option(
         None, "--compile-args", help="Extra carts compile args (e.g., '--partition-fallback=fine')"),
-    debug_level: int = typer.Option(
-        0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=verbose console output"),
-    profile: Optional[Path] = typer.Option(
-        None, "--profile",
-        help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     perf: bool = typer.Option(
         False, "--perf", help="Enable perf stat profiling for cache metrics"),
-    perf_interval: float = typer.Option(
-        0.1, "--perf-interval", help="Perf stat sampling interval in seconds"),
     results_dir: Optional[Path] = typer.Option(
-        None, "--results-dir", help="Base directory for experiment output (default: carts-benchmarks/results/)"),
-    experiment: Optional[str] = typer.Option(
-        None, "--experiment", "-x",
-        help="Experiment definition name/path from configs/experiments/*.json"),
+        None, "--results-dir", help="Base directory for experiment output (default: ./results/)"),
     step: Optional[List[str]] = typer.Option(
         None, "--step",
-        help="Inline step: 'name:key=value,...' (repeatable). Example: production:runs=5,perf"),
-    slurm: bool = typer.Option(
-        False, "--slurm", help="Submit as SLURM batch jobs instead of local execution"),
-    partition: Optional[str] = typer.Option(
-        None, "--partition", "-p", help="SLURM partition (only with --slurm)"),
-    time_limit: str = typer.Option(
-        "01:00:00", "--time-limit", help="SLURM time limit per job (only with --slurm)"),
-    exclude_nodes: Optional[str] = typer.Option(
-        None, "--exclude-nodes", "-X",
-        help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
+        help="Step definition (repeatable). Inline: 'name:key=value,...' or JSON file: '@file.json'"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -4271,15 +4477,15 @@ def run(
         print_error(str(e))
         raise typer.Exit(2)
 
-    verify = not no_verify
-    clean = not no_clean
+    verify = not skip_verify
+    clean = not skip_clean
     size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Resolve results_dir — default to carts-benchmarks/results/
+    # Resolve results_dir — default to CWD/results/
     if results_dir is None:
-        results_dir = get_benchmarks_dir() / "results"
+        results_dir = Path("results")
     results_dir = Path(results_dir).resolve()
 
     # Create ArtifactManager — every run gets a self-contained timestamped directory
@@ -4287,13 +4493,13 @@ def run(
 
     # Create runner with artifact manager
     runner = BenchmarkRunner(
-        console, verbose=verbose, quiet=quiet, trace=trace, clean=clean,
-        debug=debug_level, artifact_manager=am,
+        console, clean=clean,
+        artifact_manager=am,
     )
 
     # Parse thread/node specification (base CLI config)
     try:
-        base_threads_list = parse_threads(threads) if threads else None
+        base_workers_list = parse_workers(workers) if workers else None
         base_node_counts = _parse_nodes_spec(nodes) if nodes else None
     except ValueError as e:
         print_error(str(e))
@@ -4302,7 +4508,7 @@ def run(
     # Discover or use provided benchmarks
     requested_benchmarks, dropped_blank = normalize_requested_benchmarks(
         benchmarks)
-    if dropped_blank and not quiet:
+    if dropped_blank:
         print_warning(
             "Ignoring blank benchmark arguments. "
             "If you copied a multiline command, ensure each '\\' is immediately before a newline.")
@@ -4332,44 +4538,42 @@ def run(
         raise typer.Exit(1)
 
     # Resolve experiment steps
-    if experiment and step:
-        print_error("Use either --experiment or --step, not both.")
-        raise typer.Exit(2)
-
+    explicit_step_mode = bool(step)
+    configs_dir = CONFIGS_DIR
     try:
-        steps, explicit_step_mode = _STEP_RESOLVER.load_steps(
-            experiment=experiment,
-            step_args=step,
-            size=size,
-            timeout=timeout,
-            runs=runs,
-            perf=perf,
-            perf_interval=perf_interval,
-            threads=threads,
-            nodes=nodes,
-            cflags=cflags,
-            compile_args=compile_args,
-            exclude_nodes=exclude_nodes,
-            arts_config=arts_config,
-            profile=profile,
-            launcher=launcher,
-        )
+        if step:
+            steps = _parse_inline_steps(step, configs_dir)
+        else:
+            implicit_step = ExperimentStep(
+                name="default",
+                runs=runs,
+                perf=perf,
+                size=size,
+                threads=workers,
+                nodes=nodes,
+                timeout=timeout,
+                cflags=cflags,
+                compile_args=compile_args,
+            )
+            setattr(implicit_step, "_has_runs", True)
+            setattr(implicit_step, "_has_perf", True)
+            setattr(implicit_step, "_has_size", True)
+            setattr(implicit_step, "_has_threads", workers is not None)
+            setattr(implicit_step, "_has_nodes", nodes is not None)
+            setattr(implicit_step, "_has_timeout", True)
+            setattr(implicit_step, "_has_cflags", cflags is not None)
+            setattr(implicit_step, "_has_compile_args", compile_args is not None)
+            setattr(implicit_step, "_has_benchmarks", False)
+            steps = [implicit_step]
     except ValueError as e:
         print_error(str(e))
         raise typer.Exit(1)
 
-    _STEP_RESOLVER.apply_cli_profile_override(
-        steps,
-        explicit_step_mode=explicit_step_mode,
-        profile=profile,
-        quiet=quiet,
-        print_warning=print_warning,
-    )
-    try:
-        _STEP_RESOLVER.validate_step_paths(steps)
-    except ValueError as e:
-        print_error(str(e))
-        raise typer.Exit(1)
+    # Validate resolved step paths from all entry paths (--step or implicit CLI).
+    for s in steps:
+        if s.profile and not Path(s.profile).exists():
+            print_error(f"Step '{s.name}': profile not found: {s.profile}")
+            raise typer.Exit(1)
 
     try:
         _STEP_RESOLVER.validate_step_name_collisions(steps)
@@ -4384,156 +4588,155 @@ def run(
     )
 
     # Reject simultaneous thread + node sweeps early (per-step checks also exist).
-    has_thread_sweep = bool(base_threads_list and len(base_threads_list) > 1)
+    has_worker_sweep = bool(base_workers_list and len(base_workers_list) > 1)
     has_node_sweep = bool(base_node_counts and len(base_node_counts) > 1)
-    if has_thread_sweep and has_node_sweep:
-        print_error("Cannot sweep both threads and nodes simultaneously.")
+    if has_worker_sweep and has_node_sweep:
+        print_error("Cannot sweep both workers and nodes simultaneously.")
         raise typer.Exit(2)
 
-    step_defaults = StepCliDefaults(
-        size=size,
-        timeout=timeout,
-        threads_spec=threads,
-        nodes_spec=nodes,
-        runs=runs,
-        perf=perf,
-        perf_interval=perf_interval,
-        cflags=cflags,
-        compile_args=compile_args,
-        exclude_nodes=exclude_nodes,
-        arts_config=arts_config,
-        launcher=launcher,
-        explicit_step_mode=explicit_step_mode,
-        size_from_cli=size_from_cli,
-    )
-
-    if slurm:
-        if weak_scaling:
-            print_error("--weak-scaling is not supported with --slurm.")
-            raise typer.Exit(2)
-
-        try:
-            _STEP_EXECUTOR.execute_slurm_steps(
-                steps=steps,
-                bench_list=bench_list,
-                defaults=step_defaults,
-                request=SlurmStepExecutionRequest(
-                    verify=verify,
-                    partition=partition,
-                    time_limit=time_limit,
-                    results_dir=results_dir,
-                    verbose=verbose,
-                    quiet=quiet,
-                    artifact_manager=am,
-                    max_jobs=max_jobs,
-                ),
-            )
-        except ValueError as e:
-            console.print(f"\n[red]Error:[/] {e}")
-            raise typer.Exit(1)
-        return
-
-    if exclude_nodes:
-        print_warning("Ignoring --exclude-nodes because --slurm is not enabled.")
-
     # Print header
-    if not quiet:
-        config_items = [f"size={effective_size_label}", f"timeout={timeout}s",
-                        f"verify={verify}", f"clean={clean}"]
-        if base_threads_list:
-            config_items.append(f"threads={threads}")
-        if launcher is not None:
-            config_items.append(f"launcher={launcher}")
-        if base_node_counts is not None:
-            config_items.append(f"nodes={nodes}")
-        if runs > 1:
-            config_items.append(f"runs={runs}")
-        if cflags:
-            config_items.append(f"cflags={cflags}")
-        if compile_args:
-            config_items.append(f"compile-args={compile_args}")
-        if debug_level > 0:
-            config_items.append(f"debug={debug_level}")
-        if profile:
-            config_items.append(f"profile={profile.name}")
-        if perf:
-            config_items.append("perf=on")
-        if experiment:
-            config_items.append(f"experiment={experiment}")
-        if step:
-            config_items.append(f"steps={len(step)}")
-        subtitle = f"Config: {', '.join(config_items)}"
-        print_header("CARTS Benchmark Runner", subtitle)
+    config_items = [f"size={effective_size_label}", f"timeout={timeout}s",
+                    f"verify={verify}", f"clean={clean}"]
+    if base_workers_list:
+        config_items.append(f"workers={workers}")
+    if base_node_counts is not None:
+        config_items.append(f"nodes={nodes}")
+    if runs > 1:
+        config_items.append(f"runs={runs}")
+    if cflags:
+        config_items.append(f"cflags={cflags}")
+    if compile_args:
+        config_items.append(f"compile-args={compile_args}")
+    if perf:
+        config_items.append("perf=on")
+    if step:
+        config_items.append(f"steps={len(step)}")
+    subtitle = f"Config: {', '.join(config_items)}"
+    print_header("CARTS Benchmark Runner", subtitle)
 
-        # Show effective ARTS configuration
-        if bench_list:
-            if arts_config:
-                effective_config = arts_config
-                config_source = "custom"
-            else:
-                effective_config = DEFAULT_ARTS_CONFIG
-                config_source = "default"
+    # Show effective ARTS configuration
+    if bench_list:
+        arts_threads = 1
+        arts_nodes = 1
+        if base_workers_list and len(base_workers_list) == 1:
+            arts_threads = int(base_workers_list[0])
+        if base_node_counts and len(base_node_counts) == 1:
+            arts_nodes = int(base_node_counts[0])
+        items = [f"workers={arts_threads}", f"nodes={arts_nodes}", f"launcher=local"]
+        console.print(f"ARTS Config (generated): {', '.join(items)}")
 
-            cfg = parse_arts_cfg(effective_config)
-            arts_threads = int(cfg.get("threads", "1"))
-            arts_nodes = int(cfg.get("nodeCount", "1"))
-            arts_launcher = cfg.get("launcher", "ssh")
-
-            # Apply CLI overrides for display
-            if base_threads_list and len(base_threads_list) == 1:
-                arts_threads = int(base_threads_list[0])
-            if base_node_counts and len(base_node_counts) == 1:
-                arts_nodes = int(base_node_counts[0])
-            if launcher:
-                arts_launcher = launcher
-
-            items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
-            console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
-            console.print(f"  Path: {effective_config}")
-
-        console.print(f"Benchmarks: {len(bench_list)}\n")
+    console.print(f"Benchmarks: {len(bench_list)}\n")
 
     # Run benchmarks
     start_time = time.time()
 
+    # Determine if sweep mode
+    has_worker_sweep = bool(base_workers_list and len(base_workers_list) > 1)
+    has_node_sweep = bool(base_node_counts and len(base_node_counts) > 1)
+    if has_worker_sweep and has_node_sweep:
+        print_error("Cannot sweep both workers and nodes simultaneously.")
+        raise typer.Exit(2)
+
     # Export metadata: differentiate fixed config vs sweep.
-    fixed_threads_meta: Optional[int] = None
+    fixed_workers_meta: Optional[int] = None
     fixed_nodes_meta: Optional[int] = None
-    thread_sweep_meta: Optional[List[int]] = base_threads_list if has_thread_sweep else None
+    worker_sweep_meta: Optional[List[int]] = base_workers_list if has_worker_sweep else None
     node_sweep_meta: Optional[List[int]] = base_node_counts if has_node_sweep else None
 
-    if not has_thread_sweep and base_threads_list and len(base_threads_list) == 1:
-        fixed_threads_meta = int(base_threads_list[0])
+    if not has_worker_sweep and base_workers_list and len(base_workers_list) == 1:
+        fixed_workers_meta = int(base_workers_list[0])
     if not has_node_sweep and base_node_counts and len(base_node_counts) == 1:
         fixed_nodes_meta = int(base_node_counts[0])
 
     try:
-        results = _STEP_EXECUTOR.execute_local_steps(
-            steps=steps,
-            bench_list=bench_list,
-            defaults=step_defaults,
-            request=LocalStepExecutionRequest(
+        for idx, step_def in enumerate(steps, start=1):
+            step_name = _resolve_step_name(step_def, idx)
+
+            if len(steps) > 1:
+                console.print(f"[bold cyan]Step {idx}/{len(steps)}:[/] {step_name}")
+
+            step_bench_list = _resolve_step_bench_list(
+                step_name,
+                bench_list,
+                step_def.benchmarks,
+            )
+
+            if explicit_step_mode or len(steps) > 1:
+                am.set_phase(step_name)
+            else:
+                am.set_phase(None)
+            if explicit_step_mode:
+                runner.clean = True
+            else:
+                runner.clean = clean
+
+            step_profile_path = (
+                Path(step_def.profile)
+                if step_def.profile
+                else PROFILES_DIR / "profile-none.cfg"
+            )
+            has_explicit_step_profile = step_def.profile is not None
+            should_rebuild = (
+                explicit_step_mode
+                or has_explicit_step_profile
+            )
+            if should_rebuild:
+                _rebuild_arts(
+                    console,
+                    profile=step_profile_path,
+                )
+
+            use_step_threads = getattr(step_def, "_has_threads", False) or not explicit_step_mode
+            use_step_nodes = getattr(step_def, "_has_nodes", False) or not explicit_step_mode
+            use_step_timeout = getattr(step_def, "_has_timeout", False) or not explicit_step_mode
+            use_step_size = getattr(step_def, "_has_size", False) and not size_from_cli
+            use_step_cflags = getattr(step_def, "_has_cflags", False) or not explicit_step_mode
+            use_step_compile_args = (
+                getattr(step_def, "_has_compile_args", False) or not explicit_step_mode
+            )
+            use_step_runs = getattr(step_def, "_has_runs", False) or not explicit_step_mode
+            use_step_perf = getattr(step_def, "_has_perf", False) or not explicit_step_mode
+            step_workers_spec = step_def.threads if use_step_threads else workers
+            step_nodes_spec = step_def.nodes if use_step_nodes else nodes
+            step_timeout = (
+                step_def.timeout if (use_step_timeout and step_def.timeout is not None) else timeout
+            )
+            step_size = step_def.size if (use_step_size and step_def.size) else size
+            step_cflags = step_def.cflags if use_step_cflags else cflags
+            step_compile_args = step_def.compile_args if use_step_compile_args else compile_args
+            step_runs = step_def.runs if use_step_runs else runs
+            step_perf = step_def.perf if use_step_perf else perf
+
+            step_workers_list = parse_workers(step_workers_spec) if step_workers_spec else None
+            step_node_counts = _parse_nodes_spec(step_nodes_spec) if step_nodes_spec else None
+            step_has_worker_sweep = bool(step_workers_list and len(step_workers_list) > 1)
+            step_has_node_sweep = bool(step_node_counts and len(step_node_counts) > 1)
+            if step_has_worker_sweep and step_has_node_sweep:
+                raise ValueError("Cannot sweep both workers and nodes simultaneously.")
+
+            step_results = _run_step(
                 runner=runner,
                 verify=verify,
-                omp_threads=omp_threads,
-                weak_scaling=weak_scaling,
-                base_size=base_size,
+                workers_list=step_workers_list,
+                node_counts=step_node_counts,
+                runs=step_runs,
+                compile_args=step_compile_args,
+                perf=step_perf,
                 run_timestamp=run_timestamp,
-                clean=clean,
-                quiet=quiet,
-                artifact_manager=am,
-            ),
-        )
+                cflags=step_cflags,
+            )
+            result_phase = step_name if (explicit_step_mode or len(steps) > 1) else None
+            for result in step_results:
+                result.run_phase = result_phase
+            all_results.extend(step_results)
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
         raise typer.Exit(1)
     total_duration = time.time() - start_time
 
     # Display results
-    if not quiet:
-        # Table was already shown via Live display, just show the summary panel
-        console.print()
-        console.print(create_summary_panel(results, total_duration))
+    console.print()
+    console.print(create_summary_panel(results, total_duration))
 
     # Write results.json into the experiment directory
     export_json(
@@ -4541,18 +4744,13 @@ def run(
         am.results_json_path,
         effective_size_label,
         total_duration,
-        thread_sweep_meta,
+        worker_sweep_meta,
         node_sweep_meta,
         cflags,
-        launcher,
-        weak_scaling,
-        base_size,
         runs,
         ".",  # artifacts are in same directory
-        fixed_threads=fixed_threads_meta,
+        fixed_threads=fixed_workers_meta,
         fixed_nodes=fixed_nodes_meta,
-        omp_threads_override=omp_threads,
-        arts_config_override=str(arts_config) if arts_config else None,
     )
 
     report_path: Optional[Path] = None
@@ -4561,16 +4759,14 @@ def run(
         report_path = generate_report(
             results,
             am.experiment_dir,
-            quiet=quiet,
             steps=report_steps,
         )
     except Exception as e:
-        if not quiet:
-            print_warning(f"Failed to generate report.xlsx: {e}")
+        print_warning(f"Failed to generate report.xlsx: {e}")
 
-    if not quiet and report_path:
-        print_info(f"Report: {report_path.name}")
-    elif not quiet:
+    if report_path:
+        console.print(f"  [dim]Report: {report_path.name}[/]")
+    else:
         print_warning("Report not generated (openpyxl may be unavailable in this environment).")
 
     # Write manifest.json
@@ -4578,9 +4774,8 @@ def run(
     am.write_manifest(results, command_str, total_duration)
 
     # Show single results path
-    if not quiet:
-        console.print()
-        print_success(f"Results: {am.experiment_dir}")
+    console.print()
+    print_success(f"Results: {am.experiment_dir}")
 
     # Exit with error if any failures
     failed = sum(1 for r in results if r.run_arts.status in (
@@ -4600,8 +4795,10 @@ def build(
     arts: bool = typer.Option(False, "--arts", help="Build ARTS version only"),
     suite: Optional[str] = typer.Option(
         None, "--suite", help="Filter by suite"),
-    arts_config: Optional[Path] = typer.Option(
-        None, "--arts-config", help="Custom arts.cfg file"),
+    worker_count: Optional[int] = typer.Option(
+        None, "--worker-count", "-w", help="Worker threads per node"),
+    node_count: Optional[int] = typer.Option(
+        None, "--node-count", "-n", help="Number of nodes"),
 ):
     """Build benchmarks without running."""
     try:
@@ -4644,6 +4841,9 @@ def build(
     else:
         variants = ["arts", "openmp"]
 
+    effective_workers = worker_count or 1
+    effective_nodes = node_count or 1
+
     print_header("Build Benchmarks", f"{len(bench_list)} benchmarks, size={size}")
 
     with Progress(
@@ -4669,9 +4869,9 @@ def build(
                     / f"variant_{variant}"
                 )
                 result = runner.build_benchmark(
-                    bench, size, variant, arts_config,
-                    build_output_dir=build_output_dir,
-                )
+                    bench, size, variant,
+                    worker_count=effective_workers,
+                    node_count=effective_nodes)
                 status = status_symbol(result.status)
                 if result.status != Status.PASS:
                     console.print(
@@ -4742,7 +4942,28 @@ def clean(
 # ============================================================================
 
 
-def _execute_slurm_batch(
+def _load_existing_job_statuses(manifest_file: Path) -> Dict[str, slurm_batch.SlurmJobStatus]:
+    """Load previously stored SLURM job statuses from job_manifest.json."""
+    if not manifest_file.exists():
+        return {}
+    try:
+        existing_manifest = json.loads(manifest_file.read_text())
+        statuses = {}
+        for job_id, status_payload in existing_manifest.get("jobs", {}).items():
+            if not isinstance(status_payload, dict):
+                continue
+            payload = dict(status_payload)
+            run_dir_raw = payload.get("run_dir")
+            if run_dir_raw:
+                payload["run_dir"] = Path(run_dir_raw)
+            statuses[job_id] = slurm_batch.SlurmJobStatus(**payload)
+        return statuses
+    except Exception:
+        return {}
+
+
+@app.command(name="slurm")
+def slurm(
     benchmarks: Optional[List[str]] = typer.Argument(
         None, help="Specific benchmarks to run (default: all)"),
     nodes: str = typer.Option(
@@ -4761,12 +4982,9 @@ def _execute_slurm_batch(
         "01:00:00", "--time", "-t", help="Time limit per job (HH:MM:SS)"),
     account: Optional[str] = typer.Option(
         None, "--account", "-A", help="SLURM account (if required)"),
-    arts_config: Optional[Path] = typer.Option(
-        None, "--arts-config",
-        help="Base arts.cfg file (for threads and other settings)"),
-    threads: Optional[int] = typer.Option(
-        None, "--threads",
-        help="Thread count for OpenMP comparison (default: from arts.cfg or 8)"),
+    workers: Optional[int] = typer.Option(
+        None, "--workers",
+        help="Worker threads per node (default: 8)"),
     output_dir: Path = typer.Option(
         Path("./results"), "--results-dir",
         help="Base directory for experiment output"),
@@ -4778,8 +4996,6 @@ def _execute_slurm_batch(
     no_build: bool = typer.Option(
         False, "--no-build",
         help="Skip build phase (assumes executables already exist)"),
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Verbose output"),
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional compiler flags"),
     compile_args: Optional[str] = typer.Option(
@@ -4793,23 +5009,46 @@ def _execute_slurm_batch(
     perf: bool = typer.Option(
         False, "--perf",
         help="Enable perf stat profiling for cache metrics"),
-    perf_interval: float = typer.Option(
-        0.1, "--perf-interval",
-        help="Perf stat sampling interval in seconds"),
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
-    max_jobs: int = typer.Option(
-        0, "--max-jobs", "-J",
-        help="Max concurrent SLURM jobs (PENDING+RUNNING). "
-             "0 = unlimited (submit all at once). "
-             "When set, new jobs are submitted as earlier ones finish"),
-    artifact_manager: Optional[ArtifactManager] = None,
-    step_name: Optional[str] = None,
-    report_steps: Optional[List[ExperimentStep]] = None,
+):
+    """Submit benchmarks as SLURM batch jobs."""
+    _execute_slurm_batch(
+        benchmarks=benchmarks, nodes=nodes, size=size, runs=runs,
+        partition=partition, time_limit=time_limit, account=account,
+        workers=workers, output_dir=output_dir,
+        suite=suite, dry_run=dry_run, no_build=no_build,
+        cflags=cflags, compile_args=compile_args, gdb=gdb, profile=profile,
+        perf=perf, exclude_nodes=exclude_nodes, exclude=exclude,
+    )
+
+
+def _execute_slurm_batch(
+    benchmarks=None,
+    nodes="1",
+    size=DEFAULT_SIZE,
+    runs=1,
+    partition=None,
+    time_limit="01:00:00",
+    account=None,
+    workers=None,
+    output_dir=Path("./results"),
+    suite=None,
+    dry_run=False,
+    no_build=False,
+    cflags=None,
+    compile_args=None,
+    gdb=False,
+    profile=None,
+    perf=False,
+    exclude_nodes=None,
+    exclude=None,
+    artifact_manager=None,
+    step_name=None,
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -4828,10 +5067,9 @@ def _execute_slurm_batch(
     step (Phase 3) and the separate monitoring phase (Phase 4) is skipped.
 
     Example:
-        carts benchmarks run --slurm --nodes=1-15 --runs 10
-        carts benchmarks run --slurm --nodes=1-15 --runs 10 --max-jobs 20
-        carts benchmarks run polybench/gemm --slurm --nodes=4 --time-limit 00:30:00
-        carts benchmarks run --slurm --nodes=1,2,4,8,16 --partition compute
+        carts benchmarks slurm --nodes=1-15 --runs 10
+        carts benchmarks slurm polybench/gemm --nodes=4 --time 00:30:00
+        carts benchmarks slurm --nodes=1,2,4,8,16 --partition compute
 
     Key Features:
     - Submit all jobs at once, or throttle with --max-jobs N
@@ -4839,39 +5077,33 @@ def _execute_slurm_batch(
     - Each job has isolated counter directory (no data collision)
     - Sweep across multiple node counts with --nodes=1-15
     """
-    size = parse_size(size, "--size")
-    runner = BenchmarkRunner(console, verbose, False, False, False, 0)
-    require_slurm_commands(dry_run)
+    # Initialize
+    try:
+        size = parse_size(size, "--size")
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(2)
+
+    slurm_start_time = time.time()
+    runner = BenchmarkRunner(console)
 
     # Parse node counts from --nodes parameter
     node_counts = parse_node_spec(nodes)
 
-    # Determine explicit arts config override (if provided).
-    explicit_arts_config = arts_config.resolve() if arts_config else None
-    if explicit_arts_config is not None and not explicit_arts_config.exists():
-        raise ValueError(f"arts.cfg not found: {explicit_arts_config}")
-
-    # Get threads from explicit config or default config.
-    if threads is None:
-        thread_source_cfg = explicit_arts_config or DEFAULT_ARTS_CONFIG.resolve()
-        threads = get_arts_cfg_int(thread_source_cfg, "threads") or 8
+    if workers is None:
+        workers = 8
 
     nodes_display = format_node_counts_display(node_counts)
 
-    config_display = (
-        str(explicit_arts_config)
-        if explicit_arts_config is not None
-        else "benchmark-specific defaults (benchmark/suite/local.cfg)"
-    )
     subtitle_parts = [
-        f"Config: {config_display}",
-        f"Nodes: {nodes_display}, Threads: {threads}",
+        f"Config: generated (launcher=local)",
+        f"Nodes: {nodes_display}, Workers: {workers}",
         f"Runs per benchmark: {runs}, Size: {size}",
     ]
     if profile:
         subtitle_parts.append(f"Profile: {profile}")
     if perf:
-        subtitle_parts.append(f"Perf: enabled (interval={perf_interval}s)")
+        subtitle_parts.append("Perf: enabled")
     if exclude_nodes:
         subtitle_parts.append(f"Excluding SLURM nodes: {exclude_nodes}")
     if exclude:
@@ -4922,34 +5154,308 @@ def _execute_slurm_batch(
         f"Found {len(bench_list)} benchmarks, {len(node_counts)} node counts, {total_jobs} total jobs"
     )
     if multinode_disabled and max(node_counts) > 1:
-        print_info(f"{len(multinode_disabled)} benchmarks disabled for multi-node")
-    request = SlurmBatchRequest(
-        bench_list=bench_list,
-        node_counts=node_counts,
-        size=size,
-        runs=runs,
-        verify=verify,
-        partition=partition,
-        time_limit=time_limit,
-        account=account,
-        explicit_arts_config=explicit_arts_config,
-        threads=threads,
-        output_dir=output_dir,
-        max_jobs=max_jobs,
-        dry_run=dry_run,
-        no_build=no_build,
-        verbose=verbose,
-        cflags=cflags,
-        compile_args=compile_args,
-        gdb=gdb,
-        profile=profile,
-        perf=perf,
-        perf_interval=perf_interval,
-        exclude_nodes=exclude_nodes,
-        artifact_manager=artifact_manager,
-        step_name=step_name,
-        report_steps=report_steps,
-        command_str="carts benchmarks " + " ".join(sys.argv[1:]),
+        console.print(f"[dim]  ({len(multinode_disabled)} benchmarks disabled for multi-node)[/]")
+
+    # Create directories:
+    # - build/: shared across experiments (reusable executables)
+    # - results/{timestamp}/: experiment-specific (runs, scripts, results)
+    am = artifact_manager
+    if am is None:
+        am = ArtifactManager(output_dir, datetime.now().strftime("%Y%m%d_%H%M%S"))
+    am.set_phase(step_name or "default")
+
+    build_dir = output_dir / "build"  # Shared, reusable
+    experiment_dir = am.experiment_dir
+    scripts_dir = experiment_dir / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+
+    arts_build_hash = _current_arts_build_hash()
+
+    console.print(f"Build directory: {build_dir} (shared)")
+    console.print(f"Experiment directory: {experiment_dir}")
+    console.print(f"ARTS build hash: {arts_build_hash}")
+
+    # Handle custom counter profile (triggers ARTS rebuild)
+    if profile:
+        if not profile.exists():
+            print_error(f"Profile not found: {profile}")
+            raise typer.Exit(1)
+
+        print_warning(f"Rebuilding ARTS with profile: {profile}")
+        result = subprocess.run(
+            ["carts", "build", "--arts", f"--profile={profile}"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print_error(f"ARTS rebuild failed:\n{result.stderr}")
+            raise typer.Exit(1)
+        print_success("ARTS rebuild complete")
+
+    # Phase 1: Build per (benchmark, node_count) into shared build/ directory
+    # CRITICAL: ARTS executable uses nodeCount at compile time (--node-count flag)
+    # So we must build separately for each node_count
+    # Executables are REUSABLE across experiments (same binary for same benchmark+node_count)
+    import shutil
+
+    num_workers = min(os.cpu_count() or 1, len(bench_list))
+    console.print(f"\n[bold]Phase 1: Building benchmarks per node count ({num_workers} workers)...[/]")
+
+    # build_results: {(bench, node_count): (arts_exe, omp_exe, build_arts_cfg)}
+    # Note: build_arts_cfg is the compile-time config in build/ directory
+    build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
+    print_lock = threading.Lock()
+
+    def _build_one_bench(bench: str) -> List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]]:
+        """Build all node_count variants for one benchmark (sequential within)."""
+        safe_name = bench.replace("/", "_")
+        bench_path = runner.benchmarks_dir / bench
+        src_arts, src_omp = runner.get_executable_paths(bench_path)
+        results = []
+        size_variant = f"size_{size}"
+        cflags_variant = "cflags_none"
+        if cflags:
+            cflags_hash = hashlib.sha1(cflags.encode("utf-8")).hexdigest()[:8]
+            cflags_variant = f"cflags_{cflags_hash}"
+        compile_variant = "compile_none"
+        if compile_args:
+            compile_hash = hashlib.sha1(compile_args.encode("utf-8")).hexdigest()[:8]
+            compile_variant = f"compile_{compile_hash}"
+
+        for node_count in node_counts:
+            if node_count > 1 and bench in multinode_disabled:
+                continue
+
+            # Build directory:
+            # build/{benchmark}/arts_{H}/{size_variant}/{cflags_variant}/nodes_{N}/{T}T/{compile_variant}/
+            # Hash H ties executable cache to the active ARTS build config.
+            # size/cflags/compile_variant ensure distinct compile inputs do not reuse stale executables.
+            build_node_dir = (
+                build_dir
+                / safe_name
+                / f"arts_{arts_build_hash}"
+                / size_variant
+                / cflags_variant
+                / f"nodes_{node_count}"
+                / f"{workers}T"
+                / compile_variant
+            )
+            build_node_dir.mkdir(parents=True, exist_ok=True)
+
+            dst_arts = build_node_dir / src_arts.name
+            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
+            build_arts_cfg = build_node_dir / "arts.cfg"
+
+            # Skip if ARTS executable already exists (reuse from previous experiment)
+            if dst_arts.exists() and build_arts_cfg.exists():
+                with print_lock:
+                    console.print(f"  {bench} (nodes={node_count}, workers={workers})... [cyan]SKIP (exists)[/]")
+                if node_count == 1 and dst_omp and not dst_omp.exists():
+                    build_omp = runner.build_benchmark(
+                        bench, size, variant="openmp",
+                        cflags=cflags or "",
+                    )
+                    if build_omp.status == Status.PASS and src_omp.exists():
+                        shutil.copy2(src_omp, dst_omp)
+                results.append(((bench, node_count), (dst_arts, dst_omp if dst_omp and dst_omp.exists() else None, build_arts_cfg)))
+                continue
+
+            if no_build:
+                with print_lock:
+                    console.print(f"  {bench} (nodes={node_count}, workers={workers})... [red]MISSING (--no-build)[/]")
+                continue
+
+            _validate_thread_network_topology(
+                workers, node_count, bench
+            )
+
+            # Generate arts.cfg for build
+            build_arts_cfg = _generate_arts_config(
+                workers, node_count, build_node_dir / "arts.cfg"
+            )
+
+            # Build ARTS with worker/node counts from arts.cfg
+            build_arts = runner.build_benchmark(
+                bench, size, variant="arts",
+                worker_count=workers, node_count=node_count,
+                cflags=cflags or "",
+                compile_args=compile_args,
+            )
+
+            if build_arts.status != Status.PASS:
+                with print_lock:
+                    console.print(f"  {bench} (nodes={node_count}, workers={workers})... [red]FAILED[/]")
+                    console.print(f"    {build_arts.output[:200]}...")
+                continue
+
+            # Copy ARTS executable and LLVM IR to build directory
+            shutil.copy2(src_arts, dst_arts)
+            for ll_file in bench_path.glob("*-arts.ll"):
+                shutil.copy2(ll_file, build_node_dir / ll_file.name)
+            metadata_file = bench_path / ".carts-metadata.json"
+            if metadata_file.exists():
+                shutil.copy2(metadata_file, build_node_dir / metadata_file.name)
+            for mlir_file in bench_path.glob("*_arts_metadata.mlir"):
+                shutil.copy2(mlir_file, build_node_dir / mlir_file.name)
+
+            # Build and copy OMP (only for node_count=1)
+            dst_omp = None
+            if node_count == 1:
+                build_omp = runner.build_benchmark(
+                    bench, size, variant="openmp",
+                    cflags=cflags or "",
+                )
+                if build_omp.status == Status.PASS and src_omp.exists():
+                    dst_omp = build_node_dir / src_omp.name
+                    shutil.copy2(src_omp, dst_omp)
+
+            with print_lock:
+                console.print(f"  {bench} (nodes={node_count}, workers={workers})... [green]OK[/]")
+            results.append(((bench, node_count), (dst_arts, dst_omp, build_arts_cfg)))
+
+        return results
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(_build_one_bench, bench): bench for bench in bench_list}
+        for future in as_completed(futures):
+            for key, value in future.result():
+                build_results[key] = value
+
+    # Copy build artifacts into results for reproducibility
+    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
+        bench_config = BenchmarkConfig(
+            arts_threads=workers, arts_nodes=node_count,
+            omp_threads=workers, launcher="slurm",
+        )
+        bench_path = runner.benchmarks_dir / bench
+        am.copy_build_artifacts(
+            bench_path,
+            bench,
+            bench_config,
+            build_source_dir=build_arts_cfg.parent,
+        )
+
+    # Phase 2: Generate sbatch scripts
+    # Directory structure:
+    #   build/{benchmark}/arts_{H}/{size}/{cflags}/nodes_{N}/{T}T/{compile}/cfg_{C}/ <- shared, reusable build cache
+    #   results/{timestamp}/{step}/{benchmark}/{T}t_{N}n/run_{R}/ <- run outputs
+    #   results/{timestamp}/scripts/*.sbatch     <- generated scripts
+    console.print("\n[bold]Phase 2: Generating job scripts...[/]")
+
+    slurm_job_result_script = Path(__file__).parent / "slurm" / "job_result.py"
+
+    job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
+
+    step_token = _step_name_to_token(step_name or "default")
+    seen_run_dirs: set[Path] = set()
+    seen_script_paths: set[Path] = set()
+
+    for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
+        safe_name = bench.replace("/", "_")
+
+        for run_num in range(1, runs + 1):
+            bench_config = BenchmarkConfig(
+                arts_threads=workers,
+                arts_nodes=node_count,
+                omp_threads=workers,
+                launcher="slurm",
+            )
+            run_dir = am.get_run_dir(bench, bench_config, run_num)
+            run_dir_resolved = run_dir.resolve()
+            if run_dir_resolved in seen_run_dirs:
+                raise ValueError(
+                    f"Collision detected: duplicate run directory '{run_dir_resolved}'. "
+                    "Ensure step names and benchmark/config combinations are unique."
+                )
+            seen_run_dirs.add(run_dir_resolved)
+            am.save_run_config(
+                bench,
+                bench_config,
+                run_num,
+                arts_cfg_path=build_arts_cfg,
+                size=size,
+                cflags=cflags,
+                compile_args=compile_args,
+                run_phase=step_name or "default",
+            )
+            am.record_run(
+                bench, bench_config, run_num,
+                has_counters=bool(profile),
+                has_perf=perf,
+            )
+
+            config = slurm_batch.SlurmJobConfig(
+                benchmark_name=bench,
+                run_number=run_num,
+                node_count=node_count,
+                time_limit=time_limit,
+                partition=partition,
+                account=account,
+                executable_arts=arts_exe,           # From build/ (shared)
+                executable_omp=omp_exe,             # From build/ (shared)
+                arts_config_path=build_arts_cfg,    # From build/ (template for runtime cfg)
+                run_dir=run_dir,
+                size=size,
+                threads=workers,
+                gdb=gdb,
+                perf=perf,
+                exclude_nodes=exclude_nodes,
+                job_label=step_token,
+            )
+
+            # Generate sbatch script in experiment scripts/ directory
+            script_path = (
+                scripts_dir
+                / f"{step_token}__{safe_name}_{workers}t_{node_count}n_run{run_num}.sbatch"
+            )
+            script_path_resolved = script_path.resolve()
+            if script_path_resolved in seen_script_paths:
+                raise ValueError(
+                    f"Collision detected: duplicate script path '{script_path_resolved}'. "
+                    "Ensure step names and benchmark/config combinations are unique."
+                )
+            seen_script_paths.add(script_path_resolved)
+            slurm_batch.generate_sbatch_script(
+                config, script_path, slurm_job_result_script
+            )
+
+            job_configs.append((config, script_path))
+
+    console.print(f"  Generated {len(job_configs)} job scripts")
+
+    # Phase 3: Submit jobs
+    console.print("\n[bold]Phase 3: Submitting jobs...[/]")
+
+    job_statuses = slurm_batch.submit_all_jobs(job_configs, console, dry_run)
+    failed_submissions = len(job_configs) - len(job_statuses)
+    if failed_submissions > 0:
+        print_error(
+            f"SLURM submission failed for {failed_submissions}/{len(job_configs)} jobs. "
+            "Fix submission errors and retry."
+        )
+        raise typer.Exit(1)
+
+    # Write job manifest
+    metadata = {
+        "timestamp": experiment_dir.name,
+        "size": size,
+        "node_counts": node_counts,
+        "threads": workers,
+        "runs_per_benchmark": runs,
+        "total_jobs": len(job_configs),
+        "partition": partition,
+        "time_limit": time_limit,
+        "arts_config": "generated (launcher=local)",
+        "dry_run": dry_run,
+        "profile": str(profile) if profile else None,
+        "perf": perf,
+    }
+
+    manifest_file = experiment_dir / "job_manifest.json"
+    existing_job_statuses = _load_existing_job_statuses(manifest_file)
+    existing_job_statuses.update(job_statuses)
+    manifest_path = slurm_batch.write_job_manifest(
+        experiment_dir, existing_job_statuses, metadata
     )
     deps = SlurmExecutorDependencies(
         resolve_effective_arts_config=_resolve_effective_arts_config,
@@ -4959,11 +5465,76 @@ def _execute_slurm_batch(
         get_benchmarks_dir=get_benchmarks_dir,
         step_name_to_token=_STEP_RESOLVER.step_name_to_token,
     )
-    SlurmBatchExecutor(runner, request, deps).execute()
+
+    # Update manifest with final job states
+    existing_job_statuses = _load_existing_job_statuses(manifest_file)
+    existing_job_statuses.update(job_statuses)
+    slurm_batch.write_job_manifest(experiment_dir, existing_job_statuses, metadata)
+
+    # Phase 5: Collect results
+    console.print("\n[bold]Phase 5: Collecting results...[/]")
+
+    current_results = slurm_batch.collect_results(job_statuses, experiment_dir)
+    existing_results: List[Dict[str, Any]] = []
+    if am.results_json_path.exists():
+        try:
+            existing_payload = json.loads(am.results_json_path.read_text())
+            raw_results = existing_payload.get("results", [])
+            if isinstance(raw_results, list):
+                existing_results = raw_results
+        except Exception:
+            existing_results = []
+
+    merged_results: List[Dict[str, Any]] = []
+    seen_job_ids: set[str] = set()
+    for result in existing_results + current_results:
+        slurm_data = result.get("slurm", {})
+        job_id = str(slurm_data.get("job_id", "")).strip()
+        if job_id and job_id in seen_job_ids:
+            continue
+        if job_id:
+            seen_job_ids.add(job_id)
+        merged_results.append(result)
+
+    results_path = slurm_batch.write_aggregated_results(
+        experiment_dir, merged_results, metadata
+    )
+
+    report_path: Optional[Path] = None
+    try:
+        report_path = generate_report_from_rows(
+            merged_results,
+            experiment_dir,
+            steps=None,
+        )
+    except Exception as e:
+        print_warning(f"Failed to generate report.xlsx: {e}")
+
+    # Write manifest.json (same schema as standard run)
+    total_duration = time.time() - slurm_start_time
+    slurm_command = "carts benchmarks " + " ".join(sys.argv[1:])
+    carts_dir = get_carts_dir()
+    benchmarks_dir = get_benchmarks_dir()
+    repro = get_reproducibility_metadata(carts_dir, benchmarks_dir)
+    slurm_manifest = slurm_batch.write_slurm_manifest(
+        experiment_dir, merged_results, metadata, slurm_command, total_duration, repro
+    )
+
+    # Summary
+    successful = sum(1 for r in merged_results if r.get("status") == "PASS")
+    failed = sum(1 for r in merged_results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
+
+    summary_content = (
+        f"{format_summary_line(successful, failed, len(merged_results) - successful - failed)}\n\n"
+        f"Total jobs: {len(merged_results)}\n"
+        f"Results: {results_path}\n"
+        f"Manifest: {slurm_manifest}"
+    )
+    if report_path:
+        summary_content += f"\nReport: {report_path}"
+    style = "green" if failed == 0 else "red"
+    print_footer(f"Experiment Complete — {summary_content}", style=style)
 
 
 if __name__ == "__main__":
-    # Enable debug logging when --verbose/-v is in args
-    if "--verbose" in sys.argv or "-v" in sys.argv:
-        logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
     app()

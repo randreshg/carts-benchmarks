@@ -48,7 +48,8 @@ class ArtifactManager:
           results.json
           {benchmark_name}/
             {threads}t_{nodes}n/
-              artifacts/          # build outputs (shared across runs)
+              artifacts/          # build outputs + generated config
+                arts.cfg          # generated runtime config
               run_1/              # per-run outputs
                 arts.log
                 omp.log
@@ -203,11 +204,6 @@ class ArtifactManager:
         """
         run_dir = self.get_run_dir(benchmark_name, config, run_number)
 
-        # Copy the effective arts.cfg used for this run
-        if arts_cfg_path and arts_cfg_path.exists():
-            dest = run_dir / "arts.cfg"
-            shutil.copy2(arts_cfg_path, dest)
-
         # Write run_config.json with full execution context
         run_config: Dict[str, object] = {
             "benchmark": benchmark_name,
@@ -261,6 +257,72 @@ class ArtifactManager:
             json.dump(run_config, f, indent=2, default=str)
 
         return config_path
+
+    # -- artifact operations -------------------------------------------------
+
+    def copy_build_artifacts(
+        self,
+        bench_path: Path,
+        benchmark_name: str,
+        config: BenchmarkConfig,
+        build_source_dir: Optional[Path] = None,
+    ) -> Dict[str, Optional[str]]:
+        """Copy build artifacts into the experiment's ``artifacts/`` directory."""
+        artifacts_dir = self.get_artifacts_dir(benchmark_name, config)
+        paths: Dict[str, Optional[str]] = {}
+        source_dir = (
+            build_source_dir
+            if build_source_dir is not None and build_source_dir.exists()
+            else bench_path
+        )
+
+        # .carts-metadata.json (compiler metadata)
+        metadata = source_dir / ".carts-metadata.json"
+        if metadata.exists():
+            dest = artifacts_dir / ".carts-metadata.json"
+            shutil.copy2(metadata, dest)
+            paths["carts_metadata"] = str(dest)
+
+        # *_arts_metadata.mlir
+        for mlir in source_dir.glob("*_arts_metadata.mlir"):
+            dest = artifacts_dir / mlir.name
+            shutil.copy2(mlir, dest)
+            paths["arts_metadata_mlir"] = str(dest)
+
+        # Other MLIR files
+        for mlir in source_dir.glob("*.mlir"):
+            if "_metadata" not in mlir.name:
+                shutil.copy2(mlir, artifacts_dir / mlir.name)
+
+        # LLVM IR
+        for ll in source_dir.glob("*-arts.ll"):
+            shutil.copy2(ll, artifacts_dir / ll.name)
+
+        # Executables
+        for exe in source_dir.glob("*_arts"):
+            if exe.is_file():
+                dest = artifacts_dir / exe.name
+                shutil.copy2(exe, dest)
+                paths["executable_arts"] = str(dest)
+        for exe in list(source_dir.glob("*_omp")) + list(
+            (source_dir / "build").glob("*_omp")
+        ):
+            if exe.is_file():
+                dest = artifacts_dir / exe.name
+                shutil.copy2(exe, dest)
+                paths["executable_omp"] = str(dest)
+
+        # Build logs
+        logs_dir = source_dir / "logs"
+        if not logs_dir.exists():
+            logs_dir = bench_path / "logs"
+        if logs_dir.exists():
+            for log in ["build_arts.log", "build_openmp.log"]:
+                log_file = logs_dir / log
+                if log_file.exists():
+                    shutil.copy2(log_file, artifacts_dir / log)
+
+        return paths
 
     def record_run(
         self,

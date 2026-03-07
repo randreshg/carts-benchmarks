@@ -25,11 +25,12 @@
 static void init_array(int nx, int ny, DATA_TYPE **A, DATA_TYPE *x) {
   int i, j;
 
+  uint64_t rng = carts_rand_seed(nx, ny, 0, 0);
   for (i = 0; i < ny; i++)
-    x[i] = i * M_PI;
+    x[i] = carts_rand_double(&rng, -1.0, 1.0);
   for (i = 0; i < nx; i++)
     for (j = 0; j < ny; j++)
-      A[i][j] = ((DATA_TYPE)i * (j + 1)) / nx;
+      A[i][j] = carts_rand_double(&rng, -1.0, 1.0);
 }
 
 /* DCE code. Must scan the entire live-out data.
@@ -105,7 +106,6 @@ int main(int argc, char **argv) {
 
   /* Verification */
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < ny; i++) {
     checksum += y[i];
   }

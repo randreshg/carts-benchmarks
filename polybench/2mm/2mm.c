@@ -39,18 +39,19 @@ static void init_array(int ni, int nj, int nk, int nl, DATA_TYPE *alpha,
 
   *alpha = 32412;
   *beta = 2123;
+  uint64_t rng = carts_rand_seed(ni, nj, nk, nl);
   for (i = 0; i < ni; i++)
     for (j = 0; j < nk; j++)
-      A[i][j] = ((DATA_TYPE)i * j) / ni;
+      A[i][j] = carts_rand_double(&rng, -1.0, 1.0);
   for (i = 0; i < nk; i++)
     for (j = 0; j < nj; j++)
-      B[i][j] = ((DATA_TYPE)i * (j + 1)) / nj;
+      B[i][j] = carts_rand_double(&rng, -1.0, 1.0);
   for (i = 0; i < nl; i++)
     for (j = 0; j < nj; j++)
-      C[i][j] = ((DATA_TYPE)i * (j + 3)) / nl;
+      C[i][j] = carts_rand_double(&rng, -1.0, 1.0);
   for (i = 0; i < ni; i++)
     for (j = 0; j < nl; j++)
-      D[i][j] = ((DATA_TYPE)i * (j + 2)) / nk;
+      D[i][j] = carts_rand_double(&rng, -1.0, 1.0);
 }
 
 /* DCE code. Must scan the entire live-out data.
@@ -144,7 +145,6 @@ int main(int argc, char **argv) {
 
   /* Verification */
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nl; j++) {
       checksum += D[i][j];

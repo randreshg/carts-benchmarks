@@ -2058,11 +2058,9 @@ def _write_report(
 def generate_report(
     results: List["BenchmarkResult"],
     experiment_dir: Path,
-    quiet: bool = False,
     steps: Optional[List["ExperimentStep"]] = None,
 ) -> Optional[Path]:
     """Generate report.xlsx from in-memory benchmark results."""
-    del quiet  # kept for compatibility with caller API
 
     result_rows = [_flatten_result_dataclass(result) for result in results]
 
@@ -2078,11 +2076,9 @@ def generate_report(
 def generate_report_from_rows(
     result_rows: List[Dict[str, Any]],
     experiment_dir: Path,
-    quiet: bool = False,
     steps: Optional[List["ExperimentStep"]] = None,
 ) -> Optional[Path]:
     """Generate report.xlsx from already-serialized result rows."""
-    del quiet  # kept for compatibility with caller API
 
     normalized_rows: List[Dict[str, Any]] = []
     experiment_dir_path = Path(experiment_dir)
