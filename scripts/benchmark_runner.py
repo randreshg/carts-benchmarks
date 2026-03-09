@@ -2623,6 +2623,40 @@ def status_symbol(status: Status) -> str:
         return "[dim]-[/]"
 
 
+def benchmark_result_passed(result: BenchmarkResult) -> bool:
+    """Return True only when the full benchmark run completed and verified."""
+    return (
+        result.build_arts.status == Status.PASS
+        and result.build_omp.status == Status.PASS
+        and result.run_arts.status == Status.PASS
+        and result.run_omp.status == Status.PASS
+        and result.verification.correct
+    )
+
+
+def benchmark_result_failed(result: BenchmarkResult) -> bool:
+    """Return True when any build/run/verification stage failed."""
+    if result.build_arts.status == Status.FAIL or result.build_omp.status == Status.FAIL:
+        return True
+    if result.run_arts.status in (Status.FAIL, Status.CRASH, Status.TIMEOUT):
+        return True
+    if result.run_omp.status in (Status.FAIL, Status.CRASH, Status.TIMEOUT):
+        return True
+    if result.run_arts.status == Status.PASS and result.run_omp.status == Status.PASS:
+        return not result.verification.correct
+    return False
+
+
+def benchmark_result_skipped(result: BenchmarkResult) -> bool:
+    """Return True when the benchmark was intentionally skipped."""
+    return (
+        result.build_arts.status == Status.SKIP
+        or result.build_omp.status == Status.SKIP
+        or result.run_arts.status == Status.SKIP
+        or result.run_omp.status == Status.SKIP
+    ) and not benchmark_result_failed(result)
+
+
 def format_duration(seconds: float) -> str:
     """Format duration for display."""
     if seconds < 60:
@@ -2826,11 +2860,9 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
 def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Panel:
     """Create a summary panel."""
-    passed = sum(1 for r in results if r.run_arts.status ==
-                 Status.PASS and r.verification.correct)
-    failed = sum(1 for r in results if r.run_arts.status in (Status.FAIL, Status.CRASH) or
-                 (r.run_arts.status == Status.PASS and not r.verification.correct))
-    skipped = sum(1 for r in results if r.run_arts.status == Status.SKIP)
+    passed = sum(1 for r in results if benchmark_result_passed(r))
+    failed = sum(1 for r in results if benchmark_result_failed(r))
+    skipped = sum(1 for r in results if benchmark_result_skipped(r))
 
     # Calculate geometric mean speedup based on e2e time (preferred)
     import math
@@ -3123,12 +3155,9 @@ def create_live_summary(
     """Create a one-line summary for live display."""
     # Count passed/failed using latest result from each benchmark
     passed = sum(1 for runs in results.values()
-                 if runs and runs[-1].run_arts.status == Status.PASS
-                 and runs[-1].verification.correct)
+                 if runs and benchmark_result_passed(runs[-1]))
     failed = sum(1 for runs in results.values()
-                 if runs and (runs[-1].run_arts.status in (Status.FAIL, Status.CRASH)
-                              or (runs[-1].run_arts.status == Status.PASS
-                                  and not runs[-1].verification.correct)))
+                 if runs and benchmark_result_failed(runs[-1]))
     pending = total - len(results)
 
     text = Text()
@@ -3333,11 +3362,9 @@ def export_json(
         metadata["artifacts_directory"] = artifacts_directory
 
     # Calculate summary
-    passed = sum(1 for r in results if r.run_arts.status ==
-                 Status.PASS and r.verification.correct)
-    failed = sum(1 for r in results if r.run_arts.status in (
-        Status.FAIL, Status.CRASH))
-    skipped = sum(1 for r in results if r.run_arts.status == Status.SKIP)
+    passed = sum(1 for r in results if benchmark_result_passed(r))
+    failed = sum(1 for r in results if benchmark_result_failed(r))
+    skipped = sum(1 for r in results if benchmark_result_skipped(r))
     total = len(results)
 
     # Count unique configs
@@ -4597,8 +4624,7 @@ def run(
         print_success(f"Results: {am.experiment_dir}")
 
     # Exit with error if any failures
-    failed = sum(1 for r in results if r.run_arts.status in (
-        Status.FAIL, Status.CRASH))
+    failed = sum(1 for r in results if benchmark_result_failed(r))
     if failed > 0:
         raise typer.Exit(1)
 
