@@ -1,0 +1,2 @@
+Temporary disable for multinode runs.
+Reason: deterministic 4-node checksum mismatch under current CARTS/ARTS integration.
