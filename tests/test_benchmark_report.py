@@ -67,7 +67,7 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         counter_dir = run_dir / "counters"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
-        (artifact_dir / "arts.cfg").write_text("threads=64\n")
+        (artifact_dir / "arts.cfg").write_text("[ARTS]\nworker_threads=64\n")
         (artifact_dir / "build.log").write_text("ok\n")
         (run_dir / "run_config.json").write_text("{}\n")
         (run_dir / "result.json").write_text("{}\n")

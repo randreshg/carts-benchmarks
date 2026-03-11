@@ -69,7 +69,6 @@ class SlurmExecutorDependencies:
     """Callbacks required by the high-level SLURM executor."""
 
     resolve_effective_arts_config: Callable[[Path, Optional[Path]], Path]
-    validate_thread_network_topology: Callable[[Optional[Path], int, int, str], None]
     parse_time_limit_seconds: Callable[[str], int]
     get_carts_dir: Callable[[], Path]
     get_benchmarks_dir: Callable[[], Path]
@@ -372,13 +371,6 @@ class SlurmBatchExecutor:
                             "[red]MISSING (--no-build)[/]"
                         )
                     continue
-
-                self.deps.validate_thread_network_topology(
-                    effective_base_config,
-                    self.request.threads,
-                    node_count,
-                    bench,
-                )
 
                 build_arts_cfg = slurm_batch.generate_arts_config_for_node(
                     effective_base_config,

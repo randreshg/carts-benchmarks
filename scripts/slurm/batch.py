@@ -183,11 +183,9 @@ mkdir -p "$COUNTER_DIR"
 
 {perf_dir_section}
 
-# Generate per-run arts.cfg with correct counterFolder
-# (base arts.cfg has placeholder, we override counterFolder for this run)
-sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
-export artsConfig="{runtime_arts_cfg}"
-export counterFolder="$COUNTER_DIR"
+# Generate a recorded per-run arts.cfg with the resolved counter folder.
+sed -e "s|^counter_folder=.*|counter_folder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
+export counter_folder="$COUNTER_DIR"
 
 ARTS_EXIT=125
 ARTS_DURATION=0
@@ -427,8 +425,8 @@ def generate_arts_config_for_node(
 ) -> Path:
     """Generate a node-specific arts.cfg for compilation (goes in build/ directory).
 
-    This config is used at compile time to embed nodeCount into the executable.
-    counterFolder is set to a placeholder - the sbatch script will override it per-run
+    This config is used at compile time to embed node_count into the executable.
+    counter_folder is set to a placeholder - the sbatch script will override it per-run
     when creating the runtime arts.cfg in each run directory.
 
     Args:
@@ -443,54 +441,43 @@ def generate_arts_config_for_node(
     content = base_config.read_text()
 
     # CRITICAL: Use absolute paths - jobs run from different working directories
-    # counterFolder placeholder - sbatch script sets actual path per run
+    # counter_folder placeholder - sbatch script sets actual path per run
     counter_dir_placeholder = (build_node_dir / "counters").resolve()
 
-    # Update or add counterFolder (placeholder, will be overridden per-run)
-    if re.search(r'^counterFolder\s*=', content, re.MULTILINE):
+    # Update or add counter_folder (placeholder, will be overridden per-run)
+    if re.search(r'^counter_folder\s*=', content, re.MULTILINE):
         content = re.sub(
-            r'^counterFolder\s*=.*$',
-            f'counterFolder={counter_dir_placeholder}',
+            r'^counter_folder\s*=.*$',
+            f'counter_folder={counter_dir_placeholder}',
             content,
             flags=re.MULTILINE
         )
     else:
-        content = content.replace('[ARTS]', f'[ARTS]\ncounterFolder={counter_dir_placeholder}')
+        content = content.replace('[ARTS]', f'[ARTS]\ncounter_folder={counter_dir_placeholder}')
 
-    # Update or add counterStartPoint
-    if re.search(r'^counterStartPoint\s*=', content, re.MULTILINE):
+    # Update node_count.
+    if re.search(r'^node_count\s*=', content, re.MULTILINE):
         content = re.sub(
-            r'^counterStartPoint\s*=.*$',
-            'counterStartPoint=1',
+            r'^node_count\s*=.*$',
+            f'node_count={node_count}',
             content,
             flags=re.MULTILINE
         )
     else:
-        content = content.replace('[ARTS]', '[ARTS]\ncounterStartPoint=1')
+        content = content.replace('[ARTS]', f'[ARTS]\nnode_count={node_count}')
 
-    # Update nodeCount
-    if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^nodeCount\s*=.*$',
-            f'nodeCount={node_count}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nnodeCount={node_count}')
-
-    # Update threads to match this build combination.
+    # Update worker_threads to match this build combination.
     # (SLURM runtime still exports SLURM_CPUS_PER_TASK, but keeping the config
     # aligned with the combination makes artifacts self-describing.)
-    if re.search(r'^threads\s*=', content, re.MULTILINE):
+    if re.search(r'^worker_threads\s*=', content, re.MULTILINE):
         content = re.sub(
-            r'^threads\s*=.*$',
-            f'threads={threads}',
+            r'^worker_threads\s*=.*$',
+            f'worker_threads={threads}',
             content,
             flags=re.MULTILINE
         )
     else:
-        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
+        content = content.replace('[ARTS]', f'[ARTS]\nworker_threads={threads}')
 
     # Ensure launcher is slurm
     if re.search(r'^launcher\s*=', content, re.MULTILINE):
@@ -503,7 +490,7 @@ def generate_arts_config_for_node(
     else:
         content = content.replace('[ARTS]', '[ARTS]\nlauncher=slurm')
 
-    # Clear nodes and masterNode - SLURM launcher ignores these
+    # Clear nodes and master_node - SLURM launcher ignores these.
     # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)
     if re.search(r'^nodes\s*=', content, re.MULTILINE):
         content = re.sub(
@@ -513,10 +500,10 @@ def generate_arts_config_for_node(
             flags=re.MULTILINE
         )
 
-    if re.search(r'^masterNode\s*=', content, re.MULTILINE):
+    if re.search(r'^master_node\s*=', content, re.MULTILINE):
         content = re.sub(
-            r'^masterNode\s*=.*$',
-            '# masterNode= (managed by SLURM)',
+            r'^master_node\s*=.*$',
+            '# master_node= (managed by SLURM)',
             content,
             flags=re.MULTILINE
         )

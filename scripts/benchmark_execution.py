@@ -109,7 +109,7 @@ class BenchmarkProcessRunner:
         if request.env:
             run_env.update(request.env)
         if request.counter_dir:
-            run_env["counterFolder"] = str(request.counter_dir)
+            run_env["counter_folder"] = str(request.counter_dir)
 
         cmd = self._build_command(request)
         perf_output: Optional[Path] = None

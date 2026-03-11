@@ -165,6 +165,17 @@ def get_carts_dir() -> Path:
     return carts_dir
 
 
+def arts_runtime_is_installed(carts_dir: Optional[Path] = None) -> bool:
+    """Return True when the installed ARTS runtime is present and linkable."""
+    root = carts_dir or get_carts_dir()
+    install_dir = root / ".install" / "arts"
+    lib_dir = install_dir / "lib"
+    cmake_config = lib_dir / "cmake" / "ARTS" / "ARTSConfig.cmake"
+    public_header = install_dir / "include" / "arts.h"
+    has_library = any(path.is_file() for path in lib_dir.glob("libarts*"))
+    return cmake_config.is_file() and public_header.is_file() and has_library
+
+
 BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = BENCHMARKS_DIR / "configs"
 PROFILES_DIR = CONFIGS_DIR / "profiles"
@@ -439,6 +450,15 @@ def _sanitize_config_token(value: str, fallback: str = "default") -> str:
     return token or fallback
 
 
+def _upsert_arts_cfg_value(content: str, key: str, value: object) -> str:
+    """Replace or insert one top-level ARTS config assignment."""
+    line = f"{key}={value}"
+    pattern = rf"^{re.escape(key)}\s*=.*$"
+    if re.search(pattern, content, re.MULTILINE):
+        return re.sub(pattern, line, content, flags=re.MULTILINE)
+    return content.replace("[ARTS]", f"[ARTS]\n{line}", 1)
+
+
 def generate_arts_config(
     base_path: Path,
     threads: int,
@@ -450,16 +470,17 @@ def generate_arts_config(
     """Generate temporary arts.cfg with specific configuration from a template.
 
     The base_path must be a valid config file that serves as a template.
-    This ensures proper node hostnames are preserved for the SSH launcher.
+    For SSH launcher templates we preserve and truncate the configured
+    hostnames. For local and Slurm launchers, node_count is sufficient.
 
     Args:
-        base_path: Template config file (required). Must contain nodes= with hostnames.
+        base_path: Template config file (required).
         threads: Worker thread count per node.
         counter_dir: Optional directory for counter output.
         launcher: ARTS launcher type (ssh, slurm, lsf, local).
-        nodes_override: If set, use only the first N nodes from the template's nodes= list.
+        nodes_override: If set, override node_count in the generated config.
 
-    Note: For Slurm, nodeCount in config is IGNORED - ARTS reads SLURM_NNODES
+    Note: For Slurm, node_count in config is IGNORED - ARTS reads SLURM_NNODES
     from environment (set by srun). The launcher controls HOW we invoke the
     executable, not just what's in the config.
     """
@@ -468,63 +489,34 @@ def generate_arts_config(
 
     content = base_path.read_text()
 
-    # Update threads
-    if re.search(r'^threads\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^threads\s*=\s*\d+', f'threads={threads}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
+    # CLI --threads maps to ARTS worker_threads in the v2 runtime schema.
+    content = _upsert_arts_cfg_value(content, "worker_threads", threads)
 
-    # Handle nodes override: truncate the nodes= list and update nodeCount
+    # Handle node override.
     if nodes_override is not None:
-        all_nodes = get_arts_cfg_nodes(base_path)
-        if nodes_override > len(all_nodes):
-            raise ValueError(
-                f"Requested --nodes {nodes_override} but config '{base_path}' only has {len(all_nodes)} node(s).\n"
-                f"Use --arts-config to specify a config template with sufficient nodes.\n"
-                f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
-            )
-        truncated = all_nodes[:nodes_override]
-        truncated_str = ",".join(truncated)
-
-        # Update nodes= line
-        if re.search(r'^nodes\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^nodes\s*=.*$', f'nodes={truncated_str}', content, flags=re.MULTILINE)
-        else:
-            content = content.replace(
-                '[ARTS]', f'[ARTS]\nnodes={truncated_str}')
-
-        # Update nodeCount
-        if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^nodeCount\s*=\s*\d+', f'nodeCount={nodes_override}', content, flags=re.MULTILINE)
-        else:
-            content = content.replace(
-                '[ARTS]', f'[ARTS]\nnodeCount={nodes_override}')
-
-        # Update masterNode to first node in truncated list
-        if re.search(r'^masterNode\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^masterNode\s*=.*$', f'masterNode={truncated[0]}', content, flags=re.MULTILINE)
+        content = _upsert_arts_cfg_value(content, "node_count", nodes_override)
+        if launcher == "ssh":
+            all_nodes = get_arts_cfg_nodes(base_path)
+            if nodes_override > len(all_nodes):
+                raise ValueError(
+                    f"Requested --nodes {nodes_override} but SSH config '{base_path}' only has {len(all_nodes)} node(s).\n"
+                    f"Use --arts-config to specify a config template with sufficient nodes.\n"
+                    f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
+                )
+            truncated = all_nodes[:nodes_override]
+            content = _upsert_arts_cfg_value(content, "nodes", ",".join(truncated))
+            content = _upsert_arts_cfg_value(content, "master_node", truncated[0])
 
     # Update launcher
-    if re.search(r'^launcher\s*=', content, re.MULTILINE):
-        content = re.sub(r'^launcher\s*=\s*\w+',
-                         f'launcher={launcher}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nlauncher={launcher}')
+    content = _upsert_arts_cfg_value(content, "launcher", launcher)
 
     # Add counter settings if requested
     if counter_dir:
-        # Remove any existing counterFolder/counterStartPoint lines to avoid duplicates
-        content = re.sub(r'^counterFolder\s*=.*\n?', '', content, flags=re.MULTILINE)
-        content = re.sub(r'^counterStartPoint\s*=.*\n?', '', content, flags=re.MULTILINE)
-        content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
+        content = _upsert_arts_cfg_value(content, "counter_folder", counter_dir)
 
     # Determine node count for filename
     node_count = nodes_override if nodes_override else get_arts_cfg_int(
-        base_path, "nodeCount") or 1
+        base_path, "node_count") or 1
 
     # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
     # The carts-benchmarks directory is shared across all nodes via mounted volume.
@@ -559,40 +551,12 @@ def _resolve_effective_arts_config(
     for candidate in [
         bench_path / "arts.cfg",
         bench_path.parent / "arts.cfg",
-        BENCHMARKS_DIR / "arts.cfg",
         DEFAULT_ARTS_CONFIG,
     ]:
         if candidate.exists():
             return candidate.resolve()
 
     return DEFAULT_ARTS_CONFIG.resolve()
-
-
-def _validate_thread_network_topology(
-    arts_cfg_path: Optional[Path],
-    threads: int,
-    node_count: int,
-    benchmark_name: str,
-) -> None:
-    """Validate that at least one worker thread remains after network threads."""
-    if node_count <= 1:
-        return
-
-    outgoing = get_arts_cfg_int(arts_cfg_path, "outgoing")
-    incoming = get_arts_cfg_int(arts_cfg_path, "incoming")
-    sender_threads = outgoing if outgoing is not None else 1
-    receiver_threads = incoming if incoming is not None else 1
-    min_threads = sender_threads + receiver_threads + 1
-
-    if threads < min_threads:
-        cfg_display = str(arts_cfg_path) if arts_cfg_path else "<default>"
-        raise ValueError(
-            f"Invalid thread topology for '{benchmark_name}' (nodes={node_count}): "
-            f"threads={threads}, outgoing={sender_threads}, incoming={receiver_threads}. "
-            f"Need threads >= {min_threads} so at least one worker thread remains "
-            f"(threads > outgoing + incoming). "
-            f"Adjust step threads or update outgoing/incoming in {cfg_display}."
-        )
 
 
 def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
@@ -604,14 +568,14 @@ def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
 
 
 _EMBEDDED_ARTS_CFG_KEYS = (
-    "threads",
-    "incoming",
-    "outgoing",
-    "nodeCount",
+    "worker_threads",
+    "receiver_threads",
+    "sender_threads",
+    "node_count",
     "launcher",
     "protocol",
-    "port",
-    "counterFolder",
+    "default_ports",
+    "counter_folder",
 )
 
 
@@ -1609,8 +1573,8 @@ class BenchmarkRunner:
         # Determine effective config template
         effective_config = _resolve_effective_arts_config(bench_path, base_config)
 
-        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
-        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
+        base_nodes = get_arts_cfg_int(effective_config, "node_count") or 1
+        base_threads = get_arts_cfg_int(effective_config, "worker_threads") or 1
         base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
         desired_launcher = launcher if launcher is not None else base_launcher
 
@@ -1643,14 +1607,11 @@ class BenchmarkRunner:
                     omp_threads=actual_omp_threads,
                     launcher=desired_launcher,
                 )
-                _validate_thread_network_topology(
-                    effective_config, threads, desired_nodes, name
-                )
 
                 # Counter directory: artifact_manager path or explicit --counter-dir
                 run_counter_dir: Optional[Path] = None
                 if am:
-                    # Always set counterFolder so counters land in place
+                    # Always set counter_folder so counters land in place.
                     run_counter_dir = am.get_counter_dir(name, config, 1)
                 elif counter_dir is not None:
                     run_counter_dir = counter_dir
@@ -1745,7 +1706,7 @@ class BenchmarkRunner:
             perf_interval: Interval in seconds for perf stat sampling (default: 0.1).
             perf_output_name: Filename for perf CSV output (default: perf_cache.csv).
             perf_output_dir: Directory for perf CSV output (default: executable's parent).
-            counter_dir: Optional path to override the embedded counterFolder config value
+            counter_dir: Optional path to override the embedded counter_folder config value
                 via the ARTS per-variable env var mechanism.
         """
         result = self._run_process_request(
@@ -2044,8 +2005,8 @@ class BenchmarkRunner:
         # Determine effective config template.
         effective_config = _resolve_effective_arts_config(bench_path, arts_config)
 
-        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
-        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
+        base_threads = get_arts_cfg_int(effective_config, "worker_threads") or 1
+        base_nodes = get_arts_cfg_int(effective_config, "node_count") or 1
         base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
 
         desired_threads = threads_override if threads_override is not None else base_threads
@@ -2062,12 +2023,9 @@ class BenchmarkRunner:
             omp_threads=actual_omp_threads,
             launcher=desired_launcher,
         )
-        _validate_thread_network_topology(
-            effective_config, desired_threads, desired_nodes, name
-        )
         am = self.artifact_manager  # shorthand (may be None)
 
-        # Skip benchmarks disabled for multi-node when running with nodeCount > 1
+        # Skip benchmarks disabled for multi-node when running with node_count > 1.
         if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
             return self._make_skip_result(
                 name, size,
@@ -3695,6 +3653,9 @@ def _rebuild_arts(
     if not profile.exists():
         print_error(f"Profile not found: {profile}")
         raise typer.Exit(1)
+    if debug < 0 or debug > 3:
+        print_error(f"Invalid ARTS debug level: {debug} (expected 0..3)")
+        raise typer.Exit(1)
 
     cmd = [
         "carts", "build", "--arts",
@@ -4087,8 +4048,11 @@ def _run_step_slurm(
 
 def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
     """Rebuild ARTS when a resolved step requests instrumentation changes."""
-    if not step_config.should_rebuild_arts:
+    runtime_missing = not arts_runtime_is_installed()
+    if not step_config.should_rebuild_arts and not runtime_missing:
         return
+    if runtime_missing:
+        print_warning("ARTS runtime is not installed; forcing rebuild before benchmark step")
     _rebuild_arts(
         console,
         debug=step_config.debug,
@@ -4485,8 +4449,8 @@ def run(
                 config_source = "default"
 
             cfg = parse_arts_cfg(effective_config)
-            arts_threads = int(cfg.get("threads", "1"))
-            arts_nodes = int(cfg.get("nodeCount", "1"))
+            arts_threads = int(cfg.get("worker_threads", "1"))
+            arts_nodes = int(cfg.get("node_count", "1"))
             arts_launcher = cfg.get("launcher", "ssh")
 
             # Apply CLI overrides for display
@@ -4866,7 +4830,7 @@ def _execute_slurm_batch(
     # Get threads from explicit config or default config.
     if threads is None:
         thread_source_cfg = explicit_arts_config or DEFAULT_ARTS_CONFIG.resolve()
-        threads = get_arts_cfg_int(thread_source_cfg, "threads") or 8
+        threads = get_arts_cfg_int(thread_source_cfg, "worker_threads") or 8
 
     nodes_display = format_node_counts_display(node_counts)
 
@@ -4964,7 +4928,6 @@ def _execute_slurm_batch(
     )
     deps = SlurmExecutorDependencies(
         resolve_effective_arts_config=_resolve_effective_arts_config,
-        validate_thread_network_topology=_validate_thread_network_topology,
         parse_time_limit_seconds=parse_slurm_time_limit_seconds,
         get_carts_dir=get_carts_dir,
         get_benchmarks_dir=get_benchmarks_dir,

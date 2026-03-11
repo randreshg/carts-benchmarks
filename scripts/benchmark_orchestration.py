@@ -211,6 +211,10 @@ class StepResolver:
                 raise ValueError(
                     f"Step '{step.name}': profile not found: {step.profile}"
                 )
+            if step.debug < 0 or step.debug > 3:
+                raise ValueError(
+                    f"Step '{step.name}': debug must be in the ARTS range 0..3"
+                )
 
     @staticmethod
     def resolve_effective_size_label(

@@ -38,7 +38,7 @@ OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
 CARTS_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 ARTS_CFG ?= $(firstword $(wildcard arts.cfg) $(wildcard $(CARTS_ROOT)/external/carts-benchmarks/configs/local.cfg))
 ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
-ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),artsConfig=$(ARTS_CFG),)
+ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),ARTS_CONFIG=$(ARTS_CFG),)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
