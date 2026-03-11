@@ -41,6 +41,7 @@ class SlurmBatchRequest:
     node_counts: List[int]
     size: str
     runs: int
+    timeout: int
     partition: Optional[str]
     time_limit: str
     account: Optional[str]
@@ -303,6 +304,7 @@ class SlurmBatchExecutor:
                 reference_timeout = self.deps.parse_time_limit_seconds(
                     self.request.time_limit
                 )
+                reference_timeout = min(reference_timeout, self.request.timeout)
                 reference = self.host.ensure_omp_reference(
                     bench,
                     self.request.size,

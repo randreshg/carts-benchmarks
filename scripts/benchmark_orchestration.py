@@ -73,7 +73,7 @@ class SlurmStepExecutionRequest:
     """Shared context for executing resolved steps through SLURM."""
 
     partition: Optional[str]
-    time_limit: str
+    time_limit: Optional[str]
     results_dir: Path
     verbose: bool
     quiet: bool

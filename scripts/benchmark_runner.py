@@ -258,6 +258,25 @@ def parse_slurm_time_limit_seconds(value: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def format_slurm_time_limit(seconds: int) -> str:
+    """Format a wall-clock limit in seconds as HH:MM:SS."""
+    total = max(1, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def resolve_slurm_time_limit(
+    timeout_seconds: int,
+    explicit_time_limit: Optional[str],
+) -> str:
+    """Resolve the scheduler wall time for a benchmark run."""
+    if explicit_time_limit is not None:
+        parse_slurm_time_limit_seconds(explicit_time_limit)
+        return explicit_time_limit
+    return format_slurm_time_limit(timeout_seconds + 30)
+
+
 def normalize_requested_benchmarks(
     benchmarks: Optional[List[str]],
 ) -> Tuple[Optional[List[str]], bool]:
@@ -3993,7 +4012,8 @@ def _run_step_slurm(
     node_counts: List[int],
     runs: int,
     partition: Optional[str],
-    time_limit: str,
+    timeout: int,
+    time_limit: Optional[str],
     arts_config: Optional[Path],
     threads_list: Optional[List[int]],
     results_dir: Path,
@@ -4020,6 +4040,7 @@ def _run_step_slurm(
             benchmarks=bench_list,
             nodes=nodes_arg,
             size=size,
+            timeout=timeout,
             runs=runs,
             partition=partition,
             time_limit=time_limit,
@@ -4102,6 +4123,7 @@ def _run_slurm_resolved_step(
         node_counts=step_config.node_counts or [],
         runs=step_config.runs,
         partition=request.partition,
+        timeout=step_config.timeout,
         time_limit=request.time_limit,
         arts_config=step_config.arts_config,
         threads_list=step_config.threads_list,
@@ -4215,8 +4237,9 @@ def run(
         False, "--slurm", help="Submit as SLURM batch jobs instead of local execution"),
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p", help="SLURM partition (only with --slurm)"),
-    time_limit: str = typer.Option(
-        "01:00:00", "--time-limit", help="SLURM time limit per job (only with --slurm)"),
+    time_limit: Optional[str] = typer.Option(
+        None, "--time-limit",
+        help="SLURM wall time per job (defaults to benchmark timeout + 30s; only with --slurm)"),
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
@@ -4728,13 +4751,17 @@ def _execute_slurm_batch(
     size: str = typer.Option(
         DEFAULT_SIZE, "--size", "-s",
         help=SIZE_HELP),
+    timeout: int = typer.Option(
+        DEFAULT_TIMEOUT, "--timeout",
+        help="Execution timeout in seconds inside each SLURM job"),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of runs per benchmark"),
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p",
         help="SLURM partition (uses cluster default if not specified)"),
-    time_limit: str = typer.Option(
-        "01:00:00", "--time", "-t", help="Time limit per job (HH:MM:SS)"),
+    time_limit: Optional[str] = typer.Option(
+        None, "--time-limit", "--time",
+        help="SLURM wall time per job (defaults to benchmark timeout + 30s)"),
     account: Optional[str] = typer.Option(
         None, "--account", "-A", help="SLURM account (if required)"),
     arts_config: Optional[Path] = typer.Option(
@@ -4818,6 +4845,7 @@ def _execute_slurm_batch(
     size = parse_size(size, "--size")
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
     require_slurm_commands(dry_run)
+    resolved_time_limit = resolve_slurm_time_limit(timeout, time_limit)
 
     # Parse node counts from --nodes parameter
     node_counts = parse_node_spec(nodes)
@@ -4843,6 +4871,7 @@ def _execute_slurm_batch(
         f"Config: {config_display}",
         f"Nodes: {nodes_display}, Threads: {threads}",
         f"Runs per benchmark: {runs}, Size: {size}",
+        f"Timeout: {timeout}s (wall {resolved_time_limit})",
     ]
     if profile:
         subtitle_parts.append(f"Profile: {profile}")
@@ -4904,8 +4933,9 @@ def _execute_slurm_batch(
         node_counts=node_counts,
         size=size,
         runs=runs,
+        timeout=timeout,
         partition=partition,
-        time_limit=time_limit,
+        time_limit=resolved_time_limit,
         account=account,
         explicit_arts_config=explicit_arts_config,
         threads=threads,
