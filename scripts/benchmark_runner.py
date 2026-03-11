@@ -71,6 +71,7 @@ from slurm.experiment import (
     find_multinode_disabled_benchmarks,
     format_node_counts_display,
     require_slurm_commands,
+    validate_requested_node_counts,
 )
 
 # Shared constants and parsing
@@ -3560,12 +3561,11 @@ def _make_experiment_step(
             if base_candidate.exists():
                 return str(base_candidate)
 
-        if p.exists():
-            return str(p.resolve())
-
         search_dirs: List[Path] = []
         if field == "arts_config":
-            search_dirs = [CONFIGS_DIR]
+            # Benchmark experiments live in the carts-benchmarks submodule, but
+            # the Docker runtime config lives in the parent CARTS repo.
+            search_dirs = [get_carts_dir(), CONFIGS_DIR]
         elif field == "profile":
             search_dirs = [PROFILES_DIR]
 
@@ -3573,6 +3573,9 @@ def _make_experiment_step(
             candidate = (search_dir / p).resolve()
             if candidate.exists():
                 return str(candidate)
+
+        if p.exists():
+            return str(p.resolve())
 
         raise ValueError(f"Cannot resolve {field} '{raw}' - file not found")
 
@@ -3865,6 +3868,15 @@ def _parse_nodes_spec(spec: str) -> List[int]:
         return parse_threads(spec)
     except ValueError:
         return parse_node_spec(spec)
+
+
+def _format_sweep_display(values: List[int]) -> str:
+    """Format a small numeric sweep for concise CLI display."""
+    if len(values) == 1:
+        return str(values[0])
+    if len(values) <= 5:
+        return ", ".join(str(value) for value in values)
+    return f"{values[0]}-{values[-1]} ({len(values)} values)"
 
 _STEP_RESOLVER = StepResolver(
     configs_dir=CONFIGS_DIR,
@@ -4452,29 +4464,42 @@ def run(
 
         # Show effective ARTS configuration
         if bench_list:
-            if arts_config:
-                effective_config = arts_config
-                config_source = "custom"
+            if len(steps) > 1:
+                console.print("ARTS Config (experiment): varies by step")
+                console.print("  Path: resolved from each step definition")
             else:
-                effective_config = DEFAULT_ARTS_CONFIG
-                config_source = "default"
+                display_step = _STEP_RESOLVER.resolve_step_config(
+                    steps[0],
+                    1,
+                    bench_list,
+                    step_defaults,
+                )
 
-            cfg = parse_arts_cfg(effective_config)
-            arts_threads = int(cfg.get("worker_threads", "1"))
-            arts_nodes = int(cfg.get("node_count", "1"))
-            arts_launcher = cfg.get("launcher", "ssh")
+                if display_step.arts_config is not None:
+                    effective_config = display_step.arts_config
+                    config_source = f"step '{display_step.name}'"
+                elif arts_config:
+                    effective_config = arts_config
+                    config_source = "custom"
+                else:
+                    effective_config = DEFAULT_ARTS_CONFIG
+                    config_source = "default"
 
-            # Apply CLI overrides for display
-            if base_threads_list and len(base_threads_list) == 1:
-                arts_threads = int(base_threads_list[0])
-            if base_node_counts and len(base_node_counts) == 1:
-                arts_nodes = int(base_node_counts[0])
-            if launcher:
-                arts_launcher = launcher
+                cfg = parse_arts_cfg(effective_config)
+                arts_threads: str = str(int(cfg.get("worker_threads", "1")))
+                arts_nodes: str = str(int(cfg.get("node_count", "1")))
+                arts_launcher = cfg.get("launcher", "ssh")
 
-            items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
-            console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
-            console.print(f"  Path: {effective_config}")
+                if display_step.threads_list:
+                    arts_threads = _format_sweep_display(display_step.threads_list)
+                if display_step.node_counts:
+                    arts_nodes = format_node_counts_display(display_step.node_counts)
+                if display_step.launcher:
+                    arts_launcher = display_step.launcher
+
+                items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
+                console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
+                console.print(f"  Path: {effective_config}")
 
         console.print(f"Benchmarks: {len(bench_list)}\n")
 
@@ -4837,6 +4862,8 @@ def _execute_slurm_batch(
 
     # Parse node counts from --nodes parameter
     node_counts = parse_node_spec(nodes)
+    if not dry_run:
+        validate_requested_node_counts(node_counts, partition)
 
     # Determine explicit arts config override (if provided).
     explicit_arts_config = arts_config.resolve() if arts_config else None

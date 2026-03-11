@@ -3,7 +3,7 @@ SRC := 2mm.c
 LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
-# LARGE (64-core): 3200 (50x64). EXTRALARGE (1920-worker): NI=5760 (3x1920), others=4800. 4.05x LARGE
+# LARGE: NI=NJ=NK=NL=3600. EXTRALARGE: NI=NJ=NK=NL=5760
 SMALL_CFLAGS ?= -DSMALL_DATASET
 MEDIUM_CFLAGS ?= -DSTANDARD_DATASET
 LARGE_CFLAGS ?= -DNI=3600 -DNJ=3600 -DNK=3600 -DNL=3600

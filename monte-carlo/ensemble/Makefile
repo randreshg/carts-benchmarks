@@ -4,8 +4,8 @@ LDFLAGS := -lm -ldl
 
 # Size configurations for Monte Carlo Ensemble
 # Peak memory = num_threads * STATE_DIM^2 * 8 bytes (alloc inside loop)
-# LARGE (64-core): 12800=64x200 samples, peak ~256MB
-# EXTRALARGE (1920-worker): 48000=1920x25 samples, peak ~240MB/node. 3.75x LARGE
+# LARGE: NUM_SAMPLES=16320, STATE_DIM=1024
+# EXTRALARGE: NUM_SAMPLES=61440, STATE_DIM=1024
 SMALL_CFLAGS ?= -DNUM_SAMPLES=1000 -DSTATE_DIM=1024
 MEDIUM_CFLAGS ?= -DNUM_SAMPLES=5000 -DSTATE_DIM=1024
 LARGE_CFLAGS ?= -DNUM_SAMPLES=16320 -DSTATE_DIM=1024

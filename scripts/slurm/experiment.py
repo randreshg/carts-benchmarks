@@ -131,13 +131,119 @@ def require_slurm_commands(dry_run: bool) -> None:
     """Validate that the required SLURM executables are available."""
     required_slurm_cmds = ["sbatch"]
     if not dry_run:
-        required_slurm_cmds.extend(["squeue", "sacct", "scontrol"])
+        required_slurm_cmds.extend(["squeue", "sacct", "scontrol", "sinfo"])
     missing_slurm_cmds = [cmd for cmd in required_slurm_cmds if shutil.which(cmd) is None]
     if missing_slurm_cmds:
         raise ValueError(
             "Missing required SLURM command(s): "
             + ", ".join(missing_slurm_cmds)
             + ". Run this on a SLURM login node or add SLURM tools to PATH."
+        )
+
+
+def _run_slurm_query(args: Sequence[str], label: str) -> str:
+    """Run a SLURM query command and normalize failures into ValueError."""
+    try:
+        result = subprocess.run(
+            list(args),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise ValueError(f"Failed to run {label}: {exc}") from exc
+
+    if result.returncode != 0:
+        raise ValueError(
+            f"Failed to query {label}: {(result.stderr or result.stdout or '').strip()}"
+        )
+    return result.stdout or ""
+
+
+def _expand_slurm_nodelist(node_spec: str) -> List[str]:
+    """Expand a Slurm hostlist expression into concrete node names."""
+    output = _run_slurm_query(
+        ["scontrol", "show", "hostnames", node_spec],
+        f"SLURM node list '{node_spec}'",
+    )
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def get_effective_slurm_partition(partition: Optional[str]) -> Optional[str]:
+    """Resolve the partition that SLURM will use for this request."""
+    if partition:
+        return partition
+
+    output = _run_slurm_query(["sinfo", "-h", "-o", "%P"], "SLURM partitions")
+    discovered: List[str] = []
+    default_partition: Optional[str] = None
+
+    for raw in output.splitlines():
+        token = raw.strip()
+        if not token:
+            continue
+        normalized = token.replace("*", "").strip()
+        if not normalized:
+            continue
+        if normalized not in discovered:
+            discovered.append(normalized)
+        if "*" in token and default_partition is None:
+            default_partition = normalized
+
+    if default_partition is not None:
+        return default_partition
+    if len(discovered) == 1:
+        return discovered[0]
+    return None
+
+
+def get_slurm_partition_nodes(partition: str) -> List[str]:
+    """Return the concrete nodes visible in the requested Slurm partition."""
+    output = _run_slurm_query(
+        ["sinfo", "-h", "-p", partition, "-o", "%N"],
+        f"SLURM partition '{partition}'",
+    )
+
+    nodes: List[str] = []
+    seen: set[str] = set()
+    for raw in output.splitlines():
+        spec = raw.strip()
+        if not spec or spec.lower() == "n/a":
+            continue
+        for node in _expand_slurm_nodelist(spec):
+            if node in seen:
+                continue
+            seen.add(node)
+            nodes.append(node)
+    return nodes
+
+
+def validate_requested_node_counts(
+    node_counts: Sequence[int],
+    partition: Optional[str],
+) -> None:
+    """Fail fast when a SLURM sweep requests more nodes than are available."""
+    if not node_counts:
+        return
+
+    effective_partition = get_effective_slurm_partition(partition)
+    if effective_partition is None:
+        raise ValueError(
+            "Cannot validate --nodes because SLURM does not expose a unique default "
+            "partition. Pass --partition explicitly."
+        )
+
+    available_nodes = get_slurm_partition_nodes(effective_partition)
+    if not available_nodes:
+        label = effective_partition
+        raise ValueError(f"No nodes are available in SLURM partition '{label}'.")
+
+    requested_max = max(node_counts)
+    available_count = len(available_nodes)
+    if requested_max > available_count:
+        raise ValueError(
+            f"Requested --nodes up to {requested_max}, but partition '{effective_partition}' only exposes "
+            f"{available_count} node(s): {', '.join(available_nodes)}"
         )
 
 

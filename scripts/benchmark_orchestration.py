@@ -255,8 +255,7 @@ class StepResolver:
             else self.profiles_dir / "profile-none.cfg"
         )
         should_rebuild_arts = (
-            defaults.explicit_step_mode
-            or step_def.profile is not None
+            step_def.profile is not None
             or step_def.debug > 0
         )
 
