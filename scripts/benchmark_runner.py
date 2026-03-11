@@ -2739,10 +2739,7 @@ def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     total = sum(run_result.kernel_timings.values())
     count = len(run_result.kernel_timings)
 
-    if count == 1:
-        return total, f"{total:.4f}s"
-    else:
-        return total, f"{total:.4f}s [{count}]"
+    return total, f"{total:.2f}s"
 
 
 def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
@@ -2750,10 +2747,7 @@ def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     if not run_result.e2e_timings:
         return None, ""
     total = sum(run_result.e2e_timings.values())
-    count = len(run_result.e2e_timings)
-    if count == 1:
-        return total, f"{total:.4f}s"
-    return total, f"{total:.4f}s [{count}]"
+    return total, f"{total:.2f}s"
 
 
 def create_results_table(results: List[BenchmarkResult]) -> Table:
@@ -2761,7 +2755,6 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("Build", justify="center")
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("A.Startup", justify="right")
@@ -2776,27 +2769,16 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
     table.add_column("Speedup", justify="right")
 
     has_fallback = False
-    has_multi_kernel = False
-    has_multi_e2e = False
     for r in results:
-        # Build status (combined)
-        if r.build_arts.status == Status.PASS and r.build_omp.status == Status.PASS:
-            build = f"[green]\u2713[/] {r.build_arts.duration_sec + r.build_omp.duration_sec:.1f}s"
-        else:
-            build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
-
         arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
-
         omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
 
-        # Track if any benchmark has multiple kernels / e2e segments
-        if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
-            has_multi_kernel = True
-        if r.run_arts.e2e_timings and len(r.run_arts.e2e_timings) > 1:
-            has_multi_e2e = True
-
-        # Run status with e2e time (fall back to kernel, then total duration)
-        if r.run_arts.status == Status.PASS:
+        # ARTS E2E: skip → compile failure → runtime failure → success
+        if r.build_arts.status == Status.SKIP:
+            run_arts = "[dim]- Skip[/]"
+        elif r.build_arts.status != Status.PASS:
+            run_arts = "[red]\u2717 Compile[/]"
+        elif r.run_arts.status == Status.PASS:
             if arts_e2e is not None:
                 run_arts = f"{status_symbol(r.run_arts.status)} {arts_e2e_str}"
             else:
@@ -2807,9 +2789,14 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                     run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
                 has_fallback = True
         else:
-            run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
+            run_arts = "[red]\u2717 Runtime[/]"
 
-        if r.run_omp.status == Status.PASS:
+        # OMP E2E: skip → compile failure → runtime failure → success
+        if r.build_omp.status == Status.SKIP:
+            run_omp = "[dim]- Skip[/]"
+        elif r.build_omp.status != Status.PASS:
+            run_omp = "[red]\u2717 Compile[/]"
+        elif r.run_omp.status == Status.PASS:
             if omp_e2e is not None:
                 run_omp = f"{status_symbol(r.run_omp.status)} {omp_e2e_str}"
             else:
@@ -2820,7 +2807,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                     run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
                 has_fallback = True
         else:
-            run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
+            run_omp = "[red]\u2717 Runtime[/]"
 
         # Correctness
         if r.verification.correct:
@@ -2832,7 +2819,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
         # Section times (both ARTS and OMP)
         def _fmt_sec(val: "Optional[float]") -> str:
-            return f"{val:.4f}s" if val is not None else "[dim]-[/]"
+            return f"{val:.2f}s" if val is not None else "[dim]-[/]"
 
         startup_arts = _fmt_sec(r.timing.arts_startup_sec)
         startup_omp = _fmt_sec(r.timing.omp_startup_sec)
@@ -2859,7 +2846,6 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
         table.add_row(
             r.name,
-            build,
             run_arts,
             run_omp,
             startup_arts,
@@ -2874,16 +2860,8 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
             speedup,
         )
 
-    # Build caption based on what notations are used
-    captions = []
-    if has_multi_kernel:
-        captions.append("[N] = sum of N kernels")
-    if has_multi_e2e:
-        captions.append("[N] = sum of N e2e segments")
     if has_fallback:
-        captions.append("* = speedup not based on kernel")
-    if captions:
-        table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
+        table.caption = "[dim]* = speedup not based on kernel[/]"
 
     return table
 
@@ -2939,7 +2917,6 @@ def create_live_table(
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("CARTS Build", justify="center")
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("A.Startup", justify="right")
@@ -2954,61 +2931,53 @@ def create_live_table(
     table.add_column("Speedup", justify="right")
 
     has_fallback = False
-    has_multi_kernel = False
     for bench in benchmarks:
         if bench in results and results[bench]:
             # Completed runs - show running statistics
             runs_list = results[bench]
-            run_count = len(runs_list)
             r = runs_list[-1]  # Latest result for status checks
 
-            # CARTS Build time (only ARTS build, with statistics)
-            arts_build_times = [run.build_arts.duration_sec for run in runs_list
-                                if run.build_arts.status == Status.PASS]
-            if arts_build_times:
-                stats = compute_stats(arts_build_times)
-                stddev = stats.get('stddev', 0.0)
-                build = f"[green]\u2713[/] {stats['mean']:.1f}s ({stddev:.2f}s) [{run_count}]"
+            # ARTS E2E: skip → compile failure → runtime failure → mean time
+            if r.build_arts.status == Status.SKIP:
+                run_arts = "[dim]- Skip[/]"
+            elif r.build_arts.status != Status.PASS:
+                run_arts = "[red]\u2717 Compile[/]"
             else:
-                build = f"[red]\u2717[/] {r.build_arts.status.value}"
-
-            # ARTS E2E time with statistics
-            arts_e2e_times = [sum(run.run_arts.e2e_timings.values()) for run in runs_list
-                              if run.run_arts.e2e_timings]
-            if arts_e2e_times:
-                stats = compute_stats(arts_e2e_times)
-                stddev = stats.get('stddev', 0.0)
-                run_arts = f"[green]\u2713[/] {stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            elif r.run_arts.status == Status.PASS:
-                # Fallback to kernel times
-                arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
-                if arts_kernel is not None:
-                    run_arts = f"[green]\u2713[/] {arts_kernel_str}*"
+                arts_e2e_times = [sum(run.run_arts.e2e_timings.values()) for run in runs_list
+                                  if run.run_arts.e2e_timings]
+                if arts_e2e_times:
+                    stats = compute_stats(arts_e2e_times)
+                    run_arts = f"[green]\u2713[/] {stats['mean']:.2f}s"
+                elif r.run_arts.status == Status.PASS:
+                    arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+                    if arts_kernel is not None:
+                        run_arts = f"[green]\u2713[/] {arts_kernel_str}*"
+                    else:
+                        run_arts = f"[green]\u2713[/] {r.run_arts.duration_sec:.2f}s*"
+                    has_fallback = True
                 else:
-                    run_arts = f"[green]\u2713[/] {r.run_arts.duration_sec:.2f}s*"
-                has_fallback = True
-            else:
-                run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
+                    run_arts = "[red]\u2717 Runtime[/]"
 
-            # OMP E2E time with statistics
-            omp_e2e_times = []
-            for run in runs_list:
-                if run.run_omp.e2e_timings:
-                    omp_e2e_times.append(sum(run.run_omp.e2e_timings.values()))
-            if omp_e2e_times:
-                stats = compute_stats(omp_e2e_times)
-                stddev = stats.get('stddev', 0.0)
-                run_omp = f"[green]\u2713[/] {stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            elif r.run_omp.status == Status.PASS:
-                # Fallback to kernel times
-                omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
-                if omp_kernel is not None:
-                    run_omp = f"[green]\u2713[/] {omp_kernel_str}*"
-                else:
-                    run_omp = f"[green]\u2713[/] {r.run_omp.duration_sec:.2f}s*"
-                has_fallback = True
+            # OMP E2E: skip → compile failure → runtime failure → mean time
+            if r.build_omp.status == Status.SKIP:
+                run_omp = "[dim]- Skip[/]"
+            elif r.build_omp.status != Status.PASS:
+                run_omp = "[red]\u2717 Compile[/]"
             else:
-                run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
+                omp_e2e_times = [sum(run.run_omp.e2e_timings.values()) for run in runs_list
+                                 if run.run_omp.e2e_timings]
+                if omp_e2e_times:
+                    stats = compute_stats(omp_e2e_times)
+                    run_omp = f"[green]\u2713[/] {stats['mean']:.2f}s"
+                elif r.run_omp.status == Status.PASS:
+                    omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+                    if omp_kernel is not None:
+                        run_omp = f"[green]\u2713[/] {omp_kernel_str}*"
+                    else:
+                        run_omp = f"[green]\u2713[/] {r.run_omp.duration_sec:.2f}s*"
+                    has_fallback = True
+                else:
+                    run_omp = "[red]\u2717 Runtime[/]"
 
             # Correctness (based on latest run)
             if r.verification.correct:
@@ -3018,31 +2987,25 @@ def create_live_table(
             else:
                 correct = "[red]\u2717 NO[/]"
 
-            # Speedup with statistics
+            # Speedup (mean only)
             speedups = [run.timing.speedup for run in runs_list if run.timing.speedup > 0]
             if speedups:
-                stats = compute_stats(speedups)
-                mean_speedup = stats['mean']
-                stddev = stats.get('stddev', 0.0)
+                mean_speedup = compute_stats(speedups)['mean']
                 if mean_speedup >= 1.0:
-                    speedup = f"[green]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
+                    speedup = f"[green]{mean_speedup:.2f}x[/]"
                 elif mean_speedup >= 0.8:
-                    speedup = f"[yellow]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
+                    speedup = f"[yellow]{mean_speedup:.2f}x[/]"
                 else:
-                    speedup = f"[red]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
+                    speedup = f"[red]{mean_speedup:.2f}x[/]"
                 if r.timing.speedup_basis != "kernel":
-                    speedup = speedup.replace(f"[{run_count}]", f"[{run_count}]*")
+                    speedup += "*"
                     has_fallback = True
             else:
                 speedup = "[dim]-[/]"
 
-            # Track if any benchmark has multiple kernels
-            if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
-                has_multi_kernel = True
-
             # Section times (both ARTS and OMP, latest run)
             def _fmt_sec(val: "Optional[float]") -> str:
-                return f"{val:.4f}s" if val is not None else "[dim]-[/]"
+                return f"{val:.2f}s" if val is not None else "[dim]-[/]"
 
             startup_arts = _fmt_sec(r.timing.arts_startup_sec)
             startup_omp = _fmt_sec(r.timing.omp_startup_sec)
@@ -3053,7 +3016,7 @@ def create_live_table(
             cleanup_arts = _fmt_sec(r.timing.arts_cleanup_sec)
             cleanup_omp = _fmt_sec(r.timing.omp_cleanup_sec)
 
-            table.add_row(bench, build, run_arts, run_omp,
+            table.add_row(bench, run_arts, run_omp,
                           startup_arts, startup_omp,
                           kernel_arts, kernel_omp,
                           verify_arts, verify_omp,
@@ -3063,54 +3026,38 @@ def create_live_table(
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
             if current_phase == Phase.BUILD_ARTS:
-                build = "[yellow]⏳ ARTS...[/]"
-                run_arts = "[dim]-[/]"
+                run_arts = "[yellow]\u23f3 Building...[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.BUILD_OMP:
-                # Show ARTS build time if available (CARTS Build = ARTS only)
+                # ARTS build done or skipped
                 if current_partial and "build_arts" in current_partial:
-                    build_arts_result = current_partial["build_arts"]
-                    if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
+                    ba = current_partial["build_arts"]
+                    if ba.status == Status.SKIP:
+                        run_arts = "[dim]- Skip[/]"
+                    elif ba.status == Status.PASS:
+                        run_arts = "[dim]-[/]"
                     else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}"
+                        run_arts = "[red]\u2717 Compile[/]"
                 else:
-                    build = "[yellow]⏳ building...[/]"
-                run_arts = "[dim]-[/]"
-                run_omp = "[dim]-[/]"
+                    run_arts = "[dim]-[/]"
+                run_omp = "[yellow]\u23f3 Building...[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.RUN_ARTS:
-                # Show CARTS build time (ARTS only)
-                if current_partial and "build_arts" in current_partial:
-                    build_arts_result = current_partial["build_arts"]
-                    if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
-                    else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}"
-                else:
-                    build = "[green]✓[/]"
-                run_arts = "[yellow]⏳ running...[/]"
+                run_arts = "[yellow]\u23f3 Running...[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.RUN_OMP:
-                # Show CARTS build time (ARTS only)
-                if current_partial and "build_arts" in current_partial:
-                    build_arts_result = current_partial["build_arts"]
-                    if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
-                    else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}"
-                else:
-                    build = "[green]✓[/]"
                 # ARTS run completed, show e2e time if available in partial results
                 if current_partial and "run_arts" in current_partial:
                     run_arts_result = current_partial["run_arts"]
-                    arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
-                    if run_arts_result.status == Status.PASS:
+                    if run_arts_result.status == Status.SKIP:
+                        run_arts = "[dim]- Skip[/]"
+                    elif run_arts_result.status == Status.PASS:
+                        arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
                         if arts_e2e is not None:
                             run_arts = f"{status_symbol(run_arts_result.status)} {arts_e2e_str}"
                         else:
@@ -3121,21 +3068,19 @@ def create_live_table(
                             else:
                                 run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.duration_sec:.2f}s*"
                     else:
-                        run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.status.value}"
+                        run_arts = "[red]\u2717 Runtime[/]"
                 else:
-                    run_arts = "[green]✓[/]"
-                run_omp = "[yellow]⏳ running...[/]"
+                    run_arts = "[green]\u2713[/]"
+                run_omp = "[yellow]\u23f3 Running...[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             else:
-                build = "[yellow]⏳...[/]"
-                run_arts = "[dim]-[/]"
+                run_arts = "[yellow]\u23f3...[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             table.add_row(
                 f"[bold]{bench}[/]",
-                build,
                 run_arts,
                 run_omp,
                 "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
@@ -3149,21 +3094,14 @@ def create_live_table(
                 f"[dim]{bench}[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
-                "[dim]-[/]",
                 "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
                 "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
             )
 
-    # Build caption based on what notations are used
-    captions = []
-    if has_multi_kernel:
-        captions.append("[N] = sum of N kernels")
     if has_fallback:
-        captions.append("* = speedup not based on kernel")
-    if captions:
-        table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
+        table.caption = "[dim]* = speedup not based on kernel[/]"
 
     return table
 
