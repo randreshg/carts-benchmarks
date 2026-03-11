@@ -70,7 +70,7 @@ int main(void) {
   // Initialize arrays
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
-      f[i][j] = 0.0;
+      f[i][j] = ((i + j) % 17 + 1) * 0.01;
       u[i][j] = 0.0;
       unew[i][j] = 0.0;
     }

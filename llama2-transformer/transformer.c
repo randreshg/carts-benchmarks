@@ -163,7 +163,7 @@ static void initialize_test_data(float **token_embedding_table,
   // Token embedding table [VOCAB_SIZE][DIM]
   for (int i = 0; i < VOCAB_SIZE; i++) {
     for (int j = 0; j < DIM; j++) {
-      token_embedding_table[i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+      token_embedding_table[i][j] = 0.01f * (float)((i * 7 + j * 13) % 100 - 50) / 50.0f;
     }
   }
 
@@ -178,31 +178,31 @@ static void initialize_test_data(float **token_embedding_table,
     // wq, wo [N_LAYERS][DIM][DIM]
     for (int i = 0; i < DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        wq[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        wo[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        wq[l][i][j] = 0.01f * (float)((l * 3 + i * 7 + j * 13) % 100 - 50) / 50.0f;
+        wo[l][i][j] = 0.01f * (float)((l * 3 + i * 11 + j * 19) % 100 - 50) / 50.0f;
       }
     }
 
     // wk, wv [N_LAYERS][KV_DIM][DIM]
     for (int i = 0; i < KV_DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        wk[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        wv[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        wk[l][i][j] = 0.01f * (float)((l * 5 + i * 11 + j * 17) % 100 - 50) / 50.0f;
+        wv[l][i][j] = 0.01f * (float)((l * 5 + i * 13 + j * 23) % 100 - 50) / 50.0f;
       }
     }
 
     // w1, w3 [N_LAYERS][HIDDEN_DIM][DIM]
     for (int i = 0; i < HIDDEN_DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        w1[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        w3[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        w1[l][i][j] = 0.01f * (float)((l * 7 + i * 13 + j * 19) % 100 - 50) / 50.0f;
+        w3[l][i][j] = 0.01f * (float)((l * 7 + i * 17 + j * 29) % 100 - 50) / 50.0f;
       }
     }
 
     // w2 [N_LAYERS][DIM][HIDDEN_DIM]
     for (int i = 0; i < DIM; i++) {
       for (int j = 0; j < HIDDEN_DIM; j++) {
-        w2[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        w2[l][i][j] = 0.01f * (float)((l * 11 + i * 17 + j * 23) % 100 - 50) / 50.0f;
       }
     }
   }
@@ -398,7 +398,6 @@ int main(void) {
   // Initialize
   initialize_state(x, xb, xb2, hb, hb2, q_buf, att_buf, logits, key_cache,
                    value_cache);
-  srand(42);
   initialize_test_data(token_embedding_table, rms_att_weight, rms_ffn_weight,
                        wq, wk, wv, wo, w1, w2, w3, rms_final_weight);
 
