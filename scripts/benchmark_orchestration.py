@@ -65,6 +65,7 @@ class LocalStepExecutionRequest:
     clean: bool
     quiet: bool
     artifact_manager: ArtifactManager
+    variant: Optional[str] = None  # None=both, "arts", "openmp"
 
 
 @dataclass(frozen=True)

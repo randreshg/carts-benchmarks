@@ -101,7 +101,6 @@ int main(int argc, char **argv) {
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("atax");
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < ny; i++) {
     checksum += y[i];
   }

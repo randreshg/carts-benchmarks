@@ -36,9 +36,9 @@ static void seissol_volume_integral(float **fluxOut,
                                     const float **dofs,
                                     const float **gradMatrix,
                                     const float **fluxMatrix) {
-#pragma omp parallel for schedule(static)
+  float buffer[N_QUAD];
+#pragma omp parallel for schedule(static) private(buffer)
   for (int elem = 0; elem < N_ELEMENTS; ++elem) {
-    float buffer[N_QUAD];
     for (int q = 0; q < N_QUAD; ++q) {
       float val = 0.0f;
       for (int b = 0; b < N_BASIS; ++b) {

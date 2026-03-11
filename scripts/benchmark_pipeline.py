@@ -37,6 +37,7 @@ class ConfigExecutionPlan:
     report_speedup: bool = True
     env_overrides: Dict[str, str] = field(default_factory=dict)
     persisted_env_overrides: Optional[Dict[str, str]] = None
+    variant: Optional[str] = None  # None=both, "arts", "openmp"
 
 
 @dataclass(frozen=True)
@@ -158,27 +159,36 @@ class ConfigExecutionExecutor:
 
     def _build_variants(self, hooks: ExecutionHooks) -> ConfigBuildOutputs:
         execution = self.plan.execution
-        hooks.emit_phase(Phase.BUILD_ARTS)
-        build_arts = self.host.build_benchmark(
-            execution.name,
-            execution.size,
-            "arts",
-            execution.effective_arts_cfg,
-            execution.effective_cflags,
-            self.plan.compile_args,
-            build_output_dir=execution.build_output_dir,
-        )
+        variant = self.plan.variant  # None=both, "arts", "openmp"
+        skip_result = BuildResult(status=Status.SKIP, duration_sec=0.0, output="")
+
+        if variant != "openmp":
+            hooks.emit_phase(Phase.BUILD_ARTS)
+            build_arts = self.host.build_benchmark(
+                execution.name,
+                execution.size,
+                "arts",
+                execution.effective_arts_cfg,
+                execution.effective_cflags,
+                self.plan.compile_args,
+                build_output_dir=execution.build_output_dir,
+            )
+        else:
+            build_arts = skip_result
         hooks.store_partial("build_arts", build_arts)
 
-        hooks.emit_phase(Phase.BUILD_OMP)
-        build_omp = self.host.build_benchmark(
-            execution.name,
-            execution.size,
-            "openmp",
-            None,
-            execution.effective_cflags,
-            build_output_dir=execution.build_output_dir,
-        )
+        if variant != "arts":
+            hooks.emit_phase(Phase.BUILD_OMP)
+            build_omp = self.host.build_benchmark(
+                execution.name,
+                execution.size,
+                "openmp",
+                None,
+                execution.effective_cflags,
+                build_output_dir=execution.build_output_dir,
+            )
+        else:
+            build_omp = skip_result
         hooks.store_partial("build_omp", build_omp)
 
         return ConfigBuildOutputs(build_arts=build_arts, build_omp=build_omp)

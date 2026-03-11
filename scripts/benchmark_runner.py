@@ -1546,6 +1546,7 @@ class BenchmarkRunner:
         report_speedup: bool,
         env_overrides: Dict[str, str],
         persisted_env_overrides: Optional[Dict[str, str]] = None,
+        variant: Optional[str] = None,
     ) -> ConfigExecutionPlan:
         """Create the shared execution plan for one resolved benchmark config."""
         return ConfigExecutionPlan(
@@ -1566,6 +1567,7 @@ class BenchmarkRunner:
                 if persisted_env_overrides is not None
                 else None
             ),
+            variant=variant,
         )
 
     def run_with_thread_sweep(
@@ -1586,6 +1588,7 @@ class BenchmarkRunner:
         compile_args: Optional[str] = None,
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
+        variant: Optional[str] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
@@ -1705,6 +1708,7 @@ class BenchmarkRunner:
                     report_speedup=(desired_nodes == 1),
                     env_overrides=env,
                     persisted_env_overrides=env,
+                    variant=variant,
                 )
                 results.extend(ConfigExecutionExecutor(self, plan).execute())
 
@@ -2025,6 +2029,7 @@ class BenchmarkRunner:
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
         cflags: str = "",
+        variant: Optional[str] = None,
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -2032,6 +2037,7 @@ class BenchmarkRunner:
             phase_callback: Optional callback invoked when phase changes.
                            Used by run_all to update live display.
             partial_results: Optional dict to store partial results as phases complete.
+            variant: None=both, "arts"=ARTS only, "openmp"=OpenMP only.
         """
         bench_path = self.benchmarks_dir / name
 
@@ -2134,6 +2140,7 @@ class BenchmarkRunner:
             sweep_log_names=False,
             report_speedup=(desired_nodes == 1),
             env_overrides=self._create_common_env(),
+            variant=variant,
         )
         hooks = ExecutionHooks(
             phase_callback=phase_callback,
@@ -2159,6 +2166,7 @@ class BenchmarkRunner:
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
         cflags: str = "",
+        variant: Optional[str] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2187,6 +2195,7 @@ class BenchmarkRunner:
                         run_timestamp=run_timestamp,
                         perf_dir=perf_dir,
                         cflags=cflags,
+                        variant=variant,
                     )
                     results_list.append(result)
             self.results = results_list
@@ -2242,6 +2251,7 @@ class BenchmarkRunner:
                             run_timestamp=run_timestamp,
                             perf_dir=perf_dir,
                             cflags=cflags,
+                            variant=variant,
                         )
                     except Exception as e:
                         # Log error and continue to next benchmark
@@ -3979,6 +3989,7 @@ def _run_step(
     run_timestamp: str,
     cflags: Optional[str],
     quiet: bool,
+    variant: Optional[str] = None,
 ) -> List[BenchmarkResult]:
     """Execute one resolved step using existing run dispatch rules."""
     has_thread_sweep = bool(threads_list and len(threads_list) > 1)
@@ -4012,6 +4023,7 @@ def _run_step(
             compile_args=compile_args,
             perf_enabled=perf,
             perf_interval=perf_interval,
+            variant=variant,
         )
 
     if len(bench_list) > 1 and has_sweep:
@@ -4052,6 +4064,7 @@ def _run_step(
                     runs=runs,
                     run_timestamp=run_timestamp,
                     cflags=cflags or "",
+                    variant=variant,
                 )
                 results.extend(config_results)
         return results
@@ -4071,6 +4084,7 @@ def _run_step(
         runs=runs,
         run_timestamp=run_timestamp,
         cflags=cflags or "",
+        variant=variant,
     )
 
 
@@ -4169,6 +4183,7 @@ def _run_local_resolved_step(
         run_timestamp=request.run_timestamp,
         cflags=step_config.cflags,
         quiet=request.quiet,
+        variant=request.variant,
     )
 
 
@@ -4303,6 +4318,10 @@ def run(
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
+    openmp: bool = typer.Option(
+        False, "--openmp", help="Run OpenMP only (skip ARTS build and run)"),
+    arts: bool = typer.Option(
+        False, "--arts", help="Run ARTS only (skip OpenMP build and run)"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -4319,6 +4338,11 @@ def run(
     except ValueError as e:
         print_error(str(e))
         raise typer.Exit(2)
+
+    if openmp and arts:
+        print_error("Cannot use --openmp and --arts together.")
+        raise typer.Exit(2)
+    variant: Optional[str] = "openmp" if openmp else ("arts" if arts else None)
 
     clean = not no_clean
     size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
@@ -4486,6 +4510,8 @@ def run(
     # Print header
     if not quiet:
         config_items = [f"size={effective_size_label}", f"timeout={timeout}s", f"clean={clean}"]
+        if variant:
+            config_items.append(f"variant={variant}")
         if base_threads_list:
             config_items.append(f"threads={threads}")
         if launcher is not None:
@@ -4567,6 +4593,7 @@ def run(
                 clean=clean,
                 quiet=quiet,
                 artifact_manager=am,
+                variant=variant,
             ),
         )
     except ValueError as e:
