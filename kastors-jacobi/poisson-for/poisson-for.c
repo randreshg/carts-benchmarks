@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
                   int itnew, double **u, double **unew, int block_size) {
   int i, j, it;
@@ -124,8 +128,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("poisson-for");
-  sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  CARTS_KERNEL_TIMER_STOP("poisson-for");
+  for (int rep = 0; rep < NREPS; rep++) {
+    sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
+    CARTS_KERNEL_TIMER_ACCUM("poisson-for");
+  }
+  CARTS_KERNEL_TIMER_PRINT("poisson-for");
 
   CARTS_VERIFICATION_TIMER_START("poisson-for");
 

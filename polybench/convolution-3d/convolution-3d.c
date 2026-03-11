@@ -6,6 +6,10 @@
 #include <omp.h>
 #include <stdlib.h>
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 int main(int argc, char **argv) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
@@ -41,25 +45,28 @@ int main(int argc, char **argv) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("convolution-3d");
+  for (int rep = 0; rep < NREPS; rep++) {
 
-  /* 3D Convolution kernel */
+    /* 3D Convolution kernel */
 #pragma omp parallel for schedule(static)
-  for (int i = 1; i < ni - 1; ++i) {
-    for (int j = 1; j < nj - 1; ++j) {
-      for (int k = 1; k < nk - 1; ++k) {
-        B[i][j][k] = 2 * A[i - 1][j - 1][k - 1] + 4 * A[i + 1][j - 1][k - 1] +
-                     5 * A[i - 1][j - 1][k - 1] + 7 * A[i + 1][j - 1][k - 1] +
-                     -8 * A[i - 1][j - 1][k - 1] + 10 * A[i + 1][j - 1][k - 1] +
-                     -3 * A[i][j - 1][k] + 6 * A[i][j][k] +
-                     -9 * A[i][j + 1][k] + 2 * A[i - 1][j - 1][k + 1] +
-                     4 * A[i + 1][j - 1][k + 1] + 5 * A[i - 1][j][k + 1] +
-                     7 * A[i + 1][j][k + 1] + -8 * A[i - 1][j + 1][k + 1] +
-                     10 * A[i + 1][j + 1][k + 1];
+    for (int i = 1; i < ni - 1; ++i) {
+      for (int j = 1; j < nj - 1; ++j) {
+        for (int k = 1; k < nk - 1; ++k) {
+          B[i][j][k] = 2 * A[i - 1][j - 1][k - 1] + 4 * A[i + 1][j - 1][k - 1] +
+                       5 * A[i - 1][j - 1][k - 1] + 7 * A[i + 1][j - 1][k - 1] +
+                       -8 * A[i - 1][j - 1][k - 1] + 10 * A[i + 1][j - 1][k - 1] +
+                       -3 * A[i][j - 1][k] + 6 * A[i][j][k] +
+                       -9 * A[i][j + 1][k] + 2 * A[i - 1][j - 1][k + 1] +
+                       4 * A[i + 1][j - 1][k + 1] + 5 * A[i - 1][j][k + 1] +
+                       7 * A[i + 1][j][k + 1] + -8 * A[i - 1][j + 1][k + 1] +
+                       10 * A[i + 1][j + 1][k + 1];
+        }
       }
     }
-  }
 
-  CARTS_KERNEL_TIMER_STOP("convolution-3d");
+    CARTS_KERNEL_TIMER_ACCUM("convolution-3d");
+  }
+  CARTS_KERNEL_TIMER_PRINT("convolution-3d");
 
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("convolution-3d");

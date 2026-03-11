@@ -15,6 +15,9 @@
 #ifndef POINTS_PER_DIR
 #define POINTS_PER_DIR 4
 #endif
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 #define COMP 3
 
@@ -143,8 +146,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("sw4lite_rhs4sg_base");
-  sw4lite_rhs4sg_base(rhs, u, mu, lambda, 1.0f);
-  CARTS_KERNEL_TIMER_STOP("sw4lite_rhs4sg_base");
+  for (int rep = 0; rep < NREPS; rep++) {
+    sw4lite_rhs4sg_base(rhs, u, mu, lambda, 1.0f);
+    CARTS_KERNEL_TIMER_ACCUM("sw4lite_rhs4sg_base");
+  }
+  CARTS_KERNEL_TIMER_PRINT("sw4lite_rhs4sg_base");
 
   CARTS_VERIFICATION_TIMER_START("sw4lite_rhs4sg_base");
 

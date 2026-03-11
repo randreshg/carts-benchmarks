@@ -15,6 +15,9 @@
 #ifndef DT
 #define DT 0.001
 #endif
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 static void init(double ***vx, double ***vy, double ***vz, double ***rho,
                  double ***mu, double ***lambda, double ***sxx, double ***syy,
@@ -138,8 +141,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("specfem3d_update_stress");
-  specfem3d_update_stress(sxx, syy, szz, sxy, sxz, syz, vx, vy, vz, mu, lambda);
-  CARTS_KERNEL_TIMER_STOP("specfem3d_update_stress");
+  for (int rep = 0; rep < NREPS; rep++) {
+    specfem3d_update_stress(sxx, syy, szz, sxy, sxz, syz, vx, vy, vz, mu, lambda);
+    CARTS_KERNEL_TIMER_ACCUM("specfem3d_update_stress");
+  }
+  CARTS_KERNEL_TIMER_PRINT("specfem3d_update_stress");
 
   CARTS_VERIFICATION_TIMER_START("specfem3d_update_stress");
 

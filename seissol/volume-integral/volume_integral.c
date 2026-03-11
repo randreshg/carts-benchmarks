@@ -16,6 +16,10 @@
 #define N_QUAD 36
 #endif
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void init(float **dofs, float **gradMatrix, float **fluxMatrix) {
   for (int e = 0; e < N_ELEMENTS; ++e) {
     for (int b = 0; b < N_BASIS; ++b) {
@@ -89,8 +93,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("seissol_volume_integral");
-  seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
-  CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
+  for (int rep = 0; rep < NREPS; rep++) {
+    seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
+    CARTS_KERNEL_TIMER_ACCUM("seissol_volume_integral");
+  }
+  CARTS_KERNEL_TIMER_PRINT("seissol_volume_integral");
 
   CARTS_VERIFICATION_TIMER_START("seissol_volume_integral");
 

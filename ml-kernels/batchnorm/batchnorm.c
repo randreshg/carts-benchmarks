@@ -44,6 +44,10 @@
 
 #define EPSILON 0.00001f
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 /*
  * Compute mean across batch and spatial dimensions for each channel
  *
@@ -272,9 +276,12 @@ int main(int argc, char **argv) {
 
   // Run batch normalization
   CARTS_KERNEL_TIMER_START("batchnorm");
-  batchnorm_forward(x, output, scales, biases, batch, channels, spatial,
-                    mean, variance);
-  CARTS_KERNEL_TIMER_STOP("batchnorm");
+  for (int rep = 0; rep < NREPS; rep++) {
+    batchnorm_forward(x, output, scales, biases, batch, channels, spatial,
+                      mean, variance);
+    CARTS_KERNEL_TIMER_ACCUM("batchnorm");
+  }
+  CARTS_KERNEL_TIMER_PRINT("batchnorm");
 
   // Compute checksum (diagonal sampling, fabs for stability)
   CARTS_VERIFICATION_TIMER_START("batchnorm");

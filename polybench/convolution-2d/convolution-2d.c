@@ -20,6 +20,10 @@
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include "convolution-2d.h"
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 /* Array initialization. */
 static void init_array(int ni, int nj, DATA_TYPE **A) {
   int i, j;
@@ -89,8 +93,11 @@ int main(int argc, char **argv) {
 
   /* Run kernel. */
   CARTS_KERNEL_TIMER_START("convolution-2d");
-  kernel_conv2d(ni, nj, A, B);
-  CARTS_KERNEL_TIMER_STOP("convolution-2d");
+  for (int rep = 0; rep < NREPS; rep++) {
+    kernel_conv2d(ni, nj, A, B);
+    CARTS_KERNEL_TIMER_ACCUM("convolution-2d");
+  }
+  CARTS_KERNEL_TIMER_PRINT("convolution-2d");
 
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("convolution-2d");
