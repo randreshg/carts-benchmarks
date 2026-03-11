@@ -200,6 +200,7 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
 echo "Node Count: $SLURM_NNODES"
 echo "Counter Dir: $COUNTER_DIR"
+echo "Timeout: {timeout_seconds}s"
 echo "Start: $(date -Iseconds)"
 echo "=========================================="
 
@@ -207,7 +208,7 @@ echo "=========================================="
 echo ""
 echo "[ARTS] Running benchmark..."
 ARTS_START=$(date +%s)
-{srun_command}
+timeout --signal=TERM --kill-after=30s {timeout_seconds}s {srun_command}
 ARTS_EXIT=$?
 ARTS_END=$(date +%s)
 ARTS_DURATION=$((ARTS_END - ARTS_START))
@@ -252,7 +253,7 @@ if [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
     export OMP_NUM_THREADS={threads}
     export OMP_WAIT_POLICY=ACTIVE
     OMP_START=$(date +%s)
-    {omp_run_command}
+    timeout --signal=TERM --kill-after=30s {timeout_seconds}s {omp_run_command}
     OMP_EXIT=$?
     OMP_END=$(date +%s)
     OMP_DURATION=$((OMP_END - OMP_START))
@@ -404,6 +405,7 @@ def generate_sbatch_script(
         slurm_job_result_script=slurm_job_result_abs,
         size=config.size,
         threads=config.threads,
+        timeout_seconds=config.timeout_seconds,
     )
 
     # Create run directory

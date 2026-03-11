@@ -516,6 +516,7 @@ class SlurmBatchExecutor:
                     run_dir=run_dir,
                     size=self.request.size,
                     threads=self.request.threads,
+                    timeout_seconds=self.request.timeout,
                     gdb=self.request.gdb,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval,

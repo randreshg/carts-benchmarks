@@ -34,6 +34,7 @@ class SlurmJobConfig:
     run_dir: Path
     size: str
     threads: int
+    timeout_seconds: int
     port: Optional[str] = None
     gdb: bool = False
     perf: bool = False
