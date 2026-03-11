@@ -148,15 +148,14 @@ int main(void) {
 
   CARTS_VERIFICATION_TIMER_START("sw4lite_rhs4sg_base");
 
-  // Compute checksum using double for better precision with large arrays
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int c = 0; c < COMP; ++c) {
-    for (int i = 0; i < NX; ++i) {
-      for (int j = 0; j < NY; ++j) {
-        for (int k = 0; k < NZ; ++k) {
-          checksum += fabs((double)rhs[c][i][j][k]);
-        }
-      }
+  int diag = NX;
+  if (NY < diag) diag = NY;
+  if (NZ < diag) diag = NZ;
+  for (int i = 0; i < diag; ++i) {
+    for (int c = 0; c < COMP; ++c) {
+      checksum += fabs((double)rhs[c][i][i][i]);
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);

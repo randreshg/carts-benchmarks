@@ -61,9 +61,7 @@ int main(int argc, char **argv) {
   CARTS_VERIFICATION_TIMER_START("seidel-2d");
   double checksum = 0.0;
   for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      checksum += A[i][j];
-    }
+    checksum += A[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

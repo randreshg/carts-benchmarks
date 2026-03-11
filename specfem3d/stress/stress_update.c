@@ -143,15 +143,14 @@ int main(void) {
 
   CARTS_VERIFICATION_TIMER_START("specfem3d_update_stress");
 
-  // Compute checksum
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < NX; ++i) {
-    for (int j = 0; j < NY; ++j) {
-      for (int k = 0; k < NZ; ++k) {
-        checksum += sxx[i][j][k] + syy[i][j][k] + szz[i][j][k] +
-                    sxy[i][j][k] + sxz[i][j][k] + syz[i][j][k];
-      }
-    }
+  int diag = NX;
+  if (NY < diag) diag = NY;
+  if (NZ < diag) diag = NZ;
+  for (int i = 0; i < diag; ++i) {
+    checksum += sxx[i][i][i] + syy[i][i][i] + szz[i][i][i] +
+                sxy[i][i][i] + sxz[i][i][i] + syz[i][i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
 

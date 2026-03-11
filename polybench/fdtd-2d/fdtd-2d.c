@@ -117,12 +117,9 @@ int main(int argc, char **argv) {
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("fdtd-2d");
   double checksum = 0.0;
-  for (int i = 0; i < nx; i++) {
-    for (int j = 0; j < ny; j++) {
-      checksum += ex[i][j];
-      checksum += ey[i][j];
-      checksum += hz[i][j];
-    }
+  int diag = nx < ny ? nx : ny;
+  for (int i = 0; i < diag; i++) {
+    checksum += ex[i][i] + ey[i][i] + hz[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

@@ -71,7 +71,7 @@ int main(int argc, char** argv)
 
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("template");
-  /* TODO: compute checksum over live-out data */
+  /* TODO: compute checksum over live-out data (use diagonal sampling for O(n)) */
   double checksum = 0.0;
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

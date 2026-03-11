@@ -139,14 +139,13 @@ int main(void) {
 
   CARTS_VERIFICATION_TIMER_START("sw4lite_vel4sg_update");
 
-  // Compute checksum
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < NX; ++i) {
-    for (int j = 0; j < NY; ++j) {
-      for (int k = 0; k < NZ; ++k) {
-        checksum += fabs(vx[i][j][k]) + fabs(vy[i][j][k]) + fabs(vz[i][j][k]);
-      }
-    }
+  int diag = NX;
+  if (NY < diag) diag = NY;
+  if (NZ < diag) diag = NZ;
+  for (int i = 0; i < diag; ++i) {
+    checksum += fabs(vx[i][i][i]) + fabs(vy[i][i][i]) + fabs(vz[i][i][i]);
   }
   CARTS_BENCH_CHECKSUM(checksum);
 

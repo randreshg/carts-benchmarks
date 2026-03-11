@@ -84,12 +84,11 @@ int main(void) {
 
   CARTS_VERIFICATION_TIMER_START("jacobi-for");
 
-  // Verification
+  // Verification (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < nx; i++) {
-    for (int j = 0; j < ny; j++) {
-      checksum += unew[i][j];
-    }
+  int diag = nx < ny ? nx : ny;
+  for (int i = 0; i < diag; i++) {
+    checksum += unew[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
 

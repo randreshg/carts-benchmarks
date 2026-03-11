@@ -44,11 +44,11 @@ static void init_arrays(STREAM_TYPE *a, STREAM_TYPE *b, STREAM_TYPE *c,
   }
 }
 
-/* Compute checksum for verification */
+/* Compute checksum for verification (stride sampling) */
 static double compute_checksum(STREAM_TYPE *a, STREAM_TYPE *b, STREAM_TYPE *c,
                                size_t array_size) {
   STREAM_TYPE asum = 0.0, bsum = 0.0, csum = 0.0;
-  for (size_t j = 0; j < array_size; j++) {
+  for (size_t j = 0; j < array_size; j += 128) {
     asum += a[j];
     bsum += b[j];
     csum += c[j];

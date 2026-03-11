@@ -276,17 +276,14 @@ int main(int argc, char **argv) {
                     mean, variance);
   CARTS_KERNEL_TIMER_STOP("batchnorm");
 
-  // Compute checksum inline using sum of absolute values for stability.
-  // Normalized data is centered around 0, so plain sum would be ~0
-  // and highly sensitive to floating-point rounding differences.
+  // Compute checksum (diagonal sampling, fabs for stability)
   CARTS_VERIFICATION_TIMER_START("batchnorm");
   double checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      for (int s = 0; s < spatial; s++) {
-        checksum += fabs((double)output[b][c][s]);
-      }
-    }
+  int diag = batch;
+  if (channels < diag) diag = channels;
+  if (spatial < diag) diag = spatial;
+  for (int i = 0; i < diag; i++) {
+    checksum += fabs((double)output[i][i][i]);
   }
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

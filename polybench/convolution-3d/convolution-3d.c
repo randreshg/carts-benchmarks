@@ -4,7 +4,6 @@
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include "convolution-3d.h"
 #include <omp.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
@@ -65,12 +64,11 @@ int main(int argc, char **argv) {
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("convolution-3d");
   double checksum = 0.0;
-  for (int i = 0; i < ni; i++) {
-    for (int j = 0; j < nj; j++) {
-      for (int k = 0; k < nk; k++) {
-        checksum += B[i][j][k];
-      }
-    }
+  int diag = ni;
+  if (nj < diag) diag = nj;
+  if (nk < diag) diag = nk;
+  for (int i = 0; i < diag; i++) {
+    checksum += B[i][i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

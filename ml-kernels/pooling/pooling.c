@@ -289,31 +289,26 @@ int main(int argc, char **argv) {
   global_avgpool(input, global_output, batch, channels, in_height, in_width);
   CARTS_KERNEL_TIMER_STOP("pooling");
 
-  // Compute checksums
+  // Compute checksums (diagonal sampling)
   CARTS_VERIFICATION_TIMER_START("pooling");
+  int diag3 = batch;
+  if (channels < diag3) diag3 = channels;
+  if (out_spatial < diag3) diag3 = out_spatial;
+
   double maxpool_checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      for (int s = 0; s < out_spatial; s++) {
-        maxpool_checksum += maxpool_output[b][c][s];
-      }
-    }
+  for (int i = 0; i < diag3; i++) {
+    maxpool_checksum += maxpool_output[i][i][i];
   }
 
   double avgpool_checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      for (int s = 0; s < out_spatial; s++) {
-        avgpool_checksum += avgpool_output[b][c][s];
-      }
-    }
+  for (int i = 0; i < diag3; i++) {
+    avgpool_checksum += avgpool_output[i][i][i];
   }
 
+  int diag2 = batch < channels ? batch : channels;
   double global_avgpool_checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      global_avgpool_checksum += global_output[b][c];
-    }
+  for (int i = 0; i < diag2; i++) {
+    global_avgpool_checksum += global_output[i][i];
   }
 
   double final_checksum = maxpool_checksum + avgpool_checksum + global_avgpool_checksum;

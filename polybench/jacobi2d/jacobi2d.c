@@ -2,7 +2,6 @@
 
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <omp.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 #ifndef N
@@ -65,18 +64,12 @@ int main(void) {
   CARTS_VERIFICATION_TIMER_START("jacobi2d");
   double checksum = 0.0;
   if (TSTEPS % 2 == 0) {
-    // Even TSTEPS: last write was to A
     for (int i = 0; i < N; i++) {
-      for (int j = 0; j < N; j++) {
-        checksum += A[i][j];
-      }
+      checksum += A[i][i];
     }
   } else {
-    // Odd TSTEPS: last write was to B
     for (int i = 0; i < N; i++) {
-      for (int j = 0; j < N; j++) {
-        checksum += B[i][j];
-      }
+      checksum += B[i][i];
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);

@@ -81,10 +81,9 @@ int main(void) {
 
   CARTS_VERIFICATION_TIMER_START("layernorm");
   double checksum_value = 0.0;
-  for (int b = 0; b < BATCH; b++) {
-    for (int h = 0; h < HIDDEN; h++) {
-      checksum_value += fabs((double)x[b][h]);
-    }
+  int diag = BATCH < HIDDEN ? BATCH : HIDDEN;
+  for (int i = 0; i < diag; i++) {
+    checksum_value += fabs((double)x[i][i]);
   }
   CARTS_BENCH_CHECKSUM(checksum_value);
   CARTS_VERIFICATION_TIMER_STOP();

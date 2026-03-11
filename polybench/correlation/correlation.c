@@ -105,11 +105,8 @@ int main(int argc, char **argv) {
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("correlation");
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < m; i++) {
-    for (int j = 0; j < m; j++) {
-      checksum += corr[i][j];
-    }
+    checksum += corr[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

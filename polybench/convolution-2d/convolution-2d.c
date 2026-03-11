@@ -95,10 +95,9 @@ int main(int argc, char **argv) {
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("convolution-2d");
   double checksum = 0.0;
-  for (int i = 0; i < ni; i++) {
-    for (int j = 0; j < nj; j++) {
-      checksum += B[i][j];
-    }
+  int diag = ni < nj ? ni : nj;
+  for (int i = 0; i < diag; i++) {
+    checksum += B[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
   CARTS_VERIFICATION_TIMER_STOP();

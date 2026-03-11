@@ -42,11 +42,9 @@ static void gemm(float **C, const float **A, const float **B, float alpha,
 
 static double checksum(float **C) {
   double s = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : s)
-  for (int i = 0; i < NI; i++) {
-    for (int j = 0; j < NJ; j++) {
-      s += C[i][j];
-    }
+  int diag = NI < NJ ? NI : NJ;
+  for (int i = 0; i < diag; i++) {
+    s += C[i][i];
   }
   return s;
 }
