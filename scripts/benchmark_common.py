@@ -91,6 +91,9 @@ CHECKSUM_PATTERNS = [
 
 KERNEL_TIME_PATTERN = r"^\s*kernel\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
 E2E_TIME_PATTERN = r"^\s*e2e\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
+STARTUP_TIME_PATTERN = r"^\s*startup\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
+VERIFICATION_TIME_PATTERN = r"^\s*verification\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
+CLEANUP_TIME_PATTERN = r"^\s*cleanup\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
 
 
 # ============================================================================
@@ -154,6 +157,42 @@ def parse_e2e_timings(output: str) -> Dict[str, float]:
     """
     timings = {}
     for match in re.finditer(E2E_TIME_PATTERN, output, re.MULTILINE):
+        name, value = match.groups()
+        try:
+            timings[name.strip()] = float(value)
+        except ValueError:
+            pass
+    return timings
+
+
+def parse_startup_timings(output: str) -> Dict[str, float]:
+    """Extract startup timing values from output."""
+    timings = {}
+    for match in re.finditer(STARTUP_TIME_PATTERN, output, re.MULTILINE):
+        name, value = match.groups()
+        try:
+            timings[name.strip()] = float(value)
+        except ValueError:
+            pass
+    return timings
+
+
+def parse_verification_timings(output: str) -> Dict[str, float]:
+    """Extract verification timing values from output."""
+    timings = {}
+    for match in re.finditer(VERIFICATION_TIME_PATTERN, output, re.MULTILINE):
+        name, value = match.groups()
+        try:
+            timings[name.strip()] = float(value)
+        except ValueError:
+            pass
+    return timings
+
+
+def parse_cleanup_timings(output: str) -> Dict[str, float]:
+    """Extract cleanup timing values from output."""
+    timings = {}
+    for match in re.finditer(CLEANUP_TIME_PATTERN, output, re.MULTILINE):
         name, value = match.groups()
         try:
             timings[name.strip()] = float(value)
@@ -298,13 +337,16 @@ def aggregate_perf_csvs(perf_outputs: Iterable[Path]) -> Optional[Dict[str, floa
 
 
 def filter_benchmark_output(output: str) -> str:
-    """Extract only CARTS benchmark output lines (init/e2e/kernel timing, parallel/task timing, checksum).
+    """Extract only CARTS benchmark output lines (section/e2e/kernel timing, parallel/task timing, checksum).
 
     Filters out verbose ARTS runtime debug logs and keeps only benchmark-relevant output.
     """
     if not output:
         return ""
-    prefixes = ("kernel.", "e2e.", "parallel.", "task.", "checksum:", "tmp_checksum:")
+    prefixes = (
+        "startup.", "kernel.", "verification.", "cleanup.",
+        "e2e.", "parallel.", "task.", "checksum:", "tmp_checksum:",
+    )
     return "\n".join(
         line for line in output.splitlines()
         if line.startswith(prefixes) or "checksum:" in line.lower()

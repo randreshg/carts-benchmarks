@@ -73,6 +73,7 @@ static void rhs(int nx, int ny, double **f, int block_size) {
 int main(void) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("poisson-for");
+  CARTS_STARTUP_TIMER_START("poisson-for");
 
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
@@ -120,9 +121,13 @@ int main(void) {
     }
   }
 
-  // CARTS_KERNEL_TIMER_START("sweep");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("poisson-for");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  // CARTS_KERNEL_TIMER_STOP("sweep");
+  CARTS_KERNEL_TIMER_STOP("poisson-for");
+
+  CARTS_VERIFICATION_TIMER_START("poisson-for");
 
   // Compute checksum
   double checksum = 0.0;
@@ -133,6 +138,10 @@ int main(void) {
   }
   CARTS_BENCH_CHECKSUM(checksum);
 
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("poisson-for");
+
   // Free 2D arrays
   for (int i = 0; i < nx; i++) {
     free(f[i]);
@@ -142,6 +151,8 @@ int main(void) {
   free(f);
   free(u);
   free(unew);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -61,6 +61,8 @@ int main(void) {
 
   CARTS_E2E_TIMER_START("seissol_volume_integral");
 
+  CARTS_STARTUP_TIMER_START("seissol_volume_integral");
+
   // Allocate 2D arrays
   float **dofs = (float **)malloc(N_ELEMENTS * sizeof(float *));
   float **gradMatrix = (float **)malloc(N_QUAD * sizeof(float *));
@@ -84,9 +86,13 @@ int main(void) {
 
   init(dofs, gradMatrix, fluxMatrix);
 
-  // CARTS_KERNEL_TIMER_START("seissol_volume_integral");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("seissol_volume_integral");
   seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
-  // CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
+  CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
+
+  CARTS_VERIFICATION_TIMER_START("seissol_volume_integral");
 
   // Compute checksum
   double checksum = 0.0;
@@ -96,6 +102,10 @@ int main(void) {
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("seissol_volume_integral");
 
   for (int e = 0; e < N_ELEMENTS; ++e) {
     free(dofs[e]);
@@ -110,6 +120,8 @@ int main(void) {
   }
   free(gradMatrix);
   free(fluxMatrix);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -12,6 +12,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("convolution-3d");
 
+  CARTS_STARTUP_TIMER_START("convolution-3d");
   int ni = NI;
   int nj = NJ;
   int nk = NK;
@@ -38,8 +39,9 @@ int main(int argc, char **argv) {
       }
     }
   }
+  CARTS_STARTUP_TIMER_STOP();
 
-  // CARTS_KERNEL_TIMER_START("convolution-3d");
+  CARTS_KERNEL_TIMER_START("convolution-3d");
 
   /* 3D Convolution kernel */
 #pragma omp parallel for schedule(static)
@@ -58,9 +60,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  // CARTS_KERNEL_TIMER_STOP("convolution-3d");
+  CARTS_KERNEL_TIMER_STOP("convolution-3d");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("convolution-3d");
   double checksum = 0.0;
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nj; j++) {
@@ -70,8 +73,10 @@ int main(int argc, char **argv) {
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Free arrays */
+  CARTS_CLEANUP_TIMER_START("convolution-3d");
   for (int i = 0; i < ni; i++) {
     for (int j = 0; j < nj; j++) {
       free(A[i][j]);
@@ -82,6 +87,7 @@ int main(int argc, char **argv) {
   }
   free(A);
   free(B);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -82,6 +82,8 @@ int main(void) {
 
   CARTS_E2E_TIMER_START("specfem_velocity_update");
 
+  CARTS_STARTUP_TIMER_START("specfem_velocity_update");
+
   // Allocate 3D arrays
   double ***vx = (double ***)malloc(NX * sizeof(double **));
   double ***vy = (double ***)malloc(NX * sizeof(double **));
@@ -121,9 +123,13 @@ int main(void) {
 
   init(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
 
-  // CARTS_KERNEL_TIMER_START("specfem_velocity_update");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("specfem_velocity_update");
   specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  // CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
+  CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
+
+  CARTS_VERIFICATION_TIMER_START("specfem_velocity_update");
 
   // Compute checksum
   double checksum = 0.0;
@@ -135,6 +141,10 @@ int main(void) {
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("specfem_velocity_update");
 
   // Free 3D arrays
   for (int i = 0; i < NX; ++i) {
@@ -171,6 +181,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -43,6 +43,7 @@ int main(void) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("jacobi-for");
+  CARTS_STARTUP_TIMER_START("jacobi-for");
 
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
@@ -75,9 +76,13 @@ int main(void) {
     }
   }
 
-  // CARTS_KERNEL_TIMER_START("jacobi-for");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("jacobi-for");
   sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  // CARTS_KERNEL_TIMER_STOP("jacobi-for");
+  CARTS_KERNEL_TIMER_STOP("jacobi-for");
+
+  CARTS_VERIFICATION_TIMER_START("jacobi-for");
 
   // Verification
   double checksum = 0.0;
@@ -88,6 +93,10 @@ int main(void) {
   }
   CARTS_BENCH_CHECKSUM(checksum);
 
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("jacobi-for");
+
   // Free 2D arrays
   for (int i = 0; i < nx; i++) {
     free(f[i]);
@@ -97,6 +106,8 @@ int main(void) {
   free(f);
   free(u);
   free(unew);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

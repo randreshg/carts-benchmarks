@@ -84,6 +84,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("bicg");
 
+  CARTS_STARTUP_TIMER_START("bicg");
   /* Retrieve problem size. */
   int nx = NX;
   int ny = NY;
@@ -106,20 +107,15 @@ int main(int argc, char **argv) {
 
   /* Initialize array(s). */
   init_array(nx, ny, A, r, p);
-
-  /* Start timer. */
-  polybench_start_instruments;
+  CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
-  // CARTS_KERNEL_TIMER_START("bicg");
+  CARTS_KERNEL_TIMER_START("bicg");
   kernel_bicg(nx, ny, A, s, q, p, r);
-  // CARTS_KERNEL_TIMER_STOP("bicg");
-
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  CARTS_KERNEL_TIMER_STOP("bicg");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("bicg");
   double checksum = 0.0;
   for (int i = 0; i < ny; i++) {
     checksum += s[i];
@@ -128,12 +124,10 @@ int main(int argc, char **argv) {
     checksum += q[i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
-
-  /* Prevent dead-code elimination. All live-out data must be printed
-     by the function call in argument. */
-  polybench_prevent_dce(print_array(nx, ny, s, q));
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Be clean. */
+  CARTS_CLEANUP_TIMER_START("bicg");
   for (int i = 0; i < nx; i++) {
     free(A[i]);
   }
@@ -142,6 +136,7 @@ int main(int argc, char **argv) {
   free(q);
   free(p);
   free(r);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

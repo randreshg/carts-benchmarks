@@ -76,8 +76,14 @@ RESULTS_COLUMNS = [
     "speedup_basis",
     "arts_e2e_sec",
     "omp_e2e_sec",
+    "arts_startup_sec",
+    "omp_startup_sec",
     "arts_kernel_sec",
     "omp_kernel_sec",
+    "arts_verification_sec",
+    "omp_verification_sec",
+    "arts_cleanup_sec",
+    "omp_cleanup_sec",
     "arts_total_sec",
     "omp_total_sec",
     "speedup",
@@ -130,8 +136,14 @@ SUMMARY_COLUMNS = [
     "arts_e2e_cv_pct",
     "omp_e2e_mean",
     "omp_e2e_std",
+    "arts_startup_mean",
+    "omp_startup_mean",
     "arts_kernel_mean",
     "omp_kernel_mean",
+    "arts_verification_mean",
+    "omp_verification_mean",
+    "arts_cleanup_mean",
+    "omp_cleanup_mean",
     "speedup_mean",
     "speedup_std",
     "speedup_min",
@@ -1012,8 +1024,14 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "speedup_basis": result.timing.speedup_basis,
             "arts_e2e_sec": result.timing.arts_e2e_sec,
             "omp_e2e_sec": result.timing.omp_e2e_sec,
+            "arts_startup_sec": result.timing.arts_startup_sec,
+            "omp_startup_sec": result.timing.omp_startup_sec,
             "arts_kernel_sec": result.timing.arts_kernel_sec,
             "omp_kernel_sec": result.timing.omp_kernel_sec,
+            "arts_verification_sec": result.timing.arts_verification_sec,
+            "omp_verification_sec": result.timing.omp_verification_sec,
+            "arts_cleanup_sec": result.timing.arts_cleanup_sec,
+            "omp_cleanup_sec": result.timing.omp_cleanup_sec,
             "arts_total_sec": result.timing.arts_total_sec,
             "omp_total_sec": result.timing.omp_total_sec,
             "speedup": result.timing.speedup,
@@ -1154,8 +1172,14 @@ def _flatten_result_serialized(
             "speedup_basis": None,
             "arts_e2e_sec": _first_timing_value(arts.get("e2e_timings")),
             "omp_e2e_sec": _first_timing_value(omp.get("e2e_timings")),
+            "arts_startup_sec": _first_timing_value(arts.get("startup_timings")),
+            "omp_startup_sec": _first_timing_value(omp.get("startup_timings")),
             "arts_kernel_sec": _first_timing_value(arts.get("kernel_timings")),
             "omp_kernel_sec": _first_timing_value(omp.get("kernel_timings")),
+            "arts_verification_sec": _first_timing_value(arts.get("verification_timings")),
+            "omp_verification_sec": _first_timing_value(omp.get("verification_timings")),
+            "arts_cleanup_sec": _first_timing_value(arts.get("cleanup_timings")),
+            "omp_cleanup_sec": _first_timing_value(omp.get("cleanup_timings")),
             "arts_total_sec": _to_float(arts.get("duration_sec")),
             "omp_total_sec": _to_float(omp.get("duration_sec")),
             "speedup": _to_float(result.get("speedup")),
@@ -1291,15 +1315,27 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
 
         arts_e2e_values = collect("arts_e2e_sec")
         omp_e2e_values = collect("omp_e2e_sec")
+        arts_startup_values = collect("arts_startup_sec")
+        omp_startup_values = collect("omp_startup_sec")
         arts_kernel_values = collect("arts_kernel_sec")
         omp_kernel_values = collect("omp_kernel_sec")
+        arts_verification_values = collect("arts_verification_sec")
+        omp_verification_values = collect("omp_verification_sec")
+        arts_cleanup_values = collect("arts_cleanup_sec")
+        omp_cleanup_values = collect("omp_cleanup_sec")
         speedup_values = collect("speedup")
         efficiency_values = collect("parallel_efficiency")
 
         arts_e2e_mean, arts_e2e_std = _mean_std(arts_e2e_values)
         omp_e2e_mean, omp_e2e_std = _mean_std(omp_e2e_values)
+        arts_startup_mean, _ = _mean_std(arts_startup_values)
+        omp_startup_mean, _ = _mean_std(omp_startup_values)
         arts_kernel_mean, _ = _mean_std(arts_kernel_values)
         omp_kernel_mean, _ = _mean_std(omp_kernel_values)
+        arts_verification_mean, _ = _mean_std(arts_verification_values)
+        omp_verification_mean, _ = _mean_std(omp_verification_values)
+        arts_cleanup_mean, _ = _mean_std(arts_cleanup_values)
+        omp_cleanup_mean, _ = _mean_std(omp_cleanup_values)
         speedup_mean, speedup_std = _mean_std(speedup_values)
         efficiency_mean, _ = _mean_std(efficiency_values)
 
@@ -1332,8 +1368,14 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "arts_e2e_cv_pct": arts_e2e_cv,
                 "omp_e2e_mean": omp_e2e_mean,
                 "omp_e2e_std": omp_e2e_std,
+                "arts_startup_mean": arts_startup_mean,
+                "omp_startup_mean": omp_startup_mean,
                 "arts_kernel_mean": arts_kernel_mean,
                 "omp_kernel_mean": omp_kernel_mean,
+                "arts_verification_mean": arts_verification_mean,
+                "omp_verification_mean": omp_verification_mean,
+                "arts_cleanup_mean": arts_cleanup_mean,
+                "omp_cleanup_mean": omp_cleanup_mean,
                 "speedup_mean": speedup_mean,
                 "speedup_std": speedup_std,
                 "speedup_min": min(speedup_values) if speedup_values else None,

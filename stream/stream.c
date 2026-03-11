@@ -30,9 +30,6 @@
 #define STREAM_TYPE double
 #endif
 
-/* Bytes per element */
-#define BYTES_PER_WORD sizeof(STREAM_TYPE)
-
 /* Number of kernels */
 #define NUM_KERNELS 4
 
@@ -67,23 +64,7 @@ int main(void) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("stream");
 
-  /* Print benchmark info */
-  printf("-------------------------------------------------------------\n");
-  printf("STREAM version adapted for CARTS benchmarks\n");
-  printf("-------------------------------------------------------------\n");
-  printf("Array size = %zu (elements)\n", array_size);
-  printf("Memory per array = %.1f MiB (= %.1f GiB)\n",
-         BYTES_PER_WORD * ((double)array_size / 1024.0 / 1024.0),
-         BYTES_PER_WORD * ((double)array_size / 1024.0 / 1024.0 / 1024.0));
-  printf("Total memory = %.1f MiB (= %.1f GiB)\n",
-         (3.0 * BYTES_PER_WORD) * ((double)array_size / 1024.0 / 1024.0),
-         (3.0 * BYTES_PER_WORD) * ((double)array_size / 1024.0 / 1024.0 / 1024.0));
-  printf("Each kernel will be executed %d times.\n", ntimes);
-  printf("-------------------------------------------------------------\n");
-
-#ifdef _OPENMP
-  printf("Number of Threads = %d\n", omp_get_max_threads());
-#endif
+  CARTS_STARTUP_TIMER_START("stream");
 
   /* Allocate arrays - local variables, not global */
   STREAM_TYPE *a = (STREAM_TYPE *)malloc(array_size * sizeof(STREAM_TYPE));
@@ -91,7 +72,6 @@ int main(void) {
   STREAM_TYPE *c = (STREAM_TYPE *)malloc(array_size * sizeof(STREAM_TYPE));
 
   if (a == NULL || b == NULL || c == NULL) {
-    printf("Error: Failed to allocate memory\n");
     return 1;
   }
 
@@ -99,14 +79,12 @@ int main(void) {
   double times_copy[NTIMES], times_scale[NTIMES];
   double times_add[NTIMES], times_triad[NTIMES];
 
-  /* Bytes moved per kernel iteration */
-  double bytes_copy = 2.0 * BYTES_PER_WORD * array_size;
-  double bytes_scale = 2.0 * BYTES_PER_WORD * array_size;
-  double bytes_add = 3.0 * BYTES_PER_WORD * array_size;
-  double bytes_triad = 3.0 * BYTES_PER_WORD * array_size;
-
   /* Initialize arrays */
   init_arrays(a, b, c, array_size);
+
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("stream");
 
   /*
    * Main timing loop - preserves original STREAM structure:
@@ -142,39 +120,31 @@ int main(void) {
     times_triad[k] = carts_bench_get_time() - times_triad[k];
   }
 
-  /* Calculate and print results (original STREAM format) */
-  printf("Function    Best Rate MB/s  Avg time     Min time     Max time\n");
-
-  /* Process each kernel's timing data */
-  double *times_arr[NUM_KERNELS] = {times_copy, times_scale, times_add, times_triad};
-  double bytes_arr[NUM_KERNELS] = {bytes_copy, bytes_scale, bytes_add, bytes_triad};
-  const char *labels[NUM_KERNELS] = {"Copy:      ", "Scale:     ", "Add:       ", "Triad:     "};
+  /* Print per-kernel timing (parsed by Python framework) */
   const char *kernel_names[NUM_KERNELS] = {"copy", "scale", "add", "triad"};
-
+  double *times_arr[NUM_KERNELS] = {times_copy, times_scale, times_add, times_triad};
   for (int j = 0; j < NUM_KERNELS; j++) {
-    double avgtime = 0.0, maxtime = 0.0, mintime = DBL_MAX;
-    for (int k = 1; k < ntimes; k++) { /* Skip first iteration */
-      avgtime += times_arr[j][k];
+    double mintime = DBL_MAX;
+    for (int k = 1; k < ntimes; k++) {
       mintime = (times_arr[j][k] < mintime) ? times_arr[j][k] : mintime;
-      maxtime = (times_arr[j][k] > maxtime) ? times_arr[j][k] : maxtime;
     }
-    avgtime /= (double)(ntimes - 1);
-    printf("%s%12.1f  %11.6f  %11.6f  %11.6f\n", labels[j],
-           1.0E-06 * bytes_arr[j] / mintime, avgtime, mintime, maxtime);
-
-    /* Also output CARTS-format kernel times */
     printf("kernel.%s: %.6fs\n", kernel_names[j], mintime);
   }
-  printf("-------------------------------------------------------------\n");
 
+  CARTS_KERNEL_TIMER_STOP("stream");
+
+  CARTS_VERIFICATION_TIMER_START("stream");
   /* Verification */
   double checksum = compute_checksum(a, b, c, array_size);
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
+  CARTS_CLEANUP_TIMER_START("stream");
   /* Cleanup */
   free(a);
   free(b);
   free(c);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

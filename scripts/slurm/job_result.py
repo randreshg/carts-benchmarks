@@ -38,6 +38,9 @@ from benchmark_common import (
     parse_checksum,
     parse_kernel_timings,
     parse_e2e_timings,
+    parse_startup_timings,
+    parse_verification_timings,
+    parse_cleanup_timings,
 )
 from benchmark_models import Status, VerificationResult
 from benchmark_verification import verify_against_omp, verify_against_reference
@@ -240,15 +243,24 @@ def generate_result(
     arts_checksum = parse_checksum(arts_section)
     arts_kernel = parse_kernel_timings(arts_section)
     arts_e2e = parse_e2e_timings(arts_section)
+    arts_startup = parse_startup_timings(arts_section)
+    arts_verification = parse_verification_timings(arts_section)
+    arts_cleanup = parse_cleanup_timings(arts_section)
 
     # OpenMP results (only if it ran, parse from OMP section)
     omp_checksum = None
     omp_kernel = {}
     omp_e2e = {}
+    omp_startup = {}
+    omp_verification = {}
+    omp_cleanup = {}
     if omp_exit != -1 and omp_section:
         omp_checksum = parse_checksum(omp_section)
         omp_kernel = parse_kernel_timings(omp_section)
         omp_e2e = parse_e2e_timings(omp_section)
+        omp_startup = parse_startup_timings(omp_section)
+        omp_verification = parse_verification_timings(omp_section)
+        omp_cleanup = parse_cleanup_timings(omp_section)
 
     # Determine status
     status, verification_result = determine_status(
@@ -290,6 +302,9 @@ def generate_result(
             "checksum": arts_checksum,
             "kernel_timings": arts_kernel,
             "e2e_timings": arts_e2e,
+            "startup_timings": arts_startup,
+            "verification_timings": arts_verification,
+            "cleanup_timings": arts_cleanup,
         },
         "omp": {
             "exit_code": omp_exit,
@@ -297,6 +312,9 @@ def generate_result(
             "checksum": omp_checksum if omp_exit != -1 else None,
             "kernel_timings": omp_kernel if omp_exit != -1 else {},
             "e2e_timings": omp_e2e if omp_exit != -1 else {},
+            "startup_timings": omp_startup if omp_exit != -1 else {},
+            "verification_timings": omp_verification if omp_exit != -1 else {},
+            "cleanup_timings": omp_cleanup if omp_exit != -1 else {},
             "skipped": omp_exit == -1,
         },
         "slurm": {

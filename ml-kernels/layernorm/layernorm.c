@@ -52,23 +52,11 @@ static void layernorm_forward(float **x, const float *gamma, const float *beta,
   }
 }
 
-static float checksum(float **x) {
-  // Use sum of absolute values for stable checksum.
-  // Normalized data is centered around 0, so plain sum would be ~0
-  // and highly sensitive to floating-point rounding differences.
-  float sum = 0.0f;
-  for (int b = 0; b < BATCH; ++b) {
-    for (int h = 0; h < HIDDEN; ++h) {
-      sum += fabsf(x[b][h]);
-    }
-  }
-  return sum;
-}
-
 int main(void) {
-  // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("layernorm");
+
+  CARTS_STARTUP_TIMER_START("layernorm");
 
   float **x = (float **)malloc(BATCH * sizeof(float *));
   float *gamma = (float *)malloc(sizeof(float) * HIDDEN);
@@ -85,13 +73,13 @@ int main(void) {
 
   init(x, gamma, beta);
 
-  // CARTS_KERNEL_TIMER_START("layernorm");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("layernorm");
   layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
-  // CARTS_KERNEL_TIMER_STOP("layernorm");
+  CARTS_KERNEL_TIMER_STOP("layernorm");
 
-  // Verification
-  printf("layernorm checksum=%f\n", checksum(x));
-
+  CARTS_VERIFICATION_TIMER_START("layernorm");
   double checksum_value = 0.0;
   for (int b = 0; b < BATCH; b++) {
     for (int h = 0; h < HIDDEN; h++) {
@@ -99,13 +87,16 @@ int main(void) {
     }
   }
   CARTS_BENCH_CHECKSUM(checksum_value);
+  CARTS_VERIFICATION_TIMER_STOP();
 
+  CARTS_CLEANUP_TIMER_START("layernorm");
   for (int b = 0; b < BATCH; ++b) {
     free(x[b]);
   }
   free(x);
   free(gamma);
   free(beta);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

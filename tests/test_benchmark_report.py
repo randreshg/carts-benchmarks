@@ -106,6 +106,9 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 "checksum": "1.0",
                 "e2e_timings": {"gemm": omp_e2e},
                 "kernel_timings": {},
+                "startup_timings": {},
+                "verification_timings": {},
+                "cleanup_timings": {},
                 "skipped": False,
             }
         verification: dict[str, object] = {"note": "Checksums match"}
@@ -138,6 +141,9 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 "checksum": "1.0",
                 "e2e_timings": {"gemm": arts_e2e},
                 "kernel_timings": {},
+                "startup_timings": {},
+                "verification_timings": {},
+                "cleanup_timings": {},
             },
             "omp": omp_payload,
             "slurm": {
@@ -486,6 +492,9 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                         "checksum": "10.0",
                         "kernel_timings": {},
                         "e2e_timings": {"gemm": 1.0},
+                        "startup_timings": {},
+                        "verification_timings": {},
+                        "cleanup_timings": {},
                     },
                     "run_omp": {
                         "status": "PASS",
@@ -494,6 +503,9 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                         "checksum": "10.0",
                         "kernel_timings": {},
                         "e2e_timings": {"gemm": 1.2},
+                        "startup_timings": {},
+                        "verification_timings": {},
+                        "cleanup_timings": {},
                     },
                     "timing": {
                         "arts_time_sec": 1.0,

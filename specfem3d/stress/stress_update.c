@@ -88,6 +88,8 @@ int main(void) {
 
   CARTS_E2E_TIMER_START("specfem3d_update_stress");
 
+  CARTS_STARTUP_TIMER_START("specfem3d_update_stress");
+
   // Allocate 3D arrays
   double ***vx = (double ***)malloc(NX * sizeof(double **));
   double ***vy = (double ***)malloc(NX * sizeof(double **));
@@ -133,9 +135,13 @@ int main(void) {
 
   init(vx, vy, vz, rho, mu, lambda, sxx, syy, szz, sxy, sxz, syz);
 
-  // CARTS_KERNEL_TIMER_START("specfem3d_update_stress");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("specfem3d_update_stress");
   specfem3d_update_stress(sxx, syy, szz, sxy, sxz, syz, vx, vy, vz, mu, lambda);
-  // CARTS_KERNEL_TIMER_STOP("specfem3d_update_stress");
+  CARTS_KERNEL_TIMER_STOP("specfem3d_update_stress");
+
+  CARTS_VERIFICATION_TIMER_START("specfem3d_update_stress");
 
   // Compute checksum
   double checksum = 0.0;
@@ -148,6 +154,10 @@ int main(void) {
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("specfem3d_update_stress");
 
   // Free 3D arrays
   for (int i = 0; i < NX; ++i) {
@@ -190,6 +200,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -90,6 +90,9 @@ from benchmark_common import (
     parse_checksum,
     parse_kernel_timings,
     parse_e2e_timings,
+    parse_startup_timings,
+    parse_verification_timings,
+    parse_cleanup_timings,
     parse_perf_csv as _shared_parse_perf_csv,
 )
 
@@ -1515,6 +1518,9 @@ class BenchmarkRunner:
             checksum=self.extract_checksum(outcome.stdout),
             kernel_timings=self.extract_kernel_timings(outcome.stdout),
             e2e_timings=self.extract_e2e_timings(outcome.stdout),
+            startup_timings=self.extract_startup_timings(outcome.stdout),
+            verification_timings=self.extract_verification_timings(outcome.stdout),
+            cleanup_timings=self.extract_cleanup_timings(outcome.stdout),
             parallel_task_timing=self.extract_parallel_task_timings(outcome.stdout),
             perf_metrics=perf_metrics,
             perf_csv_path=perf_csv_path,
@@ -1775,6 +1781,18 @@ class BenchmarkRunner:
         """Extract end-to-end timing info from benchmark output."""
         return parse_e2e_timings(output)
 
+    def extract_startup_timings(self, output: str) -> Dict[str, float]:
+        """Extract startup timing info from benchmark output."""
+        return parse_startup_timings(output)
+
+    def extract_verification_timings(self, output: str) -> Dict[str, float]:
+        """Extract verification timing info from benchmark output."""
+        return parse_verification_timings(output)
+
+    def extract_cleanup_timings(self, output: str) -> Dict[str, float]:
+        """Extract cleanup timing info from benchmark output."""
+        return parse_cleanup_timings(output)
+
     def extract_parallel_task_timings(self, output: str) -> Optional[ParallelTaskTiming]:
         """Extract parallel region and task timing info from benchmark output.
 
@@ -1850,13 +1868,28 @@ class BenchmarkRunner:
         omp_result: RunResult,
         report_speedup: bool = True,
     ) -> TimingResult:
-        """Calculate speedup preferring E2E timings when available."""
+        """Calculate speedup preferring kernel timings when available."""
         arts_kernel = get_kernel_time(arts_result)
         omp_kernel = get_kernel_time(omp_result)
         arts_e2e = get_e2e_time(arts_result)
         omp_e2e = get_e2e_time(omp_result)
+        arts_startup = get_startup_time(arts_result)
+        omp_startup = get_startup_time(omp_result)
+        arts_verification = get_verification_time(arts_result)
+        omp_verification = get_verification_time(omp_result)
+        arts_cleanup = get_cleanup_time(arts_result)
+        omp_cleanup = get_cleanup_time(omp_result)
         arts_total = arts_result.duration_sec
         omp_total = omp_result.duration_sec
+
+        section_fields = dict(
+            arts_startup_sec=arts_startup,
+            omp_startup_sec=omp_startup,
+            arts_verification_sec=arts_verification,
+            omp_verification_sec=omp_verification,
+            arts_cleanup_sec=arts_cleanup,
+            omp_cleanup_sec=omp_cleanup,
+        )
 
         if arts_result.status != Status.PASS or omp_result.status != Status.PASS:
             return TimingResult(
@@ -1877,18 +1910,19 @@ class BenchmarkRunner:
                     if (arts_kernel is not None and omp_kernel is not None)
                     else "total"
                 ),
+                **section_fields,
             )
 
-        # Prefer E2E timings when both are available, otherwise fall back to kernel timings,
+        # Prefer kernel timings when both are available, otherwise fall back to E2E timings,
         # otherwise fall back to total process duration.
-        if arts_e2e is not None and omp_e2e is not None:
-            arts_time = arts_e2e
-            omp_time = omp_e2e
-            speedup_basis = "e2e"
-        elif arts_kernel is not None and omp_kernel is not None:
+        if arts_kernel is not None and omp_kernel is not None:
             arts_time = arts_kernel
             omp_time = omp_kernel
             speedup_basis = "kernel"
+        elif arts_e2e is not None and omp_e2e is not None:
+            arts_time = arts_e2e
+            omp_time = omp_e2e
+            speedup_basis = "e2e"
         else:
             arts_time = arts_total
             omp_time = omp_total
@@ -1922,6 +1956,7 @@ class BenchmarkRunner:
             arts_total_sec=arts_total,
             omp_total_sec=omp_total,
             speedup_basis=speedup_basis,
+            **section_fields,
         )
 
     def collect_artifacts(self, bench_path: Path) -> Artifacts:
@@ -2661,6 +2696,27 @@ def get_e2e_time(run_result: RunResult) -> Optional[float]:
     return None
 
 
+def get_startup_time(run_result: RunResult) -> Optional[float]:
+    """Get total startup time from run result."""
+    if run_result.startup_timings:
+        return sum(run_result.startup_timings.values())
+    return None
+
+
+def get_verification_time(run_result: RunResult) -> Optional[float]:
+    """Get total verification time from run result."""
+    if run_result.verification_timings:
+        return sum(run_result.verification_timings.values())
+    return None
+
+
+def get_cleanup_time(run_result: RunResult) -> Optional[float]:
+    """Get total cleanup time from run result."""
+    if run_result.cleanup_timings:
+        return sum(run_result.cleanup_timings.values())
+    return None
+
+
 def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     """Format kernel time for display. Returns (total_time, display_string).
 
@@ -2698,6 +2754,14 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
     table.add_column("Build", justify="center")
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP E2E", justify="right")
+    table.add_column("A.Startup", justify="right")
+    table.add_column("O.Startup", justify="right")
+    table.add_column("A.Kernel", justify="right")
+    table.add_column("O.Kernel", justify="right")
+    table.add_column("A.Verify", justify="right")
+    table.add_column("O.Verify", justify="right")
+    table.add_column("A.Cleanup", justify="right")
+    table.add_column("O.Cleanup", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
@@ -2756,6 +2820,19 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             correct = "[red]\u2717 NO[/]"
 
+        # Section times (both ARTS and OMP)
+        def _fmt_sec(val: "Optional[float]") -> str:
+            return f"{val:.4f}s" if val is not None else "[dim]-[/]"
+
+        startup_arts = _fmt_sec(r.timing.arts_startup_sec)
+        startup_omp = _fmt_sec(r.timing.omp_startup_sec)
+        kernel_arts = _fmt_sec(r.timing.arts_kernel_sec)
+        kernel_omp = _fmt_sec(r.timing.omp_kernel_sec)
+        verify_arts = _fmt_sec(r.timing.arts_verification_sec)
+        verify_omp = _fmt_sec(r.timing.omp_verification_sec)
+        cleanup_arts = _fmt_sec(r.timing.arts_cleanup_sec)
+        cleanup_omp = _fmt_sec(r.timing.omp_cleanup_sec)
+
         # Speedup (basis chosen in calculate_timing)
         if r.timing.speedup > 0:
             if r.timing.speedup >= 1.0:
@@ -2764,7 +2841,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                 speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
             else:
                 speedup = f"[red]{r.timing.speedup:.2f}x[/]"
-            if r.timing.speedup_basis != "e2e":
+            if r.timing.speedup_basis != "kernel":
                 speedup += "*"
                 has_fallback = True
         else:
@@ -2775,6 +2852,14 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
             build,
             run_arts,
             run_omp,
+            startup_arts,
+            startup_omp,
+            kernel_arts,
+            kernel_omp,
+            verify_arts,
+            verify_omp,
+            cleanup_arts,
+            cleanup_omp,
             correct,
             speedup,
         )
@@ -2786,7 +2871,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
     if has_multi_e2e:
         captions.append("[N] = sum of N e2e segments")
     if has_fallback:
-        captions.append("* = speedup/time not based on e2e")
+        captions.append("* = speedup not based on kernel")
     if captions:
         table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
 
@@ -2847,6 +2932,14 @@ def create_live_table(
     table.add_column("CARTS Build", justify="center")
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP E2E", justify="right")
+    table.add_column("A.Startup", justify="right")
+    table.add_column("O.Startup", justify="right")
+    table.add_column("A.Kernel", justify="right")
+    table.add_column("O.Kernel", justify="right")
+    table.add_column("A.Verify", justify="right")
+    table.add_column("O.Verify", justify="right")
+    table.add_column("A.Cleanup", justify="right")
+    table.add_column("O.Cleanup", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
@@ -2927,7 +3020,7 @@ def create_live_table(
                     speedup = f"[yellow]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
                 else:
                     speedup = f"[red]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
-                if r.timing.speedup_basis != "e2e":
+                if r.timing.speedup_basis != "kernel":
                     speedup = speedup.replace(f"[{run_count}]", f"[{run_count}]*")
                     has_fallback = True
             else:
@@ -2937,7 +3030,25 @@ def create_live_table(
             if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
                 has_multi_kernel = True
 
-            table.add_row(bench, build, run_arts, run_omp, correct, speedup)
+            # Section times (both ARTS and OMP, latest run)
+            def _fmt_sec(val: "Optional[float]") -> str:
+                return f"{val:.4f}s" if val is not None else "[dim]-[/]"
+
+            startup_arts = _fmt_sec(r.timing.arts_startup_sec)
+            startup_omp = _fmt_sec(r.timing.omp_startup_sec)
+            kernel_arts = _fmt_sec(r.timing.arts_kernel_sec)
+            kernel_omp = _fmt_sec(r.timing.omp_kernel_sec)
+            verify_arts = _fmt_sec(r.timing.arts_verification_sec)
+            verify_omp = _fmt_sec(r.timing.omp_verification_sec)
+            cleanup_arts = _fmt_sec(r.timing.arts_cleanup_sec)
+            cleanup_omp = _fmt_sec(r.timing.omp_cleanup_sec)
+
+            table.add_row(bench, build, run_arts, run_omp,
+                          startup_arts, startup_omp,
+                          kernel_arts, kernel_omp,
+                          verify_arts, verify_omp,
+                          cleanup_arts, cleanup_omp,
+                          correct, speedup)
 
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
@@ -3017,6 +3128,8 @@ def create_live_table(
                 build,
                 run_arts,
                 run_omp,
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
                 correct,
                 speedup,
             )
@@ -3027,6 +3140,8 @@ def create_live_table(
                 "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
             )
@@ -3036,7 +3151,7 @@ def create_live_table(
     if has_multi_kernel:
         captions.append("[N] = sum of N kernels")
     if has_fallback:
-        captions.append("* = speedup/time not based on e2e")
+        captions.append("* = speedup not based on kernel")
     if captions:
         table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
 
@@ -3311,6 +3426,9 @@ def export_json(
                 "checksum": r.run_arts.checksum,
                 "kernel_timings": r.run_arts.kernel_timings,
                 "e2e_timings": r.run_arts.e2e_timings,
+                "startup_timings": r.run_arts.startup_timings,
+                "verification_timings": r.run_arts.verification_timings,
+                "cleanup_timings": r.run_arts.cleanup_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_arts.parallel_task_timing),
                 "perf_metrics": asdict(r.run_arts.perf_metrics) if r.run_arts.perf_metrics else None,
                 "perf_csv_path": r.run_arts.perf_csv_path,
@@ -3322,6 +3440,9 @@ def export_json(
                 "checksum": r.run_omp.checksum,
                 "kernel_timings": r.run_omp.kernel_timings,
                 "e2e_timings": r.run_omp.e2e_timings,
+                "startup_timings": r.run_omp.startup_timings,
+                "verification_timings": r.run_omp.verification_timings,
+                "cleanup_timings": r.run_omp.cleanup_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
                 "perf_metrics": asdict(r.run_omp.perf_metrics) if r.run_omp.perf_metrics else None,
                 "perf_csv_path": r.run_omp.perf_csv_path,
@@ -3335,6 +3456,12 @@ def export_json(
                 "omp_kernel_sec": r.timing.omp_kernel_sec,
                 "arts_e2e_sec": r.timing.arts_e2e_sec,
                 "omp_e2e_sec": r.timing.omp_e2e_sec,
+                "arts_startup_sec": r.timing.arts_startup_sec,
+                "omp_startup_sec": r.timing.omp_startup_sec,
+                "arts_verification_sec": r.timing.arts_verification_sec,
+                "omp_verification_sec": r.timing.omp_verification_sec,
+                "arts_cleanup_sec": r.timing.arts_cleanup_sec,
+                "omp_cleanup_sec": r.timing.omp_cleanup_sec,
                 "arts_total_sec": r.timing.arts_total_sec,
                 "omp_total_sec": r.timing.omp_total_sec,
                 "note": r.timing.note,

@@ -107,6 +107,8 @@ int main(void) {
 
   CARTS_E2E_TIMER_START("sw4lite_rhs4sg_base");
 
+  CARTS_STARTUP_TIMER_START("sw4lite_rhs4sg_base");
+
   // Allocate 4D arrays for u and rhs [COMP][NX][NY][NZ]
   float ****u = (float ****)malloc(COMP * sizeof(float ***));
   float ****rhs = (float ****)malloc(COMP * sizeof(float ***));
@@ -138,9 +140,13 @@ int main(void) {
 
   init_array(u, mu, lambda, rhs);
 
-  // CARTS_KERNEL_TIMER_START("sw4lite_rhs4sg_base");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("sw4lite_rhs4sg_base");
   sw4lite_rhs4sg_base(rhs, u, mu, lambda, 1.0f);
-  // CARTS_KERNEL_TIMER_STOP("sw4lite_rhs4sg_base");
+  CARTS_KERNEL_TIMER_STOP("sw4lite_rhs4sg_base");
+
+  CARTS_VERIFICATION_TIMER_START("sw4lite_rhs4sg_base");
 
   // Compute checksum using double for better precision with large arrays
   double checksum = 0.0;
@@ -154,6 +160,10 @@ int main(void) {
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("sw4lite_rhs4sg_base");
 
   // Free arrays
   for (int c = 0; c < COMP; ++c) {
@@ -181,6 +191,8 @@ int main(void) {
   }
   free(mu);
   free(lambda);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

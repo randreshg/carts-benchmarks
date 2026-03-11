@@ -49,9 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
 
 //**************************************************
 // Allow flexibility for arithmetic representations
@@ -2389,23 +2387,7 @@ static inline void CalcAccelerationForNodes(
     CARTS_BENCHMARKS_START();
     CARTS_E2E_TIMER_START("lulesh");
 
-    if ((myRank == 0) && (opts.quiet == 0)) {
-      printf("Running problem size %d^3 per domain until completion\n",
-             opts.nx);
-      printf("Num processors: %d\n", numRanks);
-#if _OPENMP
-      printf("Num threads: %d\n", omp_get_max_threads());
-#endif
-      printf("Total number of elements: %lld\n\n",
-             (long long int)(numRanks * opts.nx * opts.nx * opts.nx));
-      printf("To run other sizes, use -s <integer>.\n");
-      printf("To run a fixed number of iterations, use -i <integer>.\n");
-      printf("To run a more or less balanced region set, use -b <integer>.\n");
-      printf("To change the relative costs of regions, use -c <integer>.\n");
-      printf("To print out progress, use -p\n");
-      printf("To write an output file for VisIt, use -v\n");
-      printf("See help (-h) for more options\n\n");
-    }
+    CARTS_STARTUP_TIMER_START("lulesh");
 
     // Grid dimensions
     Index_t edgeElems = opts.nx;
@@ -2654,18 +2636,13 @@ static inline void CalcAccelerationForNodes(
     e[0] = einit;
     deltatime = (0.5 * cbrt(volo[0])) / sqrt(2.0 * einit);
 
-    // Main timestep loop
-    struct timeval start, end;
-    gettimeofday(&start, NULL);
+    CARTS_STARTUP_TIMER_STOP();
 
-    // CARTS_KERNEL_TIMER_START("lulesh");
+    // Main timestep loop
+    CARTS_KERNEL_TIMER_START("lulesh");
     while ((time_val < stoptime) && (cycle < opts.its)) {
       TimeIncrement(&deltatime, &time_val, &cycle, stoptime, dtfixed, dtcourant,
                     dthydro, deltatimemultlb, deltatimemultub, dtmax);
-
-      printf("iteration %d, delta time %f, energy %f\n", cycle, deltatime,
-             e[0]);
-      fflush(stdout);
 
       LagrangeLeapFrog(
           x, y, z, xd, yd, zd, xdd, ydd, zdd, fx, fy, fz, nodalMass, e, p, q,
@@ -2678,57 +2655,15 @@ static inline void CalcAccelerationForNodes(
           c_e_cut, c_p_cut, c_ss4o3, c_q_cut, c_v_cut, c_pmin, c_emin,
           c_refdens, c_qqc, c_dvovmax, &dtcourant, &dthydro);
 
-      if ((opts.showProg != 0) && (opts.quiet == 0)) {
-        printf("cycle = %d, time = %e, dt=%e\n", cycle, time_val, deltatime);
-      }
-      // CARTS_KERNEL_TIMER_ACCUM("lulesh");
     }
+    CARTS_KERNEL_TIMER_STOP("lulesh");
 
-    gettimeofday(&end, NULL);
-    double elapsed_time = (double)(end.tv_sec - start.tv_sec) +
-                          ((double)(end.tv_usec - start.tv_usec)) / 1000000;
+    CARTS_VERIFICATION_TIMER_START("lulesh");
+    double checksum = (double)e[0];
+    CARTS_BENCH_CHECKSUM(checksum);
+    CARTS_VERIFICATION_TIMER_STOP();
 
-    // CARTS_KERNEL_TIMER_PRINT("lulesh");
-
-    // Output results
-    Real_t grindTime1 =
-        ((elapsed_time * 1e6) / cycle) / (opts.nx * opts.nx * opts.nx);
-    Real_t grindTime2 = ((elapsed_time * 1e6) / cycle) /
-                        (opts.nx * opts.nx * opts.nx * numRanks);
-
-    printf("Run completed:  \n");
-    printf("   Problem size        =  %i \n", opts.nx);
-    printf("   MPI tasks           =  %i \n", numRanks);
-    printf("   Iteration count     =  %i \n", cycle);
-    printf("   Final Origin Energy = %12.6e \n", e[0]);
-    printf("checksum: %.6e\n", e[0]);
-
-    Real_t MaxAbsDiff = 0.0;
-    Real_t TotalAbsDiff = 0.0;
-    Real_t MaxRelDiff = 0.0;
-
-    for (Index_t j = 0; j < opts.nx; ++j) {
-      for (Index_t k = j + 1; k < opts.nx; ++k) {
-        Real_t AbsDiff = FABS(e[j * opts.nx + k] - e[k * opts.nx + j]);
-        TotalAbsDiff += AbsDiff;
-        if (MaxAbsDiff < AbsDiff)
-          MaxAbsDiff = AbsDiff;
-        Real_t RelDiff = AbsDiff / e[k * opts.nx + j];
-        if (MaxRelDiff < RelDiff)
-          MaxRelDiff = RelDiff;
-      }
-    }
-
-    printf("   Testing Plane 0 of Energy Array on rank 0:\n");
-    printf("        MaxAbsDiff   = %12.6e\n", MaxAbsDiff);
-    printf("        TotalAbsDiff = %12.6e\n", TotalAbsDiff);
-    printf("        MaxRelDiff   = %12.6e\n\n", MaxRelDiff);
-
-    printf("\nElapsed time         = %10.2f (s)\n", elapsed_time);
-    printf("Grind time (us/z/c)  = %10.8g (per dom)  (%10.8g overall)\n",
-           grindTime1, grindTime2);
-    printf("FOM                  = %10.8g (z/s)\n\n", 1000.0 / grindTime2);
-
+    CARTS_CLEANUP_TIMER_START("lulesh");
     // Free arrays
     free(x);
     free(y);
@@ -2771,6 +2706,7 @@ static inline void CalcAccelerationForNodes(
     free(nodeElemCornerList);
 
     FreeIndex2D(nodelist, numElem);
+    CARTS_CLEANUP_TIMER_STOP();
 
     CARTS_E2E_TIMER_STOP();
     CARTS_BENCHMARKS_STOP();
