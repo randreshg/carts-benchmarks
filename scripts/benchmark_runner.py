@@ -344,7 +344,6 @@ BENCHMARK_SIZE_PARAMS = {
     "polybench/correlation": {"params": ["M", "N"], "complexity": "2d"},
     "polybench/covariance": {"params": ["M", "N"], "complexity": "2d"},
     # KaStORS benchmarks
-    "kastors-jacobi/jacobi-block-for": {"params": ["SIZE"], "complexity": "2d"},
     "kastors-jacobi/jacobi-for": {"params": ["SIZE"], "complexity": "2d"},
     "kastors-jacobi/jacobi-task-dep": {"params": ["SIZE"], "complexity": "2d"},
 }

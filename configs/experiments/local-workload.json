@@ -2,11 +2,11 @@
   "steps": [
     {
       "name": "workload-profiling",
-      "threads": "8,16,32,64",
+      "threads": "1,2,4,8,16",
       "nodes": "1",
       "timeout": 60,
       "runs": 1,
-      "arts_config": "local.cfg",
+      "arts_config": "external/carts-benchmarks/configs/local.cfg",
       "profile": "profile-workload.cfg",
       "launcher": "local"
     }

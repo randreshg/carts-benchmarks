@@ -561,6 +561,5 @@ Task-based parallel benchmarks for OpenMP task dependencies.
 
 - `kastors-jacobi/jacobi-task-dep` - Task dependency Jacobi
 - `kastors-jacobi/jacobi-for` - Fork-join Jacobi
-- `kastors-jacobi/jacobi-block-for` - Blocked fork-join Jacobi
 
 Use `carts benchmarks list` to see all available benchmarks.
