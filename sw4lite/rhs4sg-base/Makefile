@@ -4,10 +4,10 @@ LDFLAGS := -lm -ldl
 
 # Size configurations - can be overridden via command line
 # Parallel for: k from 4 to NZ-4, so NZ-8 iterations
-# LARGE (64-core): NZ=520 -> 512 k-iter (8x64). EXTRALARGE (1920-worker): NZ=1928 -> 1920 k-iter. 5.0x LARGE
+# LARGE (64-core): NZ=448 -> 440 k-iter (6.9x64). EXTRALARGE (1920-worker): NZ=1920. 4.29x LARGE
 SMALL_CFLAGS ?= -DNX=20 -DNY=20 -DNZ=20
 MEDIUM_CFLAGS ?= -DNX=40 -DNY=40 -DNZ=40
-LARGE_CFLAGS ?= -DNX=512 -DNY=512 -DNZ=512
-EXTRALARGE_CFLAGS ?= -DNX=512 -DNY=512 -DNZ=1920
+LARGE_CFLAGS ?= -DNX=320 -DNY=320 -DNZ=576 -DNREPS=10
+EXTRALARGE_CFLAGS ?= -DNX=320 -DNY=320 -DNZ=2304 -DNREPS=10
 
 include ../carts.mk

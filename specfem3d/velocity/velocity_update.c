@@ -15,6 +15,9 @@
 #ifndef DT
 #define DT 0.001
 #endif
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 static void init(double ***vx, double ***vy, double ***vz, double ***rho,
                  double ***sxx, double ***syy, double ***szz, double ***sxy,
@@ -126,8 +129,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("specfem_velocity_update");
-  specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
+  for (int rep = 0; rep < NREPS; rep++) {
+    specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
+    CARTS_KERNEL_TIMER_ACCUM("specfem_velocity_update");
+  }
+  CARTS_KERNEL_TIMER_PRINT("specfem_velocity_update");
 
   CARTS_VERIFICATION_TIMER_START("specfem_velocity_update");
 

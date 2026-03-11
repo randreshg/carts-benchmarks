@@ -21,6 +21,10 @@
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include "bicg.h"
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 /* Array initialization. */
 static void init_array(int nx, int ny, DATA_TYPE **A, DATA_TYPE *r,
                        DATA_TYPE *p) {
@@ -111,8 +115,11 @@ int main(int argc, char **argv) {
 
   /* Run kernel. */
   CARTS_KERNEL_TIMER_START("bicg");
-  kernel_bicg(nx, ny, A, s, q, p, r);
-  CARTS_KERNEL_TIMER_STOP("bicg");
+  for (int rep = 0; rep < NREPS; rep++) {
+    kernel_bicg(nx, ny, A, s, q, p, r);
+    CARTS_KERNEL_TIMER_ACCUM("bicg");
+  }
+  CARTS_KERNEL_TIMER_PRINT("bicg");
 
   /* Verification */
   CARTS_VERIFICATION_TIMER_START("bicg");

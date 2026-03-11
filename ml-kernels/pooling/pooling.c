@@ -58,6 +58,10 @@
 #define PADDING 0
 #endif
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 /*
  * Max Pooling Forward Pass
  *
@@ -282,12 +286,15 @@ int main(int argc, char **argv) {
 
   // Run all pooling kernels
   CARTS_KERNEL_TIMER_START("pooling");
-  maxpool_forward(input, maxpool_output, batch, channels, in_height, in_width,
-                  pool_size, stride, padding);
-  avgpool_forward(input, avgpool_output, batch, channels, in_height, in_width,
-                  pool_size, stride, padding);
-  global_avgpool(input, global_output, batch, channels, in_height, in_width);
-  CARTS_KERNEL_TIMER_STOP("pooling");
+  for (int rep = 0; rep < NREPS; rep++) {
+    maxpool_forward(input, maxpool_output, batch, channels, in_height, in_width,
+                    pool_size, stride, padding);
+    avgpool_forward(input, avgpool_output, batch, channels, in_height, in_width,
+                    pool_size, stride, padding);
+    global_avgpool(input, global_output, batch, channels, in_height, in_width);
+    CARTS_KERNEL_TIMER_ACCUM("pooling");
+  }
+  CARTS_KERNEL_TIMER_PRINT("pooling");
 
   // Compute checksums (diagonal sampling)
   CARTS_VERIFICATION_TIMER_START("pooling");

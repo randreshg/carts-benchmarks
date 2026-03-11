@@ -15,6 +15,10 @@
 #define EPS 1e-5f
 #endif
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void init(float **x, float *gamma, float *beta) {
   int idx = 0;
   for (int b = 0; b < BATCH; ++b) {
@@ -76,8 +80,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("layernorm");
-  layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
-  CARTS_KERNEL_TIMER_STOP("layernorm");
+  for (int rep = 0; rep < NREPS; rep++) {
+    layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
+    CARTS_KERNEL_TIMER_ACCUM("layernorm");
+  }
+  CARTS_KERNEL_TIMER_PRINT("layernorm");
 
   CARTS_VERIFICATION_TIMER_START("layernorm");
   double checksum_value = 0.0;

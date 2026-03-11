@@ -15,6 +15,9 @@
 #ifndef DT
 #define DT 0.0005f
 #endif
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 #define COMP 3
 
@@ -134,8 +137,11 @@ int main(void) {
   CARTS_STARTUP_TIMER_STOP();
 
   CARTS_KERNEL_TIMER_START("sw4lite_vel4sg_update");
-  sw4lite_vel4sg_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  CARTS_KERNEL_TIMER_STOP("sw4lite_vel4sg_update");
+  for (int rep = 0; rep < NREPS; rep++) {
+    sw4lite_vel4sg_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
+    CARTS_KERNEL_TIMER_ACCUM("sw4lite_vel4sg_update");
+  }
+  CARTS_KERNEL_TIMER_PRINT("sw4lite_vel4sg_update");
 
   CARTS_VERIFICATION_TIMER_START("sw4lite_vel4sg_update");
 
