@@ -473,6 +473,9 @@ class SlurmBatchExecutor:
                     bench_config,
                     run_num,
                     arts_cfg_path=build_arts_cfg,
+                    runtime_arts_overrides={
+                        "counter_folder": str((run_dir / "counters").resolve())
+                    },
                     size=self.request.size,
                     cflags=self.request.cflags,
                     compile_args=self.request.compile_args,
@@ -480,6 +483,8 @@ class SlurmBatchExecutor:
                     profile=str(self.request.profile) if self.request.profile else None,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval if self.request.perf else None,
+                    timeout=self.request.timeout,
+                    time_limit=self.request.time_limit,
                     reference_checksum=(
                         reference_checksums.get(bench).checksum
                         if node_count > 1 and bench in reference_checksums

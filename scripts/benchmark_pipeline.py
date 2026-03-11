@@ -406,6 +406,11 @@ class ConfigExecutionExecutor:
             execution.config,
             run_number,
             arts_cfg_path=run_cfg_path,
+            runtime_arts_overrides=(
+                {"counter_folder": str(counter_path)}
+                if counter_path is not None
+                else None
+            ),
             env_overrides=(
                 self.plan.persisted_env_overrides
                 if self.plan.persisted_env_overrides is not None
@@ -415,6 +420,7 @@ class ConfigExecutionExecutor:
             cflags=execution.effective_cflags or None,
             compile_args=self.plan.compile_args or None,
             perf=perf_enabled,
+            timeout=self.plan.timeout,
         )
         return artifacts
 

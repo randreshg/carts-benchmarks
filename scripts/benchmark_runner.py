@@ -594,7 +594,6 @@ _EMBEDDED_ARTS_CFG_KEYS = (
     "launcher",
     "protocol",
     "default_ports",
-    "counter_folder",
 )
 
 
@@ -1627,17 +1626,9 @@ class BenchmarkRunner:
                     launcher=desired_launcher,
                 )
 
-                # Counter directory: artifact_manager path or explicit --counter-dir
-                run_counter_dir: Optional[Path] = None
-                if am:
-                    # Always set counter_folder so counters land in place.
-                    run_counter_dir = am.get_counter_dir(name, config, 1)
-                elif counter_dir is not None:
-                    run_counter_dir = counter_dir
-
-                # Generate arts.cfg with thread count, launcher, node count, counter dir
+                # Generate arts.cfg with thread count, launcher, and node count.
                 arts_cfg = generate_arts_config(
-                    effective_config, threads, run_counter_dir,
+                    effective_config, threads, None,
                     desired_launcher, desired_nodes, benchmark_name=name
                 )
 
@@ -2065,15 +2056,12 @@ class BenchmarkRunner:
             need_generated = True
         if launcher_override is not None and launcher_override != base_launcher:
             need_generated = True
-        if run_counter_dir is not None:
-            need_generated = True
-
         effective_arts_cfg: Path
         if need_generated:
             effective_arts_cfg = generate_arts_config(
                 effective_config,
                 desired_threads,
-                run_counter_dir,
+                None,
                 desired_launcher,
                 nodes_override,
                 benchmark_name=name,
