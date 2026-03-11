@@ -188,7 +188,6 @@ mkdir -p "$COUNTER_DIR"
 sed -e "s|^counterFolder=.*|counterFolder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
 export artsConfig="{runtime_arts_cfg}"
 export counterFolder="$COUNTER_DIR"
-export CARTS_BENCHMARKS_REPORT_INIT=1
 
 ARTS_EXIT=125
 ARTS_DURATION=0

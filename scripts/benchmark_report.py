@@ -78,13 +78,10 @@ RESULTS_COLUMNS = [
     "omp_e2e_sec",
     "arts_kernel_sec",
     "omp_kernel_sec",
-    "arts_init_sec",
-    "omp_init_sec",
     "arts_total_sec",
     "omp_total_sec",
     "speedup",
     "parallel_efficiency",
-    "init_overhead_pct",
     "cache_references",
     "cache_misses",
     "cache_miss_rate",
@@ -103,8 +100,6 @@ RESULTS_COLUMNS = [
     "remote_bytes_sent",
     "remote_bytes_received",
     "edt_running_time_ms",
-    "initialization_time_ms",
-    "end_to_end_time_ms",
     "task_throughput",
     "avg_task_time_us",
     "memory_per_edt",
@@ -137,14 +132,11 @@ SUMMARY_COLUMNS = [
     "omp_e2e_std",
     "arts_kernel_mean",
     "omp_kernel_mean",
-    "arts_init_mean",
-    "omp_init_mean",
     "speedup_mean",
     "speedup_std",
     "speedup_min",
     "speedup_max",
     "parallel_efficiency_mean",
-    "init_overhead_pct_mean",
     "verified_count",
     "pass_count",
     "fail_count",
@@ -209,9 +201,6 @@ DISTRIBUTED_DB_DELTA_COLUMNS = [
     "time_delta_sec",
     "time_delta_pct",
     "time_ratio_dist_vs_base",
-    "baseline_initialization_time_ms",
-    "distributed_initialization_time_ms",
-    "init_delta_pct",
     "baseline_remote_bytes_sent",
     "distributed_remote_bytes_sent",
     "remote_sent_delta_pct",
@@ -334,8 +323,6 @@ COUNTER_FIELD_MAP = {
     "remote_bytes_sent": "remoteBytesSent",
     "remote_bytes_received": "remoteBytesReceived",
     "edt_running_time_ms": "edtRunningTime",
-    "initialization_time_ms": "initializationTime",
-    "end_to_end_time_ms": "endToEndTime",
 }
 
 INT_FIELDS = {
@@ -387,9 +374,7 @@ RATIO_FIELDS = {
 }
 
 PCT_POINT_FIELDS = {
-    "init_overhead_pct",
     "arts_e2e_cv_pct",
-    "init_overhead_pct_mean",
     "imbalance_vs_mean_pct",
     "metric_cv_pct",
 }
@@ -892,12 +877,10 @@ def _build_perf_file_rows(
 def _apply_derived_fields(row: Dict[str, Any]) -> None:
     speedup = _to_float(row.get("speedup"))
     threads = _to_float(row.get("threads"))
-    arts_init = _to_float(row.get("arts_init_sec"))
     arts_e2e = _to_float(row.get("arts_e2e_sec"))
 
     num_edts_finished = _to_float(row.get("num_edts_finished"))
     num_edts_created = _to_float(row.get("num_edts_created"))
-    end_to_end_time_ms = _to_float(row.get("end_to_end_time_ms"))
     edt_running_time_ms = _to_float(row.get("edt_running_time_ms"))
     memory_footprint_bytes = _to_float(row.get("memory_footprint_bytes"))
     remote_bytes_sent = _to_float(row.get("remote_bytes_sent"))
@@ -905,13 +888,7 @@ def _apply_derived_fields(row: Dict[str, Any]) -> None:
 
     row["parallel_efficiency"] = _safe_div(speedup, threads)
 
-    init_overhead = _safe_div(arts_init, arts_e2e)
-    row["init_overhead_pct"] = (
-        init_overhead * 100.0 if init_overhead is not None else None
-    )
-
-    e2e_sec = _safe_div(end_to_end_time_ms, 1000.0)
-    row["task_throughput"] = _safe_div(num_edts_finished, e2e_sec)
+    row["task_throughput"] = _safe_div(num_edts_finished, arts_e2e)
 
     avg_task_ms = _safe_div(edt_running_time_ms, num_edts_finished)
     row["avg_task_time_us"] = avg_task_ms * 1000.0 if avg_task_ms is not None else None
@@ -1037,8 +1014,6 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "omp_e2e_sec": result.timing.omp_e2e_sec,
             "arts_kernel_sec": result.timing.arts_kernel_sec,
             "omp_kernel_sec": result.timing.omp_kernel_sec,
-            "arts_init_sec": result.timing.arts_init_sec,
-            "omp_init_sec": result.timing.omp_init_sec,
             "arts_total_sec": result.timing.arts_total_sec,
             "omp_total_sec": result.timing.omp_total_sec,
             "speedup": result.timing.speedup,
@@ -1177,12 +1152,10 @@ def _flatten_result_serialized(
             "remote_send_hard_timeout_count": slurm_stderr.get("remote_send_hard_timeout_count"),
             "connection_refused_count": slurm_stderr.get("connection_refused_count"),
             "speedup_basis": None,
-            "arts_e2e_sec": _to_float(arts.get("e2e_sec")) or _first_timing_value(arts.get("e2e_timings")),
-            "omp_e2e_sec": _to_float(omp.get("e2e_sec")) or _first_timing_value(omp.get("e2e_timings")),
+            "arts_e2e_sec": _first_timing_value(arts.get("e2e_timings")),
+            "omp_e2e_sec": _first_timing_value(omp.get("e2e_timings")),
             "arts_kernel_sec": _first_timing_value(arts.get("kernel_timings")),
             "omp_kernel_sec": _first_timing_value(omp.get("kernel_timings")),
-            "arts_init_sec": _to_float(arts.get("init_sec")) or _first_timing_value(arts.get("init_timings")),
-            "omp_init_sec": _first_timing_value(omp.get("init_timings")),
             "arts_total_sec": _to_float(arts.get("duration_sec")),
             "omp_total_sec": _to_float(omp.get("duration_sec")),
             "speedup": _to_float(result.get("speedup")),
@@ -1320,21 +1293,15 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
         omp_e2e_values = collect("omp_e2e_sec")
         arts_kernel_values = collect("arts_kernel_sec")
         omp_kernel_values = collect("omp_kernel_sec")
-        arts_init_values = collect("arts_init_sec")
-        omp_init_values = collect("omp_init_sec")
         speedup_values = collect("speedup")
         efficiency_values = collect("parallel_efficiency")
-        init_overhead_values = collect("init_overhead_pct")
 
         arts_e2e_mean, arts_e2e_std = _mean_std(arts_e2e_values)
         omp_e2e_mean, omp_e2e_std = _mean_std(omp_e2e_values)
         arts_kernel_mean, _ = _mean_std(arts_kernel_values)
         omp_kernel_mean, _ = _mean_std(omp_kernel_values)
-        arts_init_mean, _ = _mean_std(arts_init_values)
-        omp_init_mean, _ = _mean_std(omp_init_values)
         speedup_mean, speedup_std = _mean_std(speedup_values)
         efficiency_mean, _ = _mean_std(efficiency_values)
-        init_overhead_mean, _ = _mean_std(init_overhead_values)
 
         if arts_e2e_mean is None or arts_e2e_std is None:
             arts_e2e_cv = None
@@ -1367,14 +1334,11 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "omp_e2e_std": omp_e2e_std,
                 "arts_kernel_mean": arts_kernel_mean,
                 "omp_kernel_mean": omp_kernel_mean,
-                "arts_init_mean": arts_init_mean,
-                "omp_init_mean": omp_init_mean,
                 "speedup_mean": speedup_mean,
                 "speedup_std": speedup_std,
                 "speedup_min": min(speedup_values) if speedup_values else None,
                 "speedup_max": max(speedup_values) if speedup_values else None,
                 "parallel_efficiency_mean": efficiency_mean,
-                "init_overhead_pct_mean": init_overhead_mean,
                 "verified_count": verified_count,
                 "pass_count": pass_count,
                 "fail_count": fail_count,
@@ -1632,7 +1596,6 @@ def _build_distributed_db_delta_rows(
 
     aggregated_result_metrics: Dict[Tuple[Any, ...], Dict[str, Optional[float]]] = {}
     metric_fields = (
-        "initialization_time_ms",
         "remote_bytes_sent",
         "remote_bytes_received",
         "memory_footprint_bytes",
@@ -1696,8 +1659,6 @@ def _build_distributed_db_delta_rows(
 
         baseline_time = _to_float(baseline.get("arts_e2e_mean"))
         distributed_time = _to_float(distributed.get("arts_e2e_mean"))
-        baseline_init = result_metric(baseline, "initialization_time_ms")
-        distributed_init = result_metric(distributed, "initialization_time_ms")
         baseline_sent = result_metric(baseline, "remote_bytes_sent")
         distributed_sent = result_metric(distributed, "remote_bytes_sent")
         baseline_recv = result_metric(baseline, "remote_bytes_received")
@@ -1742,13 +1703,6 @@ def _build_distributed_db_delta_rows(
                     else None
                 ),
                 "time_ratio_dist_vs_base": _safe_div(distributed_time, baseline_time),
-                "baseline_initialization_time_ms": baseline_init,
-                "distributed_initialization_time_ms": distributed_init,
-                "init_delta_pct": (
-                    _safe_div(distributed_init - baseline_init, baseline_init) * 100.0
-                    if distributed_init is not None and baseline_init not in (None, 0)
-                    else None
-                ),
                 "baseline_remote_bytes_sent": baseline_sent,
                 "distributed_remote_bytes_sent": distributed_sent,
                 "remote_sent_delta_pct": (
@@ -1836,8 +1790,6 @@ def _build_comparison_sheet(
         "remote_bytes_sent",
         "remote_bytes_received",
         "edt_running_time_ms",
-        "initialization_time_ms",
-        "end_to_end_time_ms",
         "task_throughput",
         "avg_task_time_us",
         "memory_per_edt",

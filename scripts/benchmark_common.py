@@ -91,7 +91,6 @@ CHECKSUM_PATTERNS = [
 
 KERNEL_TIME_PATTERN = r"^\s*kernel\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
 E2E_TIME_PATTERN = r"^\s*e2e\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
-INIT_TIME_PATTERN = r"^\s*init\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
 
 
 # ============================================================================
@@ -161,42 +160,6 @@ def parse_e2e_timings(output: str) -> Dict[str, float]:
         except ValueError:
             pass
     return timings
-
-
-def parse_init_timings(output: str) -> Dict[str, float]:
-    """Extract initialization timing values from output.
-
-    Args:
-        output: Benchmark stdout
-
-    Returns:
-        Dict mapping name -> time in seconds
-    """
-    timings = {}
-    for match in re.finditer(INIT_TIME_PATTERN, output, re.MULTILINE):
-        name, value = match.groups()
-        try:
-            timings[name.strip()] = float(value)
-        except ValueError:
-            pass
-    return timings
-
-
-def parse_counter_json(counter_dir: Path) -> Tuple[Optional[float], Optional[float]]:
-    """Parse cluster.json to extract initializationTime and endToEndTime in seconds.
-
-    Args:
-        counter_dir: Directory containing counter JSON files.
-
-    Returns:
-        Tuple of (init_sec, e2e_sec), either may be None if not found.
-    """
-    counters = parse_all_counters(counter_dir)
-    init_ms = counters.get("initializationTime")
-    e2e_ms = counters.get("endToEndTime")
-    init_sec = init_ms / 1000.0 if init_ms is not None else None
-    e2e_sec = e2e_ms / 1000.0 if e2e_ms is not None else None
-    return init_sec, e2e_sec
 
 
 def parse_all_counters(counter_dir: Path) -> Dict[str, float]:
@@ -341,7 +304,7 @@ def filter_benchmark_output(output: str) -> str:
     """
     if not output:
         return ""
-    prefixes = ("kernel.", "e2e.", "init.", "parallel.", "task.", "checksum:", "tmp_checksum:")
+    prefixes = ("kernel.", "e2e.", "parallel.", "task.", "checksum:", "tmp_checksum:")
     return "\n".join(
         line for line in output.splitlines()
         if line.startswith(prefixes) or "checksum:" in line.lower()

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol, Tuple
 
-from benchmark_common import filter_benchmark_output, parse_counter_json
+from benchmark_common import filter_benchmark_output
 from benchmark_execution import BenchmarkExecutionContext, BenchmarkRunFiles
 from benchmark_models import (
     Artifacts,
@@ -206,7 +206,6 @@ class ConfigExecutionExecutor:
 
         self.host._cleanup_port()
         run_arts = self._run_arts(build_outputs.build_arts, execution, run_files, hooks)
-        self._attach_counter_timings(run_arts, run_files.counter_dir)
         hooks.store_partial("run_arts", run_arts)
 
         run_omp = self._run_omp(build_outputs.build_omp, execution, run_files, hooks)
@@ -408,16 +407,6 @@ class ConfigExecutionExecutor:
             perf=perf_enabled,
         )
         return artifacts
-
-    def _attach_counter_timings(
-        self,
-        run_arts: RunResult,
-        counter_dir: Optional[Path],
-    ) -> None:
-        if counter_dir and counter_dir.exists():
-            init_sec, e2e_sec = parse_counter_json(counter_dir)
-            run_arts.counter_init_sec = init_sec
-            run_arts.counter_e2e_sec = e2e_sec
 
     def _print_trace_output(
         self,

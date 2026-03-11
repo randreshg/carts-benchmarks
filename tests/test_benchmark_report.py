@@ -105,7 +105,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 "duration_sec": omp_e2e,
                 "checksum": "1.0",
                 "e2e_timings": {"gemm": omp_e2e},
-                "init_timings": {"omp": 0.2},
                 "kernel_timings": {},
                 "skipped": False,
             }
@@ -138,7 +137,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 "duration_sec": arts_e2e,
                 "checksum": "1.0",
                 "e2e_timings": {"gemm": arts_e2e},
-                "init_timings": {"arts": 0.1},
                 "kernel_timings": {},
             },
             "omp": omp_payload,
@@ -488,7 +486,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                         "checksum": "10.0",
                         "kernel_timings": {},
                         "e2e_timings": {"gemm": 1.0},
-                        "init_timings": {},
                     },
                     "run_omp": {
                         "status": "PASS",
@@ -497,7 +494,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                         "checksum": "10.0",
                         "kernel_timings": {},
                         "e2e_timings": {"gemm": 1.2},
-                        "init_timings": {},
                     },
                     "timing": {
                         "arts_time_sec": 1.0,

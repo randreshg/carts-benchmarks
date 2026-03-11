@@ -87,11 +87,9 @@ from benchmark_common import (
     DEFAULT_ARTS_PORT,
     KERNEL_TIME_PATTERN,
     E2E_TIME_PATTERN,
-    INIT_TIME_PATTERN,
     parse_checksum,
     parse_kernel_timings,
     parse_e2e_timings,
-    parse_init_timings,
     parse_perf_csv as _shared_parse_perf_csv,
 )
 
@@ -902,7 +900,6 @@ class BenchmarkRunner:
             reference_env = {
                 "OMP_NUM_THREADS": str(omp_threads),
                 "OMP_WAIT_POLICY": "ACTIVE",
-                "CARTS_BENCHMARKS_REPORT_INIT": "1",
             }
             run_omp = self.run_benchmark(
                 build_omp.executable,
@@ -1518,7 +1515,6 @@ class BenchmarkRunner:
             checksum=self.extract_checksum(outcome.stdout),
             kernel_timings=self.extract_kernel_timings(outcome.stdout),
             e2e_timings=self.extract_e2e_timings(outcome.stdout),
-            init_timings=self.extract_init_timings(outcome.stdout),
             parallel_task_timing=self.extract_parallel_task_timings(outcome.stdout),
             perf_metrics=perf_metrics,
             perf_csv_path=perf_csv_path,
@@ -1526,10 +1522,7 @@ class BenchmarkRunner:
 
     def _create_common_env(self) -> Dict[str, str]:
         """Return environment overrides shared by local benchmark runs."""
-        env: Dict[str, str] = {}
-        if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
-            env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
-        return env
+        return {}
 
     def _create_execution_plan(
         self,
@@ -1782,10 +1775,6 @@ class BenchmarkRunner:
         """Extract end-to-end timing info from benchmark output."""
         return parse_e2e_timings(output)
 
-    def extract_init_timings(self, output: str) -> Dict[str, float]:
-        """Extract runtime initialization timing info from benchmark output."""
-        return parse_init_timings(output)
-
     def extract_parallel_task_timings(self, output: str) -> Optional[ParallelTaskTiming]:
         """Extract parallel region and task timing info from benchmark output.
 
@@ -1864,12 +1853,8 @@ class BenchmarkRunner:
         """Calculate speedup preferring E2E timings when available."""
         arts_kernel = get_kernel_time(arts_result)
         omp_kernel = get_kernel_time(omp_result)
-        # Prefer counter-based E2E time from ARTS introspection JSON
-        arts_e2e = arts_result.counter_e2e_sec if arts_result.counter_e2e_sec is not None else get_e2e_time(arts_result)
+        arts_e2e = get_e2e_time(arts_result)
         omp_e2e = get_e2e_time(omp_result)
-        # Prefer counter-based init time from ARTS introspection JSON
-        arts_init = arts_result.counter_init_sec if arts_result.counter_init_sec is not None else get_init_time(arts_result)
-        omp_init = get_init_time(omp_result)
         arts_total = arts_result.duration_sec
         omp_total = omp_result.duration_sec
 
@@ -1883,8 +1868,6 @@ class BenchmarkRunner:
                 omp_kernel_sec=omp_kernel,
                 arts_e2e_sec=arts_e2e,
                 omp_e2e_sec=omp_e2e,
-                arts_init_sec=arts_init,
-                omp_init_sec=omp_init,
                 arts_total_sec=arts_total,
                 omp_total_sec=omp_total,
                 speedup_basis=(
@@ -1936,8 +1919,6 @@ class BenchmarkRunner:
             omp_kernel_sec=omp_kernel,
             arts_e2e_sec=arts_e2e,
             omp_e2e_sec=omp_e2e,
-            arts_init_sec=arts_init,
-            omp_init_sec=omp_init,
             arts_total_sec=arts_total,
             omp_total_sec=omp_total,
             speedup_basis=speedup_basis,
@@ -2680,19 +2661,6 @@ def get_e2e_time(run_result: RunResult) -> Optional[float]:
     return None
 
 
-def get_init_time(run_result: RunResult) -> Optional[float]:
-    """Get total runtime init time from run result (sum of all init timings)."""
-    if run_result.init_timings:
-        # Prefer the canonical keys when present to avoid accidental double counting
-        # if additional init signals are added (e.g., init.arts_runtime).
-        if "arts" in run_result.init_timings:
-            return run_result.init_timings["arts"]
-        if "omp" in run_result.init_timings:
-            return run_result.init_timings["omp"]
-        return sum(run_result.init_timings.values())
-    return None
-
-
 def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     """Format kernel time for display. Returns (total_time, display_string).
 
@@ -2722,26 +2690,13 @@ def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     return total, f"{total:.4f}s [{count}]"
 
 
-def format_init_time(run_result: RunResult) -> Tuple[Optional[float], str]:
-    """Format runtime init time for display. Returns (total_time, display_string)."""
-    if not run_result.init_timings:
-        return None, ""
-    total = sum(run_result.init_timings.values())
-    count = len(run_result.init_timings)
-    if count == 1:
-        return total, f"{total:.4f}s"
-    return total, f"{total:.4f}s [{count}]"
-
-
 def create_results_table(results: List[BenchmarkResult]) -> Table:
     """Create a rich table from benchmark results."""
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
     table.add_column("Build", justify="center")
-    table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
-    table.add_column("OMP Init", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
@@ -2756,27 +2711,9 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
 
-        # ARTS Init time from counter JSON
-        if r.run_arts.counter_init_sec is not None:
-            arts_init = f"{r.run_arts.counter_init_sec:.4f}s"
-        else:
-            arts_init = "[dim]-[/]"
-
-        # ARTS E2E time: prefer counter JSON, fall back to parsed stdout
-        if r.run_arts.counter_e2e_sec is not None:
-            arts_e2e = r.run_arts.counter_e2e_sec
-            arts_e2e_str = f"{arts_e2e:.4f}s"
-        else:
-            arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
+        arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
 
         omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
-
-        # OMP Init time from parsed stdout
-        omp_init = r.run_omp.init_timings.get("omp")
-        if omp_init is not None:
-            omp_init_str = f"{omp_init:.4f}s"
-        else:
-            omp_init_str = "[dim]-[/]"
 
         # Track if any benchmark has multiple kernels / e2e segments
         if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
@@ -2836,9 +2773,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         table.add_row(
             r.name,
             build,
-            arts_init,
             run_arts,
-            omp_init_str,
             run_omp,
             correct,
             speedup,
@@ -2910,9 +2845,7 @@ def create_live_table(
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
     table.add_column("CARTS Build", justify="center")
-    table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
-    table.add_column("OMP Init", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
@@ -2936,23 +2869,9 @@ def create_live_table(
             else:
                 build = f"[red]\u2717[/] {r.build_arts.status.value}"
 
-            # ARTS Init time with statistics
-            arts_init_times = [run.run_arts.counter_init_sec for run in runs_list
-                               if run.run_arts.counter_init_sec is not None]
-            if arts_init_times:
-                stats = compute_stats(arts_init_times)
-                stddev = stats.get('stddev', 0.0)
-                arts_init = f"{stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            else:
-                arts_init = "[dim]-[/]"
-
             # ARTS E2E time with statistics
-            arts_e2e_times = []
-            for run in runs_list:
-                if run.run_arts.counter_e2e_sec is not None:
-                    arts_e2e_times.append(run.run_arts.counter_e2e_sec)
-                elif run.run_arts.e2e_timings:
-                    arts_e2e_times.append(sum(run.run_arts.e2e_timings.values()))
+            arts_e2e_times = [sum(run.run_arts.e2e_timings.values()) for run in runs_list
+                              if run.run_arts.e2e_timings]
             if arts_e2e_times:
                 stats = compute_stats(arts_e2e_times)
                 stddev = stats.get('stddev', 0.0)
@@ -2967,16 +2886,6 @@ def create_live_table(
                 has_fallback = True
             else:
                 run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
-
-            # OMP Init time with statistics
-            omp_init_times = [run.run_omp.init_timings.get("omp") for run in runs_list
-                              if run.run_omp.init_timings.get("omp") is not None]
-            if omp_init_times:
-                stats = compute_stats(omp_init_times)
-                stddev = stats.get('stddev', 0.0)
-                omp_init_str = f"{stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            else:
-                omp_init_str = "[dim]-[/]"
 
             # OMP E2E time with statistics
             omp_e2e_times = []
@@ -3028,12 +2937,10 @@ def create_live_table(
             if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
                 has_multi_kernel = True
 
-            table.add_row(bench, build, arts_init, run_arts, omp_init_str, run_omp, correct, speedup)
+            table.add_row(bench, build, run_arts, run_omp, correct, speedup)
 
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
-            arts_init = "[dim]-[/]"  # Default for in-progress phases
-            omp_init_str = "[dim]-[/]"  # Default for in-progress phases
             if current_phase == Phase.BUILD_ARTS:
                 build = "[yellow]⏳ ARTS...[/]"
                 run_arts = "[dim]-[/]"
@@ -3081,14 +2988,7 @@ def create_live_table(
                 # ARTS run completed, show e2e time if available in partial results
                 if current_partial and "run_arts" in current_partial:
                     run_arts_result = current_partial["run_arts"]
-                    # Prefer counter-based timing
-                    if run_arts_result.counter_init_sec is not None:
-                        arts_init = f"{run_arts_result.counter_init_sec:.4f}s"
-                    if run_arts_result.counter_e2e_sec is not None:
-                        arts_e2e = run_arts_result.counter_e2e_sec
-                        arts_e2e_str = f"{arts_e2e:.4f}s"
-                    else:
-                        arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
+                    arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
                     if run_arts_result.status == Status.PASS:
                         if arts_e2e is not None:
                             run_arts = f"{status_symbol(run_arts_result.status)} {arts_e2e_str}"
@@ -3115,9 +3015,7 @@ def create_live_table(
             table.add_row(
                 f"[bold]{bench}[/]",
                 build,
-                arts_init,
                 run_arts,
-                omp_init_str,
                 run_omp,
                 correct,
                 speedup,
@@ -3126,8 +3024,6 @@ def create_live_table(
             # Pending - show placeholder
             table.add_row(
                 f"[dim]{bench}[/]",
-                "[dim]-[/]",
-                "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
@@ -3231,8 +3127,6 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
         # Extract timings
         arts_build_times = []
         omp_build_times = []
-        arts_init_times = []
-        omp_init_times = []
         arts_e2e_times = []
         omp_e2e_times = []
         # Keep kernel times as optional context
@@ -3244,13 +3138,6 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
                 arts_build_times.append(r.build_arts.duration_sec)
             if r.build_omp.status == Status.PASS:
                 omp_build_times.append(r.build_omp.duration_sec)
-
-            arts_init = get_init_time(r.run_arts)
-            omp_init = get_init_time(r.run_omp)
-            if arts_init is not None:
-                arts_init_times.append(arts_init)
-            if omp_init is not None:
-                omp_init_times.append(omp_init)
 
             arts_e2e = get_e2e_time(r.run_arts)
             omp_e2e = get_e2e_time(r.run_omp)
@@ -3276,8 +3163,6 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
         stats[config_key] = {
             "arts_build_time": compute_stats(arts_build_times),
             "omp_build_time": compute_stats(omp_build_times),
-            "arts_init_time": compute_stats(arts_init_times),
-            "omp_init_time": compute_stats(omp_init_times),
             "arts_e2e_time": compute_stats(arts_e2e_times),
             "omp_e2e_time": compute_stats(omp_e2e_times),
             "arts_kernel_time": compute_stats(arts_kernel_times),
@@ -3426,7 +3311,6 @@ def export_json(
                 "checksum": r.run_arts.checksum,
                 "kernel_timings": r.run_arts.kernel_timings,
                 "e2e_timings": r.run_arts.e2e_timings,
-                "init_timings": r.run_arts.init_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_arts.parallel_task_timing),
                 "perf_metrics": asdict(r.run_arts.perf_metrics) if r.run_arts.perf_metrics else None,
                 "perf_csv_path": r.run_arts.perf_csv_path,
@@ -3438,7 +3322,6 @@ def export_json(
                 "checksum": r.run_omp.checksum,
                 "kernel_timings": r.run_omp.kernel_timings,
                 "e2e_timings": r.run_omp.e2e_timings,
-                "init_timings": r.run_omp.init_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
                 "perf_metrics": asdict(r.run_omp.perf_metrics) if r.run_omp.perf_metrics else None,
                 "perf_csv_path": r.run_omp.perf_csv_path,
@@ -3452,8 +3335,6 @@ def export_json(
                 "omp_kernel_sec": r.timing.omp_kernel_sec,
                 "arts_e2e_sec": r.timing.arts_e2e_sec,
                 "omp_e2e_sec": r.timing.omp_e2e_sec,
-                "arts_init_sec": r.timing.arts_init_sec,
-                "omp_init_sec": r.timing.omp_init_sec,
                 "arts_total_sec": r.timing.arts_total_sec,
                 "omp_total_sec": r.timing.omp_total_sec,
                 "note": r.timing.note,

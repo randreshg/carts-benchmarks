@@ -139,11 +139,7 @@ class RunResult:
     checksum: Optional[str] = None
     kernel_timings: Dict[str, float] = field(default_factory=dict)
     e2e_timings: Dict[str, float] = field(default_factory=dict)
-    init_timings: Dict[str, float] = field(default_factory=dict)
     parallel_task_timing: Optional[ParallelTaskTiming] = None
-    # Counter-based timing from ARTS introspection JSON (cluster.json)
-    counter_init_sec: Optional[float] = None
-    counter_e2e_sec: Optional[float] = None
     # Perf cache metrics
     perf_metrics: Optional[PerfCacheMetrics] = None
     perf_csv_path: Optional[str] = None
@@ -161,8 +157,6 @@ class TimingResult:
     omp_kernel_sec: Optional[float] = None
     arts_e2e_sec: Optional[float] = None
     omp_e2e_sec: Optional[float] = None
-    arts_init_sec: Optional[float] = None
-    omp_init_sec: Optional[float] = None
     arts_total_sec: float = 0.0
     omp_total_sec: float = 0.0
     speedup_basis: str = "total"  # "e2e", "kernel", or "total"
