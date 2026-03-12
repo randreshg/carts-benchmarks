@@ -342,6 +342,7 @@ def generate_sbatch_script(
             executable_omp=executable_omp_abs,
             threads=config.threads,
             omp_run_command=omp_run_command,
+            timeout_seconds=config.timeout_seconds,
         )
     elif config.node_count > 1:
         omp_section = (
