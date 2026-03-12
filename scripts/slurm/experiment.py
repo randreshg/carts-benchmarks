@@ -235,8 +235,7 @@ def validate_requested_node_counts(
 
     available_nodes = get_slurm_partition_nodes(effective_partition)
     if not available_nodes:
-        label = effective_partition
-        raise ValueError(f"No nodes are available in SLURM partition '{label}'.")
+        raise ValueError(f"No nodes are available in SLURM partition '{effective_partition}'.")
 
     requested_max = max(node_counts)
     available_count = len(available_nodes)

@@ -419,6 +419,25 @@ def generate_sbatch_script(
     script_path.chmod(0o755)
 
 
+def _set_cfg_key(content: str, key: str, value: str) -> str:
+    """Set a key=value in arts.cfg content, adding it after [ARTS] if absent."""
+    pattern = rf"^{re.escape(key)}\s*=.*$"
+    replacement = f"{key}={value}"
+    if re.search(pattern, content, re.MULTILINE):
+        return re.sub(pattern, replacement, content, flags=re.MULTILINE)
+    return content.replace("[ARTS]", f"[ARTS]\n{replacement}", 1)
+
+
+def _comment_cfg_key(content: str, key: str, reason: str) -> str:
+    """Comment out a key in arts.cfg content."""
+    pattern = rf"^{re.escape(key)}\s*=.*$"
+    if re.search(pattern, content, re.MULTILINE):
+        return re.sub(
+            pattern, f"# {key}= ({reason})", content, flags=re.MULTILINE
+        )
+    return content
+
+
 def generate_arts_config_for_node(
     base_config: Path,
     build_node_dir: Path,
@@ -443,72 +462,17 @@ def generate_arts_config_for_node(
     content = base_config.read_text()
 
     # CRITICAL: Use absolute paths - jobs run from different working directories
-    # counter_folder placeholder - sbatch script sets actual path per run
     counter_dir_placeholder = (build_node_dir / "counters").resolve()
 
-    # Update or add counter_folder (placeholder, will be overridden per-run)
-    if re.search(r'^counter_folder\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^counter_folder\s*=.*$',
-            f'counter_folder={counter_dir_placeholder}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\ncounter_folder={counter_dir_placeholder}')
-
-    # Update node_count.
-    if re.search(r'^node_count\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^node_count\s*=.*$',
-            f'node_count={node_count}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nnode_count={node_count}')
-
-    # Update worker_threads to match this build combination.
-    # (SLURM runtime still exports SLURM_CPUS_PER_TASK, but keeping the config
-    # aligned with the combination makes artifacts self-describing.)
-    if re.search(r'^worker_threads\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^worker_threads\s*=.*$',
-            f'worker_threads={threads}',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nworker_threads={threads}')
-
-    # Ensure launcher is slurm
-    if re.search(r'^launcher\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^launcher\s*=.*$',
-            'launcher=slurm',
-            content,
-            flags=re.MULTILINE
-        )
-    else:
-        content = content.replace('[ARTS]', '[ARTS]\nlauncher=slurm')
+    content = _set_cfg_key(content, "counter_folder", str(counter_dir_placeholder))
+    content = _set_cfg_key(content, "node_count", str(node_count))
+    content = _set_cfg_key(content, "worker_threads", str(threads))
+    content = _set_cfg_key(content, "launcher", "slurm")
 
     # Clear nodes and master_node - SLURM launcher ignores these.
     # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)
-    if re.search(r'^nodes\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^nodes\s*=.*$',
-            '# nodes= (managed by SLURM)',
-            content,
-            flags=re.MULTILINE
-        )
-
-    if re.search(r'^master_node\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^master_node\s*=.*$',
-            '# master_node= (managed by SLURM)',
-            content,
-            flags=re.MULTILINE
-        )
+    content = _comment_cfg_key(content, "nodes", "managed by SLURM")
+    content = _comment_cfg_key(content, "master_node", "managed by SLURM")
 
     # Write to build directory (use absolute path)
     config_path = (build_node_dir / "arts.cfg").resolve()
