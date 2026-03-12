@@ -4,7 +4,6 @@
 #include <float.h>
 #include <math.h>
 #include <omp.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 // Size configuration - can be overridden via compiler flags
@@ -164,7 +163,7 @@ static void initialize_test_data(float **token_embedding_table,
   // Token embedding table [VOCAB_SIZE][DIM]
   for (int i = 0; i < VOCAB_SIZE; i++) {
     for (int j = 0; j < DIM; j++) {
-      token_embedding_table[i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+      token_embedding_table[i][j] = 0.01f * (float)((i * 7 + j * 13) % 100 - 50) / 50.0f;
     }
   }
 
@@ -179,31 +178,31 @@ static void initialize_test_data(float **token_embedding_table,
     // wq, wo [N_LAYERS][DIM][DIM]
     for (int i = 0; i < DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        wq[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        wo[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        wq[l][i][j] = 0.01f * (float)((l * 3 + i * 7 + j * 13) % 100 - 50) / 50.0f;
+        wo[l][i][j] = 0.01f * (float)((l * 3 + i * 11 + j * 19) % 100 - 50) / 50.0f;
       }
     }
 
     // wk, wv [N_LAYERS][KV_DIM][DIM]
     for (int i = 0; i < KV_DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        wk[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        wv[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        wk[l][i][j] = 0.01f * (float)((l * 5 + i * 11 + j * 17) % 100 - 50) / 50.0f;
+        wv[l][i][j] = 0.01f * (float)((l * 5 + i * 13 + j * 23) % 100 - 50) / 50.0f;
       }
     }
 
     // w1, w3 [N_LAYERS][HIDDEN_DIM][DIM]
     for (int i = 0; i < HIDDEN_DIM; i++) {
       for (int j = 0; j < DIM; j++) {
-        w1[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
-        w3[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        w1[l][i][j] = 0.01f * (float)((l * 7 + i * 13 + j * 19) % 100 - 50) / 50.0f;
+        w3[l][i][j] = 0.01f * (float)((l * 7 + i * 17 + j * 29) % 100 - 50) / 50.0f;
       }
     }
 
     // w2 [N_LAYERS][DIM][HIDDEN_DIM]
     for (int i = 0; i < DIM; i++) {
       for (int j = 0; j < HIDDEN_DIM; j++) {
-        w2[l][i][j] = 0.01f * (float)(rand() % 100 - 50) / 50.0f;
+        w2[l][i][j] = 0.01f * (float)((l * 11 + i * 17 + j * 23) % 100 - 50) / 50.0f;
       }
     }
   }
@@ -367,10 +366,7 @@ int main(void) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("transformer");
 
-  printf("Testing isolated Transformer neural network functions\n");
-  printf("Configuration: dim=%d, hidden_dim=%d, n_layers=%d, n_heads=%d, "
-         "vocab_size=%d\n",
-         DIM, HIDDEN_DIM, N_LAYERS, N_HEADS, VOCAB_SIZE);
+  CARTS_STARTUP_TIMER_START("transformer");
 
   // Allocate model weights using pointer-to-pointer pattern
   float **token_embedding_table = alloc_2d(VOCAB_SIZE, DIM);
@@ -402,66 +398,30 @@ int main(void) {
   // Initialize
   initialize_state(x, xb, xb2, hb, hb2, q_buf, att_buf, logits, key_cache,
                    value_cache);
-  srand(42);
   initialize_test_data(token_embedding_table, rms_att_weight, rms_ffn_weight,
                        wq, wk, wv, wo, w1, w2, w3, rms_final_weight);
 
-  printf("Testing forward pass...\n");
   int test_token = 42;
   int test_pos = 0;
 
-  // CARTS_KERNEL_TIMER_START("transformer");
+  CARTS_STARTUP_TIMER_STOP();
+
+  CARTS_KERNEL_TIMER_START("transformer");
   float *logits_out =
       forward(token_embedding_table, rms_att_weight, rms_ffn_weight, wq, wk, wv,
               wo, w1, w2, w3, rms_final_weight, x, xb, xb2, hb, hb2, q_buf,
               att_buf, logits, key_cache, value_cache, test_token, test_pos);
-  // CARTS_KERNEL_TIMER_STOP("transformer");
+  CARTS_KERNEL_TIMER_STOP("transformer");
 
-  printf("Forward pass completed. First 10 logits: ");
-  for (int i = 0; i < 10; i++) {
-    printf("%.4f ", logits_out[i]);
-  }
-  printf("\n");
-
-  // Verification
+  CARTS_VERIFICATION_TIMER_START("transformer");
   double checksum = 0.0;
   for (int i = 0; i < VOCAB_SIZE; i++) {
     checksum += logits_out[i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
-  printf("\nTesting individual functions...\n");
-
-  float test_x[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-  float test_weight[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  float test_o[4];
-  rmsnorm(test_o, test_x, test_weight, 4);
-  printf("RMSNorm test: [%.4f, %.4f, %.4f, %.4f] -> [%.4f, %.4f, %.4f, %.4f]\n",
-         test_x[0], test_x[1], test_x[2], test_x[3], test_o[0], test_o[1],
-         test_o[2], test_o[3]);
-
-  float test_softmax[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-  softmax(test_softmax, 4);
-  printf("Softmax test: [1.0, 2.0, 3.0, 4.0] -> [%.4f, %.4f, %.4f, %.4f]\n",
-         test_softmax[0], test_softmax[1], test_softmax[2], test_softmax[3]);
-
-  // Matmul test with 2D array
-  float **test_w = alloc_2d(2, 3);
-  test_w[0][0] = 1.0f;
-  test_w[0][1] = 2.0f;
-  test_w[0][2] = 3.0f;
-  test_w[1][0] = 4.0f;
-  test_w[1][1] = 5.0f;
-  test_w[1][2] = 6.0f;
-  float test_vec[3] = {1.0f, 1.0f, 1.0f};
-  float test_result[2];
-  matmul(test_result, test_vec, test_w, 3, 2);
-  printf("Matmul test: [1,2,3; 4,5,6] @ [1,1,1] = [%.1f, %.1f]\n",
-         test_result[0], test_result[1]);
-  free_2d(test_w, 2);
-
-  printf("All tests completed successfully!\n");
-
+  CARTS_CLEANUP_TIMER_START("transformer");
   // Free model weights
   free_2d(token_embedding_table, VOCAB_SIZE);
   free_2d(rms_att_weight, N_LAYERS);
@@ -486,6 +446,7 @@ int main(void) {
   free(logits);
   free_3d(key_cache, N_LAYERS, SEQ_LEN);
   free_3d(value_cache, N_LAYERS, SEQ_LEN);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

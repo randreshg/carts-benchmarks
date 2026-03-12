@@ -11,7 +11,6 @@
  */
 
 #include <stdlib.h>
-#include <stdio.h>
 #include <math.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
@@ -52,23 +51,18 @@ static void free_state(double **state, unsigned dim) {
 int main(int argc, char *argv[]) {
     CARTS_BENCHMARKS_START();
     CARTS_E2E_TIMER_START("monte_carlo_ensemble");
+    CARTS_STARTUP_TIMER_START("monte_carlo_ensemble");
 
     unsigned num_samples = NUM_SAMPLES;
     unsigned state_dim = STATE_DIM;
-    double memory_per_sample = (double)(state_dim * state_dim * sizeof(double)) / (1024.0 * 1024.0);
-    double total_memory = memory_per_sample * num_samples / 1024.0;
-
-    printf("Monte Carlo Ensemble: samples=%u, state_dim=%u\n", num_samples, state_dim);
-    printf("Memory per sample: %.2f MB, Total: %.2f GB\n", memory_per_sample, total_memory);
-
     double global_sum = 0.0;
     double *sample_sums = (double *)malloc(num_samples * sizeof(double));
     if (!sample_sums) {
-        fprintf(stderr, "Failed to allocate sample_sums\n");
         return 1;
     }
+    CARTS_STARTUP_TIMER_STOP();
 
-    // CARTS_KERNEL_TIMER_START("parallel_samples");
+    CARTS_KERNEL_TIMER_START("monte_carlo_ensemble");
 
     /* Process samples in parallel - state allocated INSIDE loop */
     /* This is the key pattern for distributed scaling */
@@ -96,18 +90,18 @@ int main(int argc, char *argv[]) {
         free_state(state, state_dim);
     }
 
-    // CARTS_KERNEL_TIMER_STOP("parallel_samples");
+    CARTS_KERNEL_TIMER_STOP("monte_carlo_ensemble");
 
+    CARTS_VERIFICATION_TIMER_START("monte_carlo_ensemble");
     for (unsigned s = 0; s < num_samples; s++) {
         global_sum += sample_sums[s];
     }
-    free(sample_sums);
-
-    /* Compute checksum */
     CARTS_BENCH_CHECKSUM(global_sum);
+    CARTS_VERIFICATION_TIMER_STOP();
 
-    printf("Global sum: %.6f (average per sample: %.6f)\n",
-           global_sum, global_sum / num_samples);
+    CARTS_CLEANUP_TIMER_START("monte_carlo_ensemble");
+    free(sample_sums);
+    CARTS_CLEANUP_TIMER_STOP();
 
     CARTS_E2E_TIMER_STOP();
     CARTS_BENCHMARKS_STOP();

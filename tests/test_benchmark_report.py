@@ -67,7 +67,7 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         counter_dir = run_dir / "counters"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
-        (artifact_dir / "arts.cfg").write_text("threads=64\n")
+        (artifact_dir / "arts.cfg").write_text("[ARTS]\nworker_threads=64\n")
         (artifact_dir / "build.log").write_text("ok\n")
         (run_dir / "run_config.json").write_text("{}\n")
         (run_dir / "result.json").write_text("{}\n")
@@ -105,8 +105,10 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 "duration_sec": omp_e2e,
                 "checksum": "1.0",
                 "e2e_timings": {"gemm": omp_e2e},
-                "init_timings": {"omp": 0.2},
                 "kernel_timings": {},
+                "startup_timings": {},
+                "verification_timings": {},
+                "cleanup_timings": {},
                 "skipped": False,
             }
         verification: dict[str, object] = {"note": "Checksums match"}
@@ -138,8 +140,10 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 "duration_sec": arts_e2e,
                 "checksum": "1.0",
                 "e2e_timings": {"gemm": arts_e2e},
-                "init_timings": {"arts": 0.1},
                 "kernel_timings": {},
+                "startup_timings": {},
+                "verification_timings": {},
+                "cleanup_timings": {},
             },
             "omp": omp_payload,
             "slurm": {
@@ -488,7 +492,9 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                         "checksum": "10.0",
                         "kernel_timings": {},
                         "e2e_timings": {"gemm": 1.0},
-                        "init_timings": {},
+                        "startup_timings": {},
+                        "verification_timings": {},
+                        "cleanup_timings": {},
                     },
                     "run_omp": {
                         "status": "PASS",
@@ -497,7 +503,9 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                         "checksum": "10.0",
                         "kernel_timings": {},
                         "e2e_timings": {"gemm": 1.2},
-                        "init_timings": {},
+                        "startup_timings": {},
+                        "verification_timings": {},
+                        "cleanup_timings": {},
                     },
                     "timing": {
                         "arts_time_sec": 1.0,

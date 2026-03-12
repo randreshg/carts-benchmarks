@@ -1,10 +1,12 @@
 {
   "name": "docker-multinode-sweep",
-  "description": "Multi-node scaling sweep from 2 to 48 nodes via SLURM",
+  "description": "Multi-node scaling sweep across the 6-node Docker Slurm cluster",
   "steps": [
     {
       "name": "multinode-sweep",
-      "nodes": "2,4,8,16,32,48",
+      "arts_config": "docker/arts-docker.cfg",
+      "launcher": "slurm",
+      "nodes": "2,4,6",
       "debug": 0,
       "runs": 5,
       "perf": false,

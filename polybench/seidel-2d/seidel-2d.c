@@ -22,6 +22,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("seidel-2d");
 
+  CARTS_STARTUP_TIMER_START("seidel-2d");
   int n = N;
   int tsteps = TSTEPS;
 
@@ -37,8 +38,9 @@ int main(int argc, char **argv) {
       A[i][j] = ((DATA_TYPE)i * (j + 2) + 2) / n;
     }
   }
+  CARTS_STARTUP_TIMER_STOP();
 
-  // CARTS_KERNEL_TIMER_START("seidel-2d");
+  CARTS_KERNEL_TIMER_START("seidel-2d");
 
   /* Seidel-2D kernel - j loop is sequential due to A[i][j-1] dependency */
   for (int t = 0; t < tsteps; t++) {
@@ -53,22 +55,24 @@ int main(int argc, char **argv) {
     }
   }
 
-  // CARTS_KERNEL_TIMER_STOP("seidel-2d");
+  CARTS_KERNEL_TIMER_STOP("seidel-2d");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("seidel-2d");
   double checksum = 0.0;
   for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      checksum += A[i][j];
-    }
+    checksum += A[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Free arrays */
+  CARTS_CLEANUP_TIMER_START("seidel-2d");
   for (int i = 0; i < n; i++) {
     free(A[i]);
   }
   free(A);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

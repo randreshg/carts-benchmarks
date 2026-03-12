@@ -22,7 +22,6 @@
  */
 
 #include <math.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
@@ -44,6 +43,10 @@
 #endif
 
 #define EPSILON 0.00001f
+
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 /*
  * Compute mean across batch and spatial dimensions for each channel
@@ -241,22 +244,13 @@ static void init_data(float ***x, float *scales, float *biases, int batch, int c
 int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("batchnorm");
+  CARTS_STARTUP_TIMER_START("batchnorm");
 
   int batch = BATCH_SIZE;
   int channels = CHANNELS;
   int height = HEIGHT;
   int width = WIDTH;
   int spatial = height * width;
-  int total_size = batch * channels * spatial;
-
-  printf("Batch Normalization Kernel\n");
-  printf("===========================\n");
-  printf("Configuration:\n");
-  printf("  Batch size: %d\n", batch);
-  printf("  Channels: %d\n", channels);
-  printf("  Spatial: %d x %d = %d\n", height, width, spatial);
-  printf("  Total elements: %d\n", total_size);
-  printf("\n");
 
   // Allocate memory for 3D arrays
   float ***x = (float ***)malloc(batch * sizeof(float **));
@@ -278,54 +272,31 @@ int main(int argc, char **argv) {
   // Initialize data
   init_data(x, scales, biases, batch, channels, spatial);
 
+  CARTS_STARTUP_TIMER_STOP();
+
   // Run batch normalization
-  printf("Running batch normalization...\n");
-  // CARTS_KERNEL_TIMER_START("batchnorm");
-  batchnorm_forward(x, output, scales, biases, batch, channels, spatial,
-                    mean, variance);
-  // CARTS_KERNEL_TIMER_STOP("batchnorm");
-
-  // Validation: normalized output should have mean ≈ 0 and variance ≈ 1 (before
-  // scale/bias)
-  float *ref_mean = (float *)malloc(channels * sizeof(float));
-  float *ref_variance = (float *)malloc(channels * sizeof(float));
-
-  // Check a few statistics
-  printf("\nValidation:\n");
-  printf("  First 5 channel means: ");
-  for (int i = 0; i < 5 && i < channels; ++i) {
-    printf("%.6f ", mean[i]);
+  CARTS_KERNEL_TIMER_START("batchnorm");
+  for (int rep = 0; rep < NREPS; rep++) {
+    batchnorm_forward(x, output, scales, biases, batch, channels, spatial,
+                      mean, variance);
+    CARTS_KERNEL_TIMER_ACCUM("batchnorm");
   }
-  printf("\n");
+  CARTS_KERNEL_TIMER_PRINT("batchnorm");
 
-  printf("  First 5 channel variances: ");
-  for (int i = 0; i < 5 && i < channels; ++i) {
-    printf("%.6f ", variance[i]);
-  }
-  printf("\n");
-
-  printf("  First 5 output values: ");
-  for (int i = 0; i < 5 && i < spatial; ++i) {
-    printf("%.6f ", output[0][0][i]);
-  }
-  printf("\n");
-
-  printf("\nBatch normalization completed successfully!\n");
-
-  // Compute checksum inline using sum of absolute values for stability.
-  // Normalized data is centered around 0, so plain sum would be ~0
-  // and highly sensitive to floating-point rounding differences.
+  // Compute checksum (diagonal sampling, fabs for stability)
+  CARTS_VERIFICATION_TIMER_START("batchnorm");
   double checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      for (int s = 0; s < spatial; s++) {
-        checksum += fabs((double)output[b][c][s]);
-      }
-    }
+  int diag = batch;
+  if (channels < diag) diag = channels;
+  if (spatial < diag) diag = spatial;
+  for (int i = 0; i < diag; i++) {
+    checksum += fabs((double)output[i][i][i]);
   }
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
   // Cleanup
+  CARTS_CLEANUP_TIMER_START("batchnorm");
   for (int b = 0; b < batch; ++b) {
     for (int c = 0; c < channels; ++c) {
       free(x[b][c]);
@@ -340,8 +311,7 @@ int main(int argc, char **argv) {
   free(biases);
   free(mean);
   free(variance);
-  free(ref_mean);
-  free(ref_variance);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

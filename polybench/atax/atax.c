@@ -21,6 +21,10 @@
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include "atax.h"
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 /* Array initialization. */
 static void init_array(int nx, int ny, DATA_TYPE **A, DATA_TYPE *x) {
   int i, j;
@@ -74,6 +78,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("atax");
 
+  CARTS_STARTUP_TIMER_START("atax");
   /* Retrieve problem size. */
   int nx = NX;
   int ny = NY;
@@ -90,32 +95,27 @@ int main(int argc, char **argv) {
 
   /* Initialize array(s). */
   init_array(nx, ny, A, x);
-
-  /* Start timer. */
-  polybench_start_instruments;
+  CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
-  // CARTS_KERNEL_TIMER_START("atax");
-  kernel_atax(nx, ny, A, x, y, tmp);
-  // CARTS_KERNEL_TIMER_STOP("atax");
-
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  CARTS_KERNEL_TIMER_START("atax");
+  for (int rep = 0; rep < NREPS; rep++) {
+    kernel_atax(nx, ny, A, x, y, tmp);
+    CARTS_KERNEL_TIMER_ACCUM("atax");
+  }
+  CARTS_KERNEL_TIMER_PRINT("atax");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("atax");
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < ny; i++) {
     checksum += y[i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
-
-  /* Prevent dead-code elimination. All live-out data must be printed
-     by the function call in argument. */
-  polybench_prevent_dce(print_array(nx, y));
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Be clean. */
+  CARTS_CLEANUP_TIMER_START("atax");
   for (int i = 0; i < nx; i++) {
     free(A[i]);
   }
@@ -123,6 +123,7 @@ int main(int argc, char **argv) {
   free(x);
   free(y);
   free(tmp);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

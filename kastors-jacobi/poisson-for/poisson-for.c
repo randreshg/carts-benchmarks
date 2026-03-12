@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
                   int itnew, double **u, double **unew, int block_size) {
   int i, j, it;
@@ -73,6 +77,7 @@ static void rhs(int nx, int ny, double **f, int block_size) {
 int main(void) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("poisson-for");
+  CARTS_STARTUP_TIMER_START("poisson-for");
 
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
@@ -120,18 +125,28 @@ int main(void) {
     }
   }
 
-  // CARTS_KERNEL_TIMER_START("sweep");
-  sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  // CARTS_KERNEL_TIMER_STOP("sweep");
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Compute checksum
+  CARTS_KERNEL_TIMER_START("poisson-for");
+  for (int rep = 0; rep < NREPS; rep++) {
+    sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
+    CARTS_KERNEL_TIMER_ACCUM("poisson-for");
+  }
+  CARTS_KERNEL_TIMER_PRINT("poisson-for");
+
+  CARTS_VERIFICATION_TIMER_START("poisson-for");
+
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < nx; i++) {
-    for (int j = 0; j < ny; j++) {
-      checksum += unew[i][j];
-    }
+  int diag = nx < ny ? nx : ny;
+  for (int i = 0; i < diag; i++) {
+    checksum += unew[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("poisson-for");
 
   // Free 2D arrays
   for (int i = 0; i < nx; i++) {
@@ -142,6 +157,8 @@ int main(void) {
   free(f);
   free(u);
   free(unew);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

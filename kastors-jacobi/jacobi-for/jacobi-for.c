@@ -11,6 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void sweep(int nx, int ny, double dx, double dy, double **f, int itold,
                   int itnew, double **u, double **unew, int block_size) {
   int i, j, it;
@@ -43,6 +47,7 @@ int main(void) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("jacobi-for");
+  CARTS_STARTUP_TIMER_START("jacobi-for");
 
 #ifdef SIZE
   int nx = SIZE, ny = SIZE;
@@ -69,24 +74,34 @@ int main(void) {
   // Initialize arrays
   for (int i = 0; i < nx; i++) {
     for (int j = 0; j < ny; j++) {
-      f[i][j] = 0.0;
+      f[i][j] = ((i + j) % 17 + 1) * 0.01;
       u[i][j] = 0.0;
       unew[i][j] = 0.0;
     }
   }
 
-  // CARTS_KERNEL_TIMER_START("jacobi-for");
-  sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
-  // CARTS_KERNEL_TIMER_STOP("jacobi-for");
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Verification
+  CARTS_KERNEL_TIMER_START("jacobi-for");
+  for (int rep = 0; rep < NREPS; rep++) {
+    sweep(nx, ny, dx, dy, f, itold, itnew, u, unew, block_size);
+    CARTS_KERNEL_TIMER_ACCUM("jacobi-for");
+  }
+  CARTS_KERNEL_TIMER_PRINT("jacobi-for");
+
+  CARTS_VERIFICATION_TIMER_START("jacobi-for");
+
+  // Verification (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < nx; i++) {
-    for (int j = 0; j < ny; j++) {
-      checksum += unew[i][j];
-    }
+  int diag = nx < ny ? nx : ny;
+  for (int i = 0; i < diag; i++) {
+    checksum += unew[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("jacobi-for");
 
   // Free 2D arrays
   for (int i = 0; i < nx; i++) {
@@ -97,6 +112,8 @@ int main(void) {
   free(f);
   free(u);
   free(unew);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

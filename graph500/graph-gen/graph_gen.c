@@ -12,7 +12,6 @@
 
 #include <stdlib.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <math.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
@@ -41,23 +40,16 @@ static inline uint64_t rmat_target(uint64_t src, uint64_t num_vertices, uint64_t
 int main(int argc, char *argv[]) {
     CARTS_BENCHMARKS_START();
     CARTS_E2E_TIMER_START("graph_gen");
+    CARTS_STARTUP_TIMER_START("graph_gen");
 
     uint64_t num_vertices = (uint64_t)1 << SCALE;
     uint64_t edges_per_vertex = EDGE_FACTOR;
-
-    printf("Graph500 Generation: scale=%d, vertices=%llu, edges_per_vertex=%llu\n",
-           SCALE, (unsigned long long)num_vertices, (unsigned long long)edges_per_vertex);
-    printf("Total memory required: ~%.2f GB\n",
-           (double)(num_vertices * edges_per_vertex * sizeof(uint64_t)) / (1024.0 * 1024.0 * 1024.0));
-
     /* Allocate outer arrays (vertex pointers and counts) */
     uint64_t **adj_list = (uint64_t **)malloc(num_vertices * sizeof(uint64_t *));
     uint64_t *adj_count = (uint64_t *)malloc(num_vertices * sizeof(uint64_t));
+    CARTS_STARTUP_TIMER_STOP();
 
-    /* Total edges generated (for checksum) */
-    uint64_t total_edges = 0;
-
-    // CARTS_KERNEL_TIMER_START("parallel_gen");
+    CARTS_KERNEL_TIMER_START("graph_gen");
 
     /* Generate edges - allocate adjacency list INSIDE loop */
     #pragma omp parallel for schedule(dynamic)
@@ -72,24 +64,26 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // CARTS_KERNEL_TIMER_STOP("parallel_gen");
+    CARTS_KERNEL_TIMER_STOP("graph_gen");
 
+    CARTS_VERIFICATION_TIMER_START("graph_gen");
+    /* Total edges generated (for checksum) */
+    uint64_t total_edges = 0;
     for (uint64_t v = 0; v < num_vertices; v++) {
         total_edges += adj_count[v];
     }
-
-    /* Compute checksum */
     double checksum = (double)total_edges;
     CARTS_BENCH_CHECKSUM(checksum);
+    CARTS_VERIFICATION_TIMER_STOP();
 
-    printf("Generated %llu edges\n", (unsigned long long)total_edges);
-
+    CARTS_CLEANUP_TIMER_START("graph_gen");
     /* Free memory */
     for (uint64_t v = 0; v < num_vertices; v++) {
         free(adj_list[v]);
     }
     free(adj_list);
     free(adj_count);
+    CARTS_CLEANUP_TIMER_STOP();
 
     CARTS_E2E_TIMER_STOP();
     CARTS_BENCHMARKS_STOP();

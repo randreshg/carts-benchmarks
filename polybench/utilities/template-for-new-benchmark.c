@@ -6,6 +6,7 @@
  * Web address: http://polybench.sourceforge.net
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
@@ -16,6 +17,7 @@
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is N=1024. */
 #include "template-for-new-benchmark.h"
+#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
 
 /* Array initialization. */
@@ -27,22 +29,6 @@ void init_array(int n, DATA_TYPE POLYBENCH_2D(C,N,N,n,n))
   for (i = 0; i < n; i++)
     for (j = 0; j < n; j++)
       C[i][j] = 42;
-}
-
-
-/* DCE code. Must scan the entire live-out data.
-   Can be used also to check the correctness of the output. */
-static
-void print_array(int n, DATA_TYPE POLYBENCH_2D(C,N,N,n,n))
-{
-  int i, j;
-
-  for (i = 0; i < n; i++)
-    for (j = 0; j < n; j++) {
-	fprintf (stderr, DATA_PRINTF_MODIFIER, C[i][j]);
-	if (i % 20 == 0) fprintf (stderr, "\n");
-    }
-  fprintf (stderr, "\n");
 }
 
 
@@ -64,31 +50,39 @@ void kernel_template(int n, DATA_TYPE POLYBENCH_2D(C,N,N,n,n))
 
 int main(int argc, char** argv)
 {
+  CARTS_BENCHMARKS_START();
+  CARTS_E2E_TIMER_START("template");
+
   /* Retrieve problem size. */
   int n = N;
 
   /* Variable declaration/allocation. */
+  CARTS_STARTUP_TIMER_START("template");
   POLYBENCH_2D_ARRAY_DECL(C,DATA_TYPE,N,N,n,n);
 
   /* Initialize array(s). */
   init_array (n, POLYBENCH_ARRAY(C));
-
-  /* Start timer. */
-  polybench_start_instruments;
+  CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
+  CARTS_KERNEL_TIMER_START("template");
   kernel_template (n, POLYBENCH_ARRAY(C));
+  CARTS_KERNEL_TIMER_STOP("template");
 
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
-
-  /* Prevent dead-code elimination. All live-out data must be printed
-     by the function call in argument. */
-  polybench_prevent_dce(print_array(n,  POLYBENCH_ARRAY(C)));
+  /* Verification */
+  CARTS_VERIFICATION_TIMER_START("template");
+  /* TODO: compute checksum over live-out data (use diagonal sampling for O(n)) */
+  double checksum = 0.0;
+  CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Be clean. */
+  CARTS_CLEANUP_TIMER_START("template");
   POLYBENCH_FREE_ARRAY(C);
+  CARTS_CLEANUP_TIMER_STOP();
+
+  CARTS_E2E_TIMER_STOP();
+  CARTS_BENCHMARKS_STOP();
 
   return 0;
 }

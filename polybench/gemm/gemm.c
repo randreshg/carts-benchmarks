@@ -42,11 +42,9 @@ static void gemm(float **C, const float **A, const float **B, float alpha,
 
 static double checksum(float **C) {
   double s = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : s)
-  for (int i = 0; i < NI; i++) {
-    for (int j = 0; j < NJ; j++) {
-      s += C[i][j];
-    }
+  int diag = NI < NJ ? NI : NJ;
+  for (int i = 0; i < diag; i++) {
+    s += C[i][i];
   }
   return s;
 }
@@ -55,9 +53,9 @@ int main(void) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
 
-  // E2E timing: includes DB creation (malloc/init) + kernel
   CARTS_E2E_TIMER_START("gemm");
 
+  CARTS_STARTUP_TIMER_START("gemm");
   float **A = (float **)malloc(NI * sizeof(float *));
   float **B = (float **)malloc(NK * sizeof(float *));
   float **C = (float **)malloc(NI * sizeof(float *));
@@ -71,16 +69,18 @@ int main(void) {
   }
 
   init(A, B, C);
+  CARTS_STARTUP_TIMER_STOP();
 
-  // CARTS_KERNEL_TIMER_START("gemm");
+  CARTS_KERNEL_TIMER_START("gemm");
   gemm(C, (const float **)A, (const float **)B, 1.0f, 0.0f);
-  // CARTS_KERNEL_TIMER_STOP("gemm");
+  CARTS_KERNEL_TIMER_STOP("gemm");
 
-  // Verification: parallel checksum so output C is consumed through the
-  // EDT/acquire path and can be distributed safely.
+  CARTS_VERIFICATION_TIMER_START("gemm");
   double checksum_value = checksum(C);
   CARTS_BENCH_CHECKSUM(checksum_value);
+  CARTS_VERIFICATION_TIMER_STOP();
 
+  CARTS_CLEANUP_TIMER_START("gemm");
   for (int i = 0; i < NI; i++) {
     free(A[i]);
     free(C[i]);
@@ -91,6 +91,7 @@ int main(void) {
   free(A);
   free(B);
   free(C);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import hashlib
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,22 @@ def _get_carts_dir() -> Path:
 def _get_benchmarks_dir() -> Path:
     """Get the benchmarks directory (local helper to avoid circular imports)."""
     return Path(__file__).parent.parent.resolve()
+
+
+def _apply_arts_cfg_overrides(content: str, overrides: Dict[str, str]) -> str:
+    """Apply simple key=value overrides to an arts.cfg payload."""
+    updated = content
+    for key, value in overrides.items():
+        replacement = f"{key}={value}"
+        pattern = rf"^{re.escape(key)}\s*=.*$"
+        if re.search(pattern, updated, re.MULTILINE):
+            updated = re.sub(pattern, replacement, updated, flags=re.MULTILINE)
+        elif "[ARTS]" in updated:
+            updated = updated.replace("[ARTS]", f"[ARTS]\n{replacement}", 1)
+        else:
+            suffix = "" if updated.endswith("\n") else "\n"
+            updated = f"{updated}{suffix}{replacement}\n"
+    return updated
 
 
 class ArtifactManager:
@@ -192,6 +209,9 @@ class ArtifactManager:
         profile: Optional[str] = None,
         perf: Optional[bool] = None,
         perf_interval: Optional[float] = None,
+        timeout: Optional[int] = None,
+        time_limit: Optional[str] = None,
+        runtime_arts_overrides: Optional[Dict[str, str]] = None,
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
@@ -206,7 +226,10 @@ class ArtifactManager:
         # Copy the effective arts.cfg used for this run
         if arts_cfg_path and arts_cfg_path.exists():
             dest = run_dir / "arts.cfg"
-            shutil.copy2(arts_cfg_path, dest)
+            content = arts_cfg_path.read_text()
+            if runtime_arts_overrides:
+                content = _apply_arts_cfg_overrides(content, runtime_arts_overrides)
+            dest.write_text(content)
 
         # Write run_config.json with full execution context
         run_config: Dict[str, object] = {
@@ -235,6 +258,10 @@ class ArtifactManager:
             run_config["perf"] = perf
         if perf_interval is not None:
             run_config["perf_interval"] = perf_interval
+        if timeout is not None:
+            run_config["timeout"] = timeout
+        if time_limit is not None:
+            run_config["time_limit"] = time_limit
         if command:
             run_config["command"] = command
         if env_overrides:

@@ -65,6 +65,7 @@ class LocalStepExecutionRequest:
     clean: bool
     quiet: bool
     artifact_manager: ArtifactManager
+    variant: Optional[str] = None  # None=both, "arts", "openmp"
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ class SlurmStepExecutionRequest:
     """Shared context for executing resolved steps through SLURM."""
 
     partition: Optional[str]
-    time_limit: str
+    time_limit: Optional[str]
     results_dir: Path
     verbose: bool
     quiet: bool
@@ -210,6 +211,10 @@ class StepResolver:
                 raise ValueError(
                     f"Step '{step.name}': profile not found: {step.profile}"
                 )
+            if step.debug < 0 or step.debug > 3:
+                raise ValueError(
+                    f"Step '{step.name}': debug must be in the ARTS range 0..3"
+                )
 
     @staticmethod
     def resolve_effective_size_label(
@@ -250,8 +255,7 @@ class StepResolver:
             else self.profiles_dir / "profile-none.cfg"
         )
         should_rebuild_arts = (
-            defaults.explicit_step_mode
-            or step_def.profile is not None
+            step_def.profile is not None
             or step_def.debug > 0
         )
 

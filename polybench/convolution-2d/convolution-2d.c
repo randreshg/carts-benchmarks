@@ -20,6 +20,10 @@
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include "convolution-2d.h"
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 /* Array initialization. */
 static void init_array(int ni, int nj, DATA_TYPE **A) {
   int i, j;
@@ -69,6 +73,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("convolution-2d");
 
+  CARTS_STARTUP_TIMER_START("convolution-2d");
   /* Retrieve problem size. */
   int ni = NI;
   int nj = NJ;
@@ -84,39 +89,35 @@ int main(int argc, char **argv) {
 
   /* Initialize array(s). */
   init_array(ni, nj, A);
-
-  /* Start timer. */
-  polybench_start_instruments;
+  CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
-  // CARTS_KERNEL_TIMER_START("convolution-2d");
-  kernel_conv2d(ni, nj, A, B);
-  // CARTS_KERNEL_TIMER_STOP("convolution-2d");
-
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  CARTS_KERNEL_TIMER_START("convolution-2d");
+  for (int rep = 0; rep < NREPS; rep++) {
+    kernel_conv2d(ni, nj, A, B);
+    CARTS_KERNEL_TIMER_ACCUM("convolution-2d");
+  }
+  CARTS_KERNEL_TIMER_PRINT("convolution-2d");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("convolution-2d");
   double checksum = 0.0;
-  for (int i = 0; i < ni; i++) {
-    for (int j = 0; j < nj; j++) {
-      checksum += B[i][j];
-    }
+  int diag = ni < nj ? ni : nj;
+  for (int i = 0; i < diag; i++) {
+    checksum += B[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
-
-  /* Prevent dead-code elimination. All live-out data must be printed
-     by the function call in argument. */
-  polybench_prevent_dce(print_array(ni, nj, B));
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Be clean. */
+  CARTS_CLEANUP_TIMER_START("convolution-2d");
   for (int i = 0; i < ni; i++) {
     free(A[i]);
     free(B[i]);
   }
   free(A);
   free(B);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

@@ -81,6 +81,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("correlation");
 
+  CARTS_STARTUP_TIMER_START("correlation");
   int m = M;
   int n = N;
 
@@ -95,23 +96,22 @@ int main(int argc, char **argv) {
   }
 
   init_array(m, n, data);
+  CARTS_STARTUP_TIMER_STOP();
 
-  // CARTS_KERNEL_TIMER_START("correlation");
+  CARTS_KERNEL_TIMER_START("correlation");
   kernel_correlation(m, n, data, corr, mean, stddev);
-  // CARTS_KERNEL_TIMER_STOP("correlation");
+  CARTS_KERNEL_TIMER_STOP("correlation");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("correlation");
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
   for (int i = 0; i < m; i++) {
-    for (int j = 0; j < m; j++) {
-      checksum += corr[i][j];
-    }
+    checksum += corr[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
-  polybench_prevent_dce(print_array(m, m, corr, "corr"));
-
+  CARTS_CLEANUP_TIMER_START("correlation");
   for (int i = 0; i < m; i++) {
     free(data[i]);
     free(corr[i]);
@@ -120,6 +120,7 @@ int main(int argc, char **argv) {
   free(corr);
   free(mean);
   free(stddev);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

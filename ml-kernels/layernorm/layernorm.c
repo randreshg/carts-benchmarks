@@ -15,6 +15,10 @@
 #define EPS 1e-5f
 #endif
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void init(float **x, float *gamma, float *beta) {
   int idx = 0;
   for (int b = 0; b < BATCH; ++b) {
@@ -52,23 +56,11 @@ static void layernorm_forward(float **x, const float *gamma, const float *beta,
   }
 }
 
-static float checksum(float **x) {
-  // Use sum of absolute values for stable checksum.
-  // Normalized data is centered around 0, so plain sum would be ~0
-  // and highly sensitive to floating-point rounding differences.
-  float sum = 0.0f;
-  for (int b = 0; b < BATCH; ++b) {
-    for (int h = 0; h < HIDDEN; ++h) {
-      sum += fabsf(x[b][h]);
-    }
-  }
-  return sum;
-}
-
 int main(void) {
-  // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("layernorm");
+
+  CARTS_STARTUP_TIMER_START("layernorm");
 
   float **x = (float **)malloc(BATCH * sizeof(float *));
   float *gamma = (float *)malloc(sizeof(float) * HIDDEN);
@@ -85,27 +77,32 @@ int main(void) {
 
   init(x, gamma, beta);
 
-  // CARTS_KERNEL_TIMER_START("layernorm");
-  layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
-  // CARTS_KERNEL_TIMER_STOP("layernorm");
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Verification
-  printf("layernorm checksum=%f\n", checksum(x));
+  CARTS_KERNEL_TIMER_START("layernorm");
+  for (int rep = 0; rep < NREPS; rep++) {
+    layernorm_forward(x, gamma, beta, BATCH, HIDDEN, EPS);
+    CARTS_KERNEL_TIMER_ACCUM("layernorm");
+  }
+  CARTS_KERNEL_TIMER_PRINT("layernorm");
 
+  CARTS_VERIFICATION_TIMER_START("layernorm");
   double checksum_value = 0.0;
-  for (int b = 0; b < BATCH; b++) {
-    for (int h = 0; h < HIDDEN; h++) {
-      checksum_value += fabs((double)x[b][h]);
-    }
+  int diag = BATCH < HIDDEN ? BATCH : HIDDEN;
+  for (int i = 0; i < diag; i++) {
+    checksum_value += fabs((double)x[i][i]);
   }
   CARTS_BENCH_CHECKSUM(checksum_value);
+  CARTS_VERIFICATION_TIMER_STOP();
 
+  CARTS_CLEANUP_TIMER_START("layernorm");
   for (int b = 0; b < BATCH; ++b) {
     free(x[b]);
   }
   free(x);
   free(gamma);
   free(beta);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

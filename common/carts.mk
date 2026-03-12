@@ -38,15 +38,17 @@ OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
 CARTS_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 ARTS_CFG ?= $(firstword $(wildcard arts.cfg) $(wildcard $(CARTS_ROOT)/external/carts-benchmarks/configs/local.cfg))
 ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
-ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),artsConfig=$(ARTS_CFG),)
+ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),ARTS_CONFIG=$(ARTS_CFG),)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
 # Extra carts compile flags (e.g., --partition-fallback=fine)
 COMPILE_ARGS ?=
 
-# Compile flags for OpenMP reference
-OMP_FLAGS := -fopenmp -O3 $(INCLUDES) $(CFLAGS) -lm -lcartsbenchmarks
+# OpenMP compile flags (split between cgeist and clang steps)
+OMP_CGEIST_FLAGS := -O3 -S --emit-llvm -fopenmp -std=c17 -D_POSIX_C_SOURCE=199309L $(INCLUDES) $(CFLAGS)
+OMP_LINK_FLAGS := -O3 $(LDFLAGS) -lm -lcartsbenchmarks
+OMP_LL := $(BUILD_DIR)/$(EXAMPLE_NAME)-omp.ll
 
 .PHONY: all openmp clean
 
@@ -61,7 +63,7 @@ all: | $(BUILD_DIR) $(LOG_DIR)
 # Track OpenMP build flags to avoid stale binaries when size/CFLAGS change
 # FORCE ensures this rule always runs to compare current flags with cached flags
 $(OMP_CFLAGS_STAMP): FORCE | $(BUILD_DIR)
-	@echo "$(OMP_FLAGS) $(LDFLAGS)" > $@.tmp
+	@echo "$(OMP_CGEIST_FLAGS) $(OMP_LINK_FLAGS)" > $@.tmp
 	@{ \
 	  if [ ! -f "$@" ] || ! cmp -s "$@.tmp" "$@"; then \
 	    mv "$@.tmp" "$@"; \
@@ -74,11 +76,13 @@ $(OMP_CFLAGS_STAMP): FORCE | $(BUILD_DIR)
 FORCE:
 .PHONY: FORCE
 
-# Build OpenMP reference executable
+# Build OpenMP reference executable (2-step: cgeist → clang)
 $(OMP_BINARY): $(SRC) $(OMP_CFLAGS_STAMP) | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP reference -> $@"
-	@$(CARTS) clang $(SRC) $(OMP_FLAGS) $(LDFLAGS) -o $@ \
+	@$(CARTS) cgeist $(SRC) $(OMP_CGEIST_FLAGS) -o $(OMP_LL) \
 		2>&1 | tee $(LOG_DIR)/openmp.log; exit $${PIPESTATUS[0]}
+	@$(CARTS) clang $(OMP_LL) $(OMP_LINK_FLAGS) -o $@ \
+		2>&1 | tee -a $(LOG_DIR)/openmp.log; exit $${PIPESTATUS[0]}
 
 openmp: $(OMP_BINARY)
 
@@ -123,53 +127,53 @@ clean:
 # Build both variants with size
 small:
 	@echo "[$(EXAMPLE_NAME)] Building with SMALL size"
-	$(MAKE) all openmp CFLAGS="$(SMALL_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all openmp CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)"
 
 medium:
 	@echo "[$(EXAMPLE_NAME)] Building with MEDIUM size"
-	$(MAKE) all openmp CFLAGS="$(MEDIUM_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all openmp CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)"
 
 large:
 	@echo "[$(EXAMPLE_NAME)] Building with LARGE size"
-	$(MAKE) all openmp CFLAGS="$(LARGE_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all openmp CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 extralarge:
 	@echo "[$(EXAMPLE_NAME)] Building with EXTRALARGE size"
-	$(MAKE) all openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) all openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 # Build only ARTS with size
 small-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with SMALL size"
-	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 medium-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with MEDIUM size"
-	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 large-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with LARGE size"
-	$(MAKE) all CFLAGS="$(LARGE_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 extralarge-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with EXTRALARGE size"
-	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 # Build only OpenMP with size
 small-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with SMALL size"
-	$(MAKE) openmp CFLAGS="$(SMALL_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) openmp CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)"
 
 medium-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with MEDIUM size"
-	$(MAKE) openmp CFLAGS="$(MEDIUM_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) openmp CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)"
 
 large-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with LARGE size"
-	$(MAKE) openmp CFLAGS="$(LARGE_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) openmp CFLAGS="$(LARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 extralarge-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with EXTRALARGE size"
-	$(MAKE) openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(CFLAGS) $(EXTRA_CFLAGS)"
+	$(MAKE) openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 # Build and run both variants with size
 run-small: small

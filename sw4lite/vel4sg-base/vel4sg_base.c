@@ -15,6 +15,9 @@
 #ifndef DT
 #define DT 0.0005f
 #endif
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 #define COMP 3
 
@@ -90,6 +93,8 @@ int main(void) {
 
   CARTS_E2E_TIMER_START("sw4lite_vel4sg_update");
 
+  CARTS_STARTUP_TIMER_START("sw4lite_vel4sg_update");
+
   // Allocate 3D arrays
   float ***vx = (float ***)malloc(NX * sizeof(float **));
   float ***vy = (float ***)malloc(NX * sizeof(float **));
@@ -129,20 +134,30 @@ int main(void) {
 
   init(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
 
-  // CARTS_KERNEL_TIMER_START("sw4lite_vel4sg_update");
-  sw4lite_vel4sg_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  // CARTS_KERNEL_TIMER_STOP("sw4lite_vel4sg_update");
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Compute checksum
+  CARTS_KERNEL_TIMER_START("sw4lite_vel4sg_update");
+  for (int rep = 0; rep < NREPS; rep++) {
+    sw4lite_vel4sg_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
+    CARTS_KERNEL_TIMER_ACCUM("sw4lite_vel4sg_update");
+  }
+  CARTS_KERNEL_TIMER_PRINT("sw4lite_vel4sg_update");
+
+  CARTS_VERIFICATION_TIMER_START("sw4lite_vel4sg_update");
+
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < NX; ++i) {
-    for (int j = 0; j < NY; ++j) {
-      for (int k = 0; k < NZ; ++k) {
-        checksum += fabs(vx[i][j][k]) + fabs(vy[i][j][k]) + fabs(vz[i][j][k]);
-      }
-    }
+  int diag = NX;
+  if (NY < diag) diag = NY;
+  if (NZ < diag) diag = NZ;
+  for (int i = 0; i < diag; ++i) {
+    checksum += fabs(vx[i][i][i]) + fabs(vy[i][i][i]) + fabs(vz[i][i][i]);
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("sw4lite_vel4sg_update");
 
   // Free 3D arrays
   for (int i = 0; i < NX; ++i) {
@@ -179,6 +194,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

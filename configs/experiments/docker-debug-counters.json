@@ -1,10 +1,12 @@
 {
   "name": "docker-debug-counters",
-  "description": "Single-node 64 threads - workload counter profiling (debug disabled)",
+  "description": "Single-node Docker-v2 workload counter profiling with 4 worker threads",
   "steps": [
     {
       "name": "counter-instrumented",
-      "threads": "64",
+      "arts_config": "docker/arts-docker.cfg",
+      "launcher": "local",
+      "threads": "4",
       "nodes": "1",
       "debug": 0,
       "runs": 1,

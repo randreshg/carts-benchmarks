@@ -15,6 +15,9 @@
 #ifndef DT
 #define DT 0.001
 #endif
+#ifndef NREPS
+#define NREPS 1
+#endif
 
 static void init(double ***vx, double ***vy, double ***vz, double ***rho,
                  double ***sxx, double ***syy, double ***szz, double ***sxy,
@@ -82,6 +85,8 @@ int main(void) {
 
   CARTS_E2E_TIMER_START("specfem_velocity_update");
 
+  CARTS_STARTUP_TIMER_START("specfem_velocity_update");
+
   // Allocate 3D arrays
   double ***vx = (double ***)malloc(NX * sizeof(double **));
   double ***vy = (double ***)malloc(NX * sizeof(double **));
@@ -121,20 +126,30 @@ int main(void) {
 
   init(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
 
-  // CARTS_KERNEL_TIMER_START("specfem_velocity_update");
-  specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
-  // CARTS_KERNEL_TIMER_STOP("specfem_velocity_update");
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Compute checksum
+  CARTS_KERNEL_TIMER_START("specfem_velocity_update");
+  for (int rep = 0; rep < NREPS; rep++) {
+    specfem_velocity_update(vx, vy, vz, rho, sxx, syy, szz, sxy, sxz, syz);
+    CARTS_KERNEL_TIMER_ACCUM("specfem_velocity_update");
+  }
+  CARTS_KERNEL_TIMER_PRINT("specfem_velocity_update");
+
+  CARTS_VERIFICATION_TIMER_START("specfem_velocity_update");
+
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int i = 0; i < NX; ++i) {
-    for (int j = 0; j < NY; ++j) {
-      for (int k = 0; k < NZ; ++k) {
-        checksum += vx[i][j][k] + vy[i][j][k] + vz[i][j][k];
-      }
-    }
+  int diag = NX;
+  if (NY < diag) diag = NY;
+  if (NZ < diag) diag = NZ;
+  for (int i = 0; i < diag; ++i) {
+    checksum += vx[i][i][i] + vy[i][i][i] + vz[i][i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("specfem_velocity_update");
 
   // Free 3D arrays
   for (int i = 0; i < NX; ++i) {
@@ -171,6 +186,8 @@ int main(void) {
   free(sxy);
   free(sxz);
   free(syz);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

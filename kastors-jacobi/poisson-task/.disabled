@@ -1,0 +1,2 @@
+LLVM CodeExtractor crashes on omp.task depend with loop-varying values inside omp.parallel.
+Upstream LLVM bug: OpenMPIRBuilder::finalize() -> CodeExtractor::emitCallAndSwitchStatement SIGSEGV.

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol, Tuple
 
-from benchmark_common import filter_benchmark_output, parse_counter_json
+from benchmark_common import filter_benchmark_output
 from benchmark_execution import BenchmarkExecutionContext, BenchmarkRunFiles
 from benchmark_models import (
     Artifacts,
@@ -37,6 +37,7 @@ class ConfigExecutionPlan:
     report_speedup: bool = True
     env_overrides: Dict[str, str] = field(default_factory=dict)
     persisted_env_overrides: Optional[Dict[str, str]] = None
+    variant: Optional[str] = None  # None=both, "arts", "openmp"
 
 
 @dataclass(frozen=True)
@@ -158,27 +159,36 @@ class ConfigExecutionExecutor:
 
     def _build_variants(self, hooks: ExecutionHooks) -> ConfigBuildOutputs:
         execution = self.plan.execution
-        hooks.emit_phase(Phase.BUILD_ARTS)
-        build_arts = self.host.build_benchmark(
-            execution.name,
-            execution.size,
-            "arts",
-            execution.effective_arts_cfg,
-            execution.effective_cflags,
-            self.plan.compile_args,
-            build_output_dir=execution.build_output_dir,
-        )
+        variant = self.plan.variant  # None=both, "arts", "openmp"
+        skip_result = BuildResult(status=Status.SKIP, duration_sec=0.0, output="")
+
+        if variant != "openmp":
+            hooks.emit_phase(Phase.BUILD_ARTS)
+            build_arts = self.host.build_benchmark(
+                execution.name,
+                execution.size,
+                "arts",
+                execution.effective_arts_cfg,
+                execution.effective_cflags,
+                self.plan.compile_args,
+                build_output_dir=execution.build_output_dir,
+            )
+        else:
+            build_arts = skip_result
         hooks.store_partial("build_arts", build_arts)
 
-        hooks.emit_phase(Phase.BUILD_OMP)
-        build_omp = self.host.build_benchmark(
-            execution.name,
-            execution.size,
-            "openmp",
-            None,
-            execution.effective_cflags,
-            build_output_dir=execution.build_output_dir,
-        )
+        if variant != "arts":
+            hooks.emit_phase(Phase.BUILD_OMP)
+            build_omp = self.host.build_benchmark(
+                execution.name,
+                execution.size,
+                "openmp",
+                None,
+                execution.effective_cflags,
+                build_output_dir=execution.build_output_dir,
+            )
+        else:
+            build_omp = skip_result
         hooks.store_partial("build_omp", build_omp)
 
         return ConfigBuildOutputs(build_arts=build_arts, build_omp=build_omp)
@@ -206,7 +216,6 @@ class ConfigExecutionExecutor:
 
         self.host._cleanup_port()
         run_arts = self._run_arts(build_outputs.build_arts, execution, run_files, hooks)
-        self._attach_counter_timings(run_arts, run_files.counter_dir)
         hooks.store_partial("run_arts", run_arts)
 
         run_omp = self._run_omp(build_outputs.build_omp, execution, run_files, hooks)
@@ -397,6 +406,11 @@ class ConfigExecutionExecutor:
             execution.config,
             run_number,
             arts_cfg_path=run_cfg_path,
+            runtime_arts_overrides=(
+                {"counter_folder": str(counter_path)}
+                if counter_path is not None
+                else None
+            ),
             env_overrides=(
                 self.plan.persisted_env_overrides
                 if self.plan.persisted_env_overrides is not None
@@ -406,18 +420,9 @@ class ConfigExecutionExecutor:
             cflags=execution.effective_cflags or None,
             compile_args=self.plan.compile_args or None,
             perf=perf_enabled,
+            timeout=self.plan.timeout,
         )
         return artifacts
-
-    def _attach_counter_timings(
-        self,
-        run_arts: RunResult,
-        counter_dir: Optional[Path],
-    ) -> None:
-        if counter_dir and counter_dir.exists():
-            init_sec, e2e_sec = parse_counter_json(counter_dir)
-            run_arts.counter_init_sec = init_sec
-            run_arts.counter_e2e_sec = e2e_sec
 
     def _print_trace_output(
         self,

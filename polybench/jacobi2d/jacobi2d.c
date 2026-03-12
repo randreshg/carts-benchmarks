@@ -2,7 +2,6 @@
 
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 #include <omp.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 #ifndef N
@@ -16,9 +15,9 @@ int main(void) {
   // Pre-warm OMP thread pool for fair comparison (must be first)
   CARTS_BENCHMARKS_START();
 
-  // E2E timing: includes DB creation (malloc/init) + kernel
   CARTS_E2E_TIMER_START("jacobi2d");
 
+  CARTS_STARTUP_TIMER_START("jacobi2d");
   float **A = (float **)malloc(N * sizeof(float *));
   float **B = (float **)malloc(N * sizeof(float *));
 
@@ -34,8 +33,9 @@ int main(void) {
       B[i][j] = 0.0f;
     }
   }
+  CARTS_STARTUP_TIMER_STOP();
 
-  // CARTS_KERNEL_TIMER_START("jacobi2d");
+  CARTS_KERNEL_TIMER_START("jacobi2d");
 
   for (int t = 0; t < TSTEPS; t += 2) {
     // Step 1: Read A, Write B
@@ -59,33 +59,30 @@ int main(void) {
     }
   }
 
-  // CARTS_KERNEL_TIMER_STOP("jacobi2d");
+  CARTS_KERNEL_TIMER_STOP("jacobi2d");
 
-  // Verification - result is in A if TSTEPS is even, B if odd
+  CARTS_VERIFICATION_TIMER_START("jacobi2d");
   double checksum = 0.0;
   if (TSTEPS % 2 == 0) {
-    // Even TSTEPS: last write was to A
     for (int i = 0; i < N; i++) {
-      for (int j = 0; j < N; j++) {
-        checksum += A[i][j];
-      }
+      checksum += A[i][i];
     }
   } else {
-    // Odd TSTEPS: last write was to B
     for (int i = 0; i < N; i++) {
-      for (int j = 0; j < N; j++) {
-        checksum += B[i][j];
-      }
+      checksum += B[i][i];
     }
   }
   CARTS_BENCH_CHECKSUM(checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
+  CARTS_CLEANUP_TIMER_START("jacobi2d");
   for (int i = 0; i < N; i++) {
     free(A[i]);
     free(B[i]);
   }
   free(A);
   free(B);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

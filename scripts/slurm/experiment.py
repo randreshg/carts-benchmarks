@@ -41,6 +41,7 @@ class SlurmBatchRequest:
     node_counts: List[int]
     size: str
     runs: int
+    timeout: int
     partition: Optional[str]
     time_limit: str
     account: Optional[str]
@@ -69,7 +70,6 @@ class SlurmExecutorDependencies:
     """Callbacks required by the high-level SLURM executor."""
 
     resolve_effective_arts_config: Callable[[Path, Optional[Path]], Path]
-    validate_thread_network_topology: Callable[[Optional[Path], int, int, str], None]
     parse_time_limit_seconds: Callable[[str], int]
     get_carts_dir: Callable[[], Path]
     get_benchmarks_dir: Callable[[], Path]
@@ -131,13 +131,119 @@ def require_slurm_commands(dry_run: bool) -> None:
     """Validate that the required SLURM executables are available."""
     required_slurm_cmds = ["sbatch"]
     if not dry_run:
-        required_slurm_cmds.extend(["squeue", "sacct", "scontrol"])
+        required_slurm_cmds.extend(["squeue", "sacct", "scontrol", "sinfo"])
     missing_slurm_cmds = [cmd for cmd in required_slurm_cmds if shutil.which(cmd) is None]
     if missing_slurm_cmds:
         raise ValueError(
             "Missing required SLURM command(s): "
             + ", ".join(missing_slurm_cmds)
             + ". Run this on a SLURM login node or add SLURM tools to PATH."
+        )
+
+
+def _run_slurm_query(args: Sequence[str], label: str) -> str:
+    """Run a SLURM query command and normalize failures into ValueError."""
+    try:
+        result = subprocess.run(
+            list(args),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise ValueError(f"Failed to run {label}: {exc}") from exc
+
+    if result.returncode != 0:
+        raise ValueError(
+            f"Failed to query {label}: {(result.stderr or result.stdout or '').strip()}"
+        )
+    return result.stdout or ""
+
+
+def _expand_slurm_nodelist(node_spec: str) -> List[str]:
+    """Expand a Slurm hostlist expression into concrete node names."""
+    output = _run_slurm_query(
+        ["scontrol", "show", "hostnames", node_spec],
+        f"SLURM node list '{node_spec}'",
+    )
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def get_effective_slurm_partition(partition: Optional[str]) -> Optional[str]:
+    """Resolve the partition that SLURM will use for this request."""
+    if partition:
+        return partition
+
+    output = _run_slurm_query(["sinfo", "-h", "-o", "%P"], "SLURM partitions")
+    discovered: List[str] = []
+    default_partition: Optional[str] = None
+
+    for raw in output.splitlines():
+        token = raw.strip()
+        if not token:
+            continue
+        normalized = token.replace("*", "").strip()
+        if not normalized:
+            continue
+        if normalized not in discovered:
+            discovered.append(normalized)
+        if "*" in token and default_partition is None:
+            default_partition = normalized
+
+    if default_partition is not None:
+        return default_partition
+    if len(discovered) == 1:
+        return discovered[0]
+    return None
+
+
+def get_slurm_partition_nodes(partition: str) -> List[str]:
+    """Return the concrete nodes visible in the requested Slurm partition."""
+    output = _run_slurm_query(
+        ["sinfo", "-h", "-p", partition, "-o", "%N"],
+        f"SLURM partition '{partition}'",
+    )
+
+    nodes: List[str] = []
+    seen: set[str] = set()
+    for raw in output.splitlines():
+        spec = raw.strip()
+        if not spec or spec.lower() == "n/a":
+            continue
+        for node in _expand_slurm_nodelist(spec):
+            if node in seen:
+                continue
+            seen.add(node)
+            nodes.append(node)
+    return nodes
+
+
+def validate_requested_node_counts(
+    node_counts: Sequence[int],
+    partition: Optional[str],
+) -> None:
+    """Fail fast when a SLURM sweep requests more nodes than are available."""
+    if not node_counts:
+        return
+
+    effective_partition = get_effective_slurm_partition(partition)
+    if effective_partition is None:
+        raise ValueError(
+            "Cannot validate --nodes because SLURM does not expose a unique default "
+            "partition. Pass --partition explicitly."
+        )
+
+    available_nodes = get_slurm_partition_nodes(effective_partition)
+    if not available_nodes:
+        label = effective_partition
+        raise ValueError(f"No nodes are available in SLURM partition '{label}'.")
+
+    requested_max = max(node_counts)
+    available_count = len(available_nodes)
+    if requested_max > available_count:
+        raise ValueError(
+            f"Requested --nodes up to {requested_max}, but partition '{effective_partition}' only exposes "
+            f"{available_count} node(s): {', '.join(available_nodes)}"
         )
 
 
@@ -304,6 +410,7 @@ class SlurmBatchExecutor:
                 reference_timeout = self.deps.parse_time_limit_seconds(
                     self.request.time_limit
                 )
+                reference_timeout = min(reference_timeout, self.request.timeout)
                 reference = self.host.ensure_omp_reference(
                     bench,
                     self.request.size,
@@ -372,13 +479,6 @@ class SlurmBatchExecutor:
                             "[red]MISSING (--no-build)[/]"
                         )
                     continue
-
-                self.deps.validate_thread_network_topology(
-                    effective_base_config,
-                    self.request.threads,
-                    node_count,
-                    bench,
-                )
 
                 build_arts_cfg = slurm_batch.generate_arts_config_for_node(
                     effective_base_config,
@@ -479,6 +579,9 @@ class SlurmBatchExecutor:
                     bench_config,
                     run_num,
                     arts_cfg_path=build_arts_cfg,
+                    runtime_arts_overrides={
+                        "counter_folder": str((run_dir / "counters").resolve())
+                    },
                     size=self.request.size,
                     cflags=self.request.cflags,
                     compile_args=self.request.compile_args,
@@ -486,6 +589,8 @@ class SlurmBatchExecutor:
                     profile=str(self.request.profile) if self.request.profile else None,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval if self.request.perf else None,
+                    timeout=self.request.timeout,
+                    time_limit=self.request.time_limit,
                     reference_checksum=(
                         reference_checksums.get(bench).checksum
                         if node_count > 1 and bench in reference_checksums
@@ -524,6 +629,7 @@ class SlurmBatchExecutor:
                     run_dir=run_dir,
                     size=self.request.size,
                     threads=self.request.threads,
+                    timeout_seconds=self.request.timeout,
                     gdb=self.request.gdb,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval,

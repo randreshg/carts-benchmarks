@@ -60,7 +60,7 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
 
     def test_implicit_step_load_and_resolution(self) -> None:
         arts_cfg = self.root / "arts.cfg"
-        arts_cfg.write_text("[ARTS]\nthreads=4\n")
+        arts_cfg.write_text("[ARTS]\nworker_threads=4\n")
 
         steps, explicit = self.resolver.load_steps(
             experiment=None,

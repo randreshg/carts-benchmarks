@@ -4,9 +4,9 @@
   "steps": [
     {
       "name": "thread-sweep",
-      "description": "Primary single-node scaling study. Compare ARTS against OpenMP across a standard power-of-two thread sweep to identify the scaling knee, saturation point, and any regressions at high thread counts.",
+      "description": "Primary single-node scaling study. Compare ARTS against OpenMP across a bounded power-of-two thread sweep up to the local 16-thread profile to identify the scaling knee and any regressions before oversubscription dominates.",
       "size": "large",
-      "threads": "1,2,4,8,16,32,64",
+      "threads": "1,2,4,8,16",
       "nodes": "1",
       "debug": 0,
       "runs": 5,
@@ -14,9 +14,9 @@
     },
     {
       "name": "perf-single-node",
-      "description": "Single-node hardware-counter study at the full-thread configuration. Use this to explain ARTS vs OpenMP timing differences through cache-reference and cache-miss behavior.",
+      "description": "Single-node hardware-counter study at the full local-thread configuration. Use this to explain ARTS vs OpenMP timing differences through cache-reference and cache-miss behavior.",
       "size": "large",
-      "threads": "64",
+      "threads": "16",
       "nodes": "1",
       "debug": 0,
       "runs": 5,
@@ -24,9 +24,9 @@
     },
     {
       "name": "thread-edt-single-node",
-      "description": "Single-node runtime-structure study at the full-thread configuration. Capture thread-level EDT activity to explain whether scaling limits come from runtime scheduling balance rather than raw kernel work.",
+      "description": "Single-node runtime-structure study at the full local-thread configuration. Capture thread-level EDT activity to explain whether scaling limits come from runtime scheduling balance rather than raw kernel work.",
       "size": "large",
-      "threads": "64",
+      "threads": "16",
       "nodes": "1",
       "debug": 0,
       "runs": 5,

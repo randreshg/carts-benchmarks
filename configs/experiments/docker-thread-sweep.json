@@ -1,10 +1,12 @@
 {
   "name": "docker-thread-sweep",
-  "description": "Single-node thread scaling - no debug, no ARTS counters",
+  "description": "Single-node Docker-v2 thread scaling using the installed local runtime profile",
   "steps": [
     {
       "name": "thread-sweep",
-      "threads": "1,2,4,8,16,32,64",
+      "arts_config": "docker/arts-docker.cfg",
+      "launcher": "local",
+      "threads": "1,2,4",
       "nodes": "1",
       "debug": 0,
       "runs": 5,

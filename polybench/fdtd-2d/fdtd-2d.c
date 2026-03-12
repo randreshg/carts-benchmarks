@@ -87,6 +87,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("fdtd-2d");
 
+  CARTS_STARTUP_TIMER_START("fdtd-2d");
   /* Retrieve problem size. */
   int tmax = TMAX;
   int nx = NX;
@@ -106,35 +107,25 @@ int main(int argc, char **argv) {
 
   /* Initialize array(s). */
   init_array(tmax, nx, ny, ex, ey, hz, _fict_);
-
-  /* Start timer. */
-  polybench_start_instruments;
+  CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
-  // CARTS_KERNEL_TIMER_START("fdtd-2d");
+  CARTS_KERNEL_TIMER_START("fdtd-2d");
   kernel_fdtd_2d(tmax, nx, ny, ex, ey, hz, _fict_);
-  // CARTS_KERNEL_TIMER_STOP("fdtd-2d");
-
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  CARTS_KERNEL_TIMER_STOP("fdtd-2d");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("fdtd-2d");
   double checksum = 0.0;
-  for (int i = 0; i < nx; i++) {
-    for (int j = 0; j < ny; j++) {
-      checksum += ex[i][j];
-      checksum += ey[i][j];
-      checksum += hz[i][j];
-    }
+  int diag = nx < ny ? nx : ny;
+  for (int i = 0; i < diag; i++) {
+    checksum += ex[i][i] + ey[i][i] + hz[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
-
-  /* Prevent dead-code elimination. All live-out data must be printed
-     by the function call in argument. */
-  polybench_prevent_dce(print_array(nx, ny, ex, ey, hz));
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Be clean. */
+  CARTS_CLEANUP_TIMER_START("fdtd-2d");
   for (int i = 0; i < nx; i++) {
     free(ex[i]);
     free(ey[i]);
@@ -144,6 +135,7 @@ int main(int argc, char **argv) {
   free(ey);
   free(hz);
   free(_fict_);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

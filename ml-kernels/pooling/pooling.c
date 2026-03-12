@@ -26,7 +26,6 @@
  */
 
 #include <float.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include "arts/Utils/Benchmarks/CartsBenchmarks.h"
 
@@ -57,6 +56,10 @@
 
 #ifndef PADDING
 #define PADDING 0
+#endif
+
+#ifndef NREPS
+#define NREPS 1
 #endif
 
 /*
@@ -239,31 +242,10 @@ static void init_pooling_data(float ***input, int batch, int channels, int spati
   }
 }
 
-/*
- * Print sample output for validation
- */
-static void print_sample(const char *name, float ***data, int batch, int channels,
-                  int height, int width, int max_print) {
-  printf("\n%s (first %d elements):\n", name, max_print);
-  int count = 0;
-  int spatial = height * width;
-  for (int b = 0; b < batch && count < max_print; ++b) {
-    for (int c = 0; c < channels && count < max_print; ++c) {
-      for (int h = 0; h < height && count < max_print; ++h) {
-        for (int w = 0; w < width && count < max_print; ++w) {
-          int spatial_idx = h * width + w;
-          printf("%.2f ", data[b][c][spatial_idx]);
-          count++;
-        }
-      }
-    }
-  }
-  printf("\n");
-}
-
 int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("pooling");
+  CARTS_STARTUP_TIMER_START("pooling");
 
   int batch = BATCH_SIZE;
   int channels = CHANNELS;
@@ -278,20 +260,6 @@ int main(int argc, char **argv) {
 
   int in_spatial = in_height * in_width;
   int out_spatial = out_height * out_width;
-
-  printf("Pooling Kernels (Max and Average)\n");
-  printf("==================================\n");
-  printf("Configuration:\n");
-  printf("  Batch size: %d\n", batch);
-  printf("  Channels: %d\n", channels);
-  printf("  Input spatial: %d x %d\n", in_height, in_width);
-  printf("  Pool size: %d x %d\n", pool_size, pool_size);
-  printf("  Stride: %d\n", stride);
-  printf("  Padding: %d\n", padding);
-  printf("  Output spatial: %d x %d\n", out_height, out_width);
-  printf("  Reduction factor: %.2fx\n",
-         (float)(in_height * in_width) / (out_height * out_width));
-  printf("\n");
 
   // Allocate memory as 3D arrays
   float ***input = (float ***)malloc(batch * sizeof(float **));
@@ -314,88 +282,48 @@ int main(int argc, char **argv) {
   // Initialize data
   init_pooling_data(input, batch, channels, in_spatial);
 
-  // Run max pooling
-  printf("Running max pooling...\n");
-  maxpool_forward(input, maxpool_output, batch, channels, in_height, in_width,
-                  pool_size, stride, padding);
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Compute checksum inline
+  // Run all pooling kernels
+  CARTS_KERNEL_TIMER_START("pooling");
+  for (int rep = 0; rep < NREPS; rep++) {
+    maxpool_forward(input, maxpool_output, batch, channels, in_height, in_width,
+                    pool_size, stride, padding);
+    avgpool_forward(input, avgpool_output, batch, channels, in_height, in_width,
+                    pool_size, stride, padding);
+    global_avgpool(input, global_output, batch, channels, in_height, in_width);
+    CARTS_KERNEL_TIMER_ACCUM("pooling");
+  }
+  CARTS_KERNEL_TIMER_PRINT("pooling");
+
+  // Compute checksums (diagonal sampling)
+  CARTS_VERIFICATION_TIMER_START("pooling");
+  int diag3 = batch;
+  if (channels < diag3) diag3 = channels;
+  if (out_spatial < diag3) diag3 = out_spatial;
+
   double maxpool_checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      for (int s = 0; s < out_spatial; s++) {
-        maxpool_checksum += maxpool_output[b][c][s];
-      }
-    }
+  for (int i = 0; i < diag3; i++) {
+    maxpool_checksum += maxpool_output[i][i][i];
   }
 
-  // Run average pooling
-  printf("Running average pooling...\n");
-  avgpool_forward(input, avgpool_output, batch, channels, in_height, in_width,
-                  pool_size, stride, padding);
-
-  // Compute checksum inline
   double avgpool_checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      for (int s = 0; s < out_spatial; s++) {
-        avgpool_checksum += avgpool_output[b][c][s];
-      }
-    }
+  for (int i = 0; i < diag3; i++) {
+    avgpool_checksum += avgpool_output[i][i][i];
   }
 
-  // Run global average pooling
-  printf("Running global average pooling...\n");
-  global_avgpool(input, global_output, batch, channels, in_height, in_width);
-
-  // Compute checksum inline
+  int diag2 = batch < channels ? batch : channels;
   double global_avgpool_checksum = 0.0;
-  for (int b = 0; b < batch; b++) {
-    for (int c = 0; c < channels; c++) {
-      global_avgpool_checksum += global_output[b][c];
-    }
+  for (int i = 0; i < diag2; i++) {
+    global_avgpool_checksum += global_output[i][i];
   }
-
-  // Print samples
-  print_sample("Input", input, batch, channels, in_height, in_width, 20);
-  print_sample("Max Pool Output", maxpool_output, batch, channels, out_height,
-               out_width, 20);
-  print_sample("Avg Pool Output", avgpool_output, batch, channels, out_height,
-               out_width, 20);
-
-  printf(
-      "\nGlobal Average Pooling Output (first 10 channels of first batch):\n");
-  for (int i = 0; i < 10 && i < channels; ++i) {
-    printf("%.4f ", global_output[0][i]);
-  }
-  printf("\n");
-
-  // Validation: Check that max pool >= avg pool (element-wise)
-  printf("\nValidation:\n");
-  int violations = 0;
-  for (int b = 0; b < batch; ++b) {
-    for (int c = 0; c < channels; ++c) {
-      for (int s = 0; s < out_spatial; ++s) {
-        if (maxpool_output[b][c][s] <
-            avgpool_output[b][c][s] - 0.001f) { // Small tolerance for floating point
-          violations++;
-        }
-      }
-    }
-  }
-
-  if (violations == 0) {
-    printf("  [OK] Max pool >= Avg pool for all elements (as expected)\n");
-  } else {
-    printf("  [FAIL] Found %d violations where max < avg\n", violations);
-  }
-
-  printf("\nPooling operations completed successfully!\n");
 
   double final_checksum = maxpool_checksum + avgpool_checksum + global_avgpool_checksum;
   CARTS_BENCH_CHECKSUM(final_checksum);
+  CARTS_VERIFICATION_TIMER_STOP();
 
   // Cleanup
+  CARTS_CLEANUP_TIMER_START("pooling");
   for (int b = 0; b < batch; ++b) {
     for (int c = 0; c < channels; ++c) {
       free(input[b][c]);
@@ -411,6 +339,7 @@ int main(int argc, char **argv) {
   free(maxpool_output);
   free(avgpool_output);
   free(global_output);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

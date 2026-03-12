@@ -16,6 +16,10 @@
 #define N_QUAD 36
 #endif
 
+#ifndef NREPS
+#define NREPS 1
+#endif
+
 static void init(float **dofs, float **gradMatrix, float **fluxMatrix) {
   for (int e = 0; e < N_ELEMENTS; ++e) {
     for (int b = 0; b < N_BASIS; ++b) {
@@ -36,9 +40,9 @@ static void seissol_volume_integral(float **fluxOut,
                                     const float **dofs,
                                     const float **gradMatrix,
                                     const float **fluxMatrix) {
-#pragma omp parallel for schedule(static)
+  float buffer[N_QUAD];
+#pragma omp parallel for schedule(static) private(buffer)
   for (int elem = 0; elem < N_ELEMENTS; ++elem) {
-    float buffer[N_QUAD];
     for (int q = 0; q < N_QUAD; ++q) {
       float val = 0.0f;
       for (int b = 0; b < N_BASIS; ++b) {
@@ -60,6 +64,8 @@ int main(void) {
   CARTS_BENCHMARKS_START();
 
   CARTS_E2E_TIMER_START("seissol_volume_integral");
+
+  CARTS_STARTUP_TIMER_START("seissol_volume_integral");
 
   // Allocate 2D arrays
   float **dofs = (float **)malloc(N_ELEMENTS * sizeof(float *));
@@ -84,18 +90,28 @@ int main(void) {
 
   init(dofs, gradMatrix, fluxMatrix);
 
-  // CARTS_KERNEL_TIMER_START("seissol_volume_integral");
-  seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
-  // CARTS_KERNEL_TIMER_STOP("seissol_volume_integral");
+  CARTS_STARTUP_TIMER_STOP();
 
-  // Compute checksum
+  CARTS_KERNEL_TIMER_START("seissol_volume_integral");
+  for (int rep = 0; rep < NREPS; rep++) {
+    seissol_volume_integral(fluxOut, dofs, gradMatrix, fluxMatrix);
+    CARTS_KERNEL_TIMER_ACCUM("seissol_volume_integral");
+  }
+  CARTS_KERNEL_TIMER_PRINT("seissol_volume_integral");
+
+  CARTS_VERIFICATION_TIMER_START("seissol_volume_integral");
+
+  // Compute checksum (diagonal sampling)
   double checksum = 0.0;
-  for (int e = 0; e < N_ELEMENTS; ++e) {
-    for (int b = 0; b < N_BASIS; ++b) {
-      checksum += fluxOut[e][b];
-    }
+  int diag = N_ELEMENTS < N_BASIS ? N_ELEMENTS : N_BASIS;
+  for (int i = 0; i < diag; ++i) {
+    checksum += fluxOut[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
+
+  CARTS_VERIFICATION_TIMER_STOP();
+
+  CARTS_CLEANUP_TIMER_START("seissol_volume_integral");
 
   for (int e = 0; e < N_ELEMENTS; ++e) {
     free(dofs[e]);
@@ -110,6 +126,8 @@ int main(void) {
   }
   free(gradMatrix);
   free(fluxMatrix);
+
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

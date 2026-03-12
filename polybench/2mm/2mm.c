@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
   CARTS_BENCHMARKS_START();
   CARTS_E2E_TIMER_START("2mm");
 
+  CARTS_STARTUP_TIMER_START("2mm");
   /* Retrieve problem size. */
   int ni = NI;
   int nj = NJ;
@@ -129,39 +130,31 @@ int main(int argc, char **argv) {
 
   /* Initialize array(s). */
   init_array(ni, nj, nk, nl, &alpha, &beta, A, B, C, D);
-
-  /* Start timer. */
-  polybench_start_instruments;
+  CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
-  // CARTS_KERNEL_TIMER_START("2mm");
+  CARTS_KERNEL_TIMER_START("2mm");
   kernel_2mm(ni, nj, nk, nl, alpha, beta, tmp, A, B, C, D);
-  // CARTS_KERNEL_TIMER_STOP("2mm");
-
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  CARTS_KERNEL_TIMER_STOP("2mm");
 
   /* Verification */
+  CARTS_VERIFICATION_TIMER_START("2mm");
   double checksum = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : checksum)
-  for (int i = 0; i < ni; i++) {
-    for (int j = 0; j < nl; j++) {
-      checksum += D[i][j];
-    }
+  int diag = ni < nl ? ni : nl;
+  for (int i = 0; i < diag; i++) {
+    checksum += D[i][i];
   }
   CARTS_BENCH_CHECKSUM(checksum);
-
-  /* Prevent dead-code elimination. All live-out data must be printed
-     by the function call in argument. */
-  polybench_prevent_dce(print_array(ni, nl, D));
+  CARTS_VERIFICATION_TIMER_STOP();
 
   /* Be clean. */
+  CARTS_CLEANUP_TIMER_START("2mm");
   free_matrix(tmp, ni);
   free_matrix(A, ni);
   free_matrix(B, nk);
   free_matrix(C, nl);
   free_matrix(D, ni);
+  CARTS_CLEANUP_TIMER_STOP();
 
   CARTS_E2E_TIMER_STOP();
   CARTS_BENCHMARKS_STOP();

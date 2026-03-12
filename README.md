@@ -77,6 +77,11 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--base-size` | | Base problem size for weak scaling |
 | `--arts-config` | | Custom arts.cfg file |
 
+ARTS rebuild notes:
+- Runner `--debug` controls benchmark-runner verbosity only: `0`=quiet, `1`=show commands, `2`=verbose console output.
+- Experiment-step `debug` values are raw ARTS runtime levels when a step rebuilds ARTS: `0`=errors only, `1`=warnings, `2`=info, `3`=debug.
+- If the installed ARTS runtime is missing, the benchmark runner now forces `carts build --arts` before executing the step, even when the step did not explicitly request a rebuild.
+
 ### `carts benchmarks build`
 
 Build benchmarks without running.
@@ -280,9 +285,9 @@ ARTS uses a three-tier configuration fallback system when no explicit config is 
 
 1. **Custom config** (`--arts-config /path/to/config.cfg`)
 2. **Local config** (`benchmark_dir/arts.cfg`)
-3. **Global default config** (`carts-benchmarks/arts.cfg`)
+3. **Global default config** (`external/carts-benchmarks/configs/local.cfg`)
 
-If no `--arts-config` is provided, CARTS first looks for an `arts.cfg` file in the benchmark directory. If that doesn't exist, it falls back to the global default configuration.
+If no `--arts-config` is provided, CARTS first looks for an `arts.cfg` file in the benchmark directory. If that doesn't exist, it falls back to `external/carts-benchmarks/configs/local.cfg`.
 
 The runner displays the effective ARTS configuration before execution:
 - Single benchmark: shows specific config values (threads, nodes, launcher)
@@ -309,7 +314,7 @@ carts benchmarks run polybench/gemm --threads 16 --omp-threads 8
 carts benchmarks run polybench/gemm --arts-config /path/to/my_config.cfg
 
 # Example custom config for multi-node execution
-echo -e "[ARTS]\nthreads=64\nlauncher=slurm\nnodeCount=4\nnodes=node001,node002,node003,node004" > multi.cfg
+echo -e "[ARTS]\nworker_threads=64\nlauncher=slurm\nnode_count=4\nnodes=node001,node002,node003,node004" > multi.cfg
 carts benchmarks run polybench/gemm --arts-config multi.cfg
 ```
 
@@ -318,8 +323,8 @@ carts benchmarks run polybench/gemm --arts-config multi.cfg
 | Parameter | CLI Option | Description |
 |-----------|------------|-------------|
 | `launcher` | `--launcher` | Job launcher (ssh, slurm, lsf) |
-| `nodeCount` | `--nodes`, `-n` | Number of compute nodes (supports sweep) |
-| `threads` | `--threads` | ARTS worker threads per node |
+| `node_count` | `--nodes`, `-n` | Number of compute nodes (supports sweep) |
+| `worker_threads` | `--threads` | ARTS worker threads per node |
 | `omp-threads` | `--omp-threads` | OpenMP threads (separate from ARTS threads) |
 
 Command-line options take precedence over any configuration file settings.
@@ -556,6 +561,5 @@ Task-based parallel benchmarks for OpenMP task dependencies.
 
 - `kastors-jacobi/jacobi-task-dep` - Task dependency Jacobi
 - `kastors-jacobi/jacobi-for` - Fork-join Jacobi
-- `kastors-jacobi/jacobi-block-for` - Blocked fork-join Jacobi
 
 Use `carts benchmarks list` to see all available benchmarks.

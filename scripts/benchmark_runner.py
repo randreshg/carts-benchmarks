@@ -71,6 +71,7 @@ from slurm.experiment import (
     find_multinode_disabled_benchmarks,
     format_node_counts_display,
     require_slurm_commands,
+    validate_requested_node_counts,
 )
 
 # Shared constants and parsing
@@ -87,11 +88,12 @@ from benchmark_common import (
     DEFAULT_ARTS_PORT,
     KERNEL_TIME_PATTERN,
     E2E_TIME_PATTERN,
-    INIT_TIME_PATTERN,
     parse_checksum,
     parse_kernel_timings,
     parse_e2e_timings,
-    parse_init_timings,
+    parse_startup_timings,
+    parse_verification_timings,
+    parse_cleanup_timings,
     parse_perf_csv as _shared_parse_perf_csv,
 )
 
@@ -162,6 +164,17 @@ def get_carts_dir() -> Path:
         if env_dir:
             carts_dir = Path(env_dir)
     return carts_dir
+
+
+def arts_runtime_is_installed(carts_dir: Optional[Path] = None) -> bool:
+    """Return True when the installed ARTS runtime is present and linkable."""
+    root = carts_dir or get_carts_dir()
+    install_dir = root / ".install" / "arts"
+    lib_dir = install_dir / "lib"
+    cmake_config = lib_dir / "cmake" / "ARTS" / "ARTSConfig.cmake"
+    public_header = install_dir / "include" / "arts.h"
+    has_library = any(path.is_file() for path in lib_dir.glob("libarts*"))
+    return cmake_config.is_file() and public_header.is_file() and has_library
 
 
 BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
@@ -246,6 +259,25 @@ def parse_slurm_time_limit_seconds(value: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def format_slurm_time_limit(seconds: int) -> str:
+    """Format a wall-clock limit in seconds as HH:MM:SS."""
+    total = max(1, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def resolve_slurm_time_limit(
+    timeout_seconds: int,
+    explicit_time_limit: Optional[str],
+) -> str:
+    """Resolve the scheduler wall time for a benchmark run."""
+    if explicit_time_limit is not None:
+        parse_slurm_time_limit_seconds(explicit_time_limit)
+        return explicit_time_limit
+    return format_slurm_time_limit(timeout_seconds + 30)
+
+
 def normalize_requested_benchmarks(
     benchmarks: Optional[List[str]],
 ) -> Tuple[Optional[List[str]], bool]:
@@ -312,7 +344,6 @@ BENCHMARK_SIZE_PARAMS = {
     "polybench/correlation": {"params": ["M", "N"], "complexity": "2d"},
     "polybench/covariance": {"params": ["M", "N"], "complexity": "2d"},
     # KaStORS benchmarks
-    "kastors-jacobi/jacobi-block-for": {"params": ["SIZE"], "complexity": "2d"},
     "kastors-jacobi/jacobi-for": {"params": ["SIZE"], "complexity": "2d"},
     "kastors-jacobi/jacobi-task-dep": {"params": ["SIZE"], "complexity": "2d"},
 }
@@ -438,6 +469,15 @@ def _sanitize_config_token(value: str, fallback: str = "default") -> str:
     return token or fallback
 
 
+def _upsert_arts_cfg_value(content: str, key: str, value: object) -> str:
+    """Replace or insert one top-level ARTS config assignment."""
+    line = f"{key}={value}"
+    pattern = rf"^{re.escape(key)}\s*=.*$"
+    if re.search(pattern, content, re.MULTILINE):
+        return re.sub(pattern, line, content, flags=re.MULTILINE)
+    return content.replace("[ARTS]", f"[ARTS]\n{line}", 1)
+
+
 def generate_arts_config(
     base_path: Path,
     threads: int,
@@ -449,16 +489,17 @@ def generate_arts_config(
     """Generate temporary arts.cfg with specific configuration from a template.
 
     The base_path must be a valid config file that serves as a template.
-    This ensures proper node hostnames are preserved for the SSH launcher.
+    For SSH launcher templates we preserve and truncate the configured
+    hostnames. For local and Slurm launchers, node_count is sufficient.
 
     Args:
-        base_path: Template config file (required). Must contain nodes= with hostnames.
+        base_path: Template config file (required).
         threads: Worker thread count per node.
         counter_dir: Optional directory for counter output.
         launcher: ARTS launcher type (ssh, slurm, lsf, local).
-        nodes_override: If set, use only the first N nodes from the template's nodes= list.
+        nodes_override: If set, override node_count in the generated config.
 
-    Note: For Slurm, nodeCount in config is IGNORED - ARTS reads SLURM_NNODES
+    Note: For Slurm, node_count in config is IGNORED - ARTS reads SLURM_NNODES
     from environment (set by srun). The launcher controls HOW we invoke the
     executable, not just what's in the config.
     """
@@ -467,63 +508,34 @@ def generate_arts_config(
 
     content = base_path.read_text()
 
-    # Update threads
-    if re.search(r'^threads\s*=', content, re.MULTILINE):
-        content = re.sub(
-            r'^threads\s*=\s*\d+', f'threads={threads}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nthreads={threads}')
+    # CLI --threads maps to ARTS worker_threads in the v2 runtime schema.
+    content = _upsert_arts_cfg_value(content, "worker_threads", threads)
 
-    # Handle nodes override: truncate the nodes= list and update nodeCount
+    # Handle node override.
     if nodes_override is not None:
-        all_nodes = get_arts_cfg_nodes(base_path)
-        if nodes_override > len(all_nodes):
-            raise ValueError(
-                f"Requested --nodes {nodes_override} but config '{base_path}' only has {len(all_nodes)} node(s).\n"
-                f"Use --arts-config to specify a config template with sufficient nodes.\n"
-                f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
-            )
-        truncated = all_nodes[:nodes_override]
-        truncated_str = ",".join(truncated)
-
-        # Update nodes= line
-        if re.search(r'^nodes\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^nodes\s*=.*$', f'nodes={truncated_str}', content, flags=re.MULTILINE)
-        else:
-            content = content.replace(
-                '[ARTS]', f'[ARTS]\nnodes={truncated_str}')
-
-        # Update nodeCount
-        if re.search(r'^nodeCount\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^nodeCount\s*=\s*\d+', f'nodeCount={nodes_override}', content, flags=re.MULTILINE)
-        else:
-            content = content.replace(
-                '[ARTS]', f'[ARTS]\nnodeCount={nodes_override}')
-
-        # Update masterNode to first node in truncated list
-        if re.search(r'^masterNode\s*=', content, re.MULTILINE):
-            content = re.sub(
-                r'^masterNode\s*=.*$', f'masterNode={truncated[0]}', content, flags=re.MULTILINE)
+        content = _upsert_arts_cfg_value(content, "node_count", nodes_override)
+        if launcher == "ssh":
+            all_nodes = get_arts_cfg_nodes(base_path)
+            if nodes_override > len(all_nodes):
+                raise ValueError(
+                    f"Requested --nodes {nodes_override} but SSH config '{base_path}' only has {len(all_nodes)} node(s).\n"
+                    f"Use --arts-config to specify a config template with sufficient nodes.\n"
+                    f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
+                )
+            truncated = all_nodes[:nodes_override]
+            content = _upsert_arts_cfg_value(content, "nodes", ",".join(truncated))
+            content = _upsert_arts_cfg_value(content, "master_node", truncated[0])
 
     # Update launcher
-    if re.search(r'^launcher\s*=', content, re.MULTILINE):
-        content = re.sub(r'^launcher\s*=\s*\w+',
-                         f'launcher={launcher}', content, flags=re.MULTILINE)
-    else:
-        content = content.replace('[ARTS]', f'[ARTS]\nlauncher={launcher}')
+    content = _upsert_arts_cfg_value(content, "launcher", launcher)
 
     # Add counter settings if requested
     if counter_dir:
-        # Remove any existing counterFolder/counterStartPoint lines to avoid duplicates
-        content = re.sub(r'^counterFolder\s*=.*\n?', '', content, flags=re.MULTILINE)
-        content = re.sub(r'^counterStartPoint\s*=.*\n?', '', content, flags=re.MULTILINE)
-        content += f"\ncounterFolder={counter_dir}\ncounterStartPoint=1\n"
+        content = _upsert_arts_cfg_value(content, "counter_folder", counter_dir)
 
     # Determine node count for filename
     node_count = nodes_override if nodes_override else get_arts_cfg_int(
-        base_path, "nodeCount") or 1
+        base_path, "node_count") or 1
 
     # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
     # The carts-benchmarks directory is shared across all nodes via mounted volume.
@@ -558,40 +570,12 @@ def _resolve_effective_arts_config(
     for candidate in [
         bench_path / "arts.cfg",
         bench_path.parent / "arts.cfg",
-        BENCHMARKS_DIR / "arts.cfg",
         DEFAULT_ARTS_CONFIG,
     ]:
         if candidate.exists():
             return candidate.resolve()
 
     return DEFAULT_ARTS_CONFIG.resolve()
-
-
-def _validate_thread_network_topology(
-    arts_cfg_path: Optional[Path],
-    threads: int,
-    node_count: int,
-    benchmark_name: str,
-) -> None:
-    """Validate that at least one worker thread remains after network threads."""
-    if node_count <= 1:
-        return
-
-    outgoing = get_arts_cfg_int(arts_cfg_path, "outgoing")
-    incoming = get_arts_cfg_int(arts_cfg_path, "incoming")
-    sender_threads = outgoing if outgoing is not None else 1
-    receiver_threads = incoming if incoming is not None else 1
-    min_threads = sender_threads + receiver_threads + 1
-
-    if threads < min_threads:
-        cfg_display = str(arts_cfg_path) if arts_cfg_path else "<default>"
-        raise ValueError(
-            f"Invalid thread topology for '{benchmark_name}' (nodes={node_count}): "
-            f"threads={threads}, outgoing={sender_threads}, incoming={receiver_threads}. "
-            f"Need threads >= {min_threads} so at least one worker thread remains "
-            f"(threads > outgoing + incoming). "
-            f"Adjust step threads or update outgoing/incoming in {cfg_display}."
-        )
 
 
 def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
@@ -603,14 +587,13 @@ def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
 
 
 _EMBEDDED_ARTS_CFG_KEYS = (
-    "threads",
-    "incoming",
-    "outgoing",
-    "nodeCount",
+    "worker_threads",
+    "receiver_threads",
+    "sender_threads",
+    "node_count",
     "launcher",
     "protocol",
-    "port",
-    "counterFolder",
+    "default_ports",
 )
 
 
@@ -902,7 +885,6 @@ class BenchmarkRunner:
             reference_env = {
                 "OMP_NUM_THREADS": str(omp_threads),
                 "OMP_WAIT_POLICY": "ACTIVE",
-                "CARTS_BENCHMARKS_REPORT_INIT": "1",
             }
             run_omp = self.run_benchmark(
                 build_omp.executable,
@@ -1518,7 +1500,9 @@ class BenchmarkRunner:
             checksum=self.extract_checksum(outcome.stdout),
             kernel_timings=self.extract_kernel_timings(outcome.stdout),
             e2e_timings=self.extract_e2e_timings(outcome.stdout),
-            init_timings=self.extract_init_timings(outcome.stdout),
+            startup_timings=self.extract_startup_timings(outcome.stdout),
+            verification_timings=self.extract_verification_timings(outcome.stdout),
+            cleanup_timings=self.extract_cleanup_timings(outcome.stdout),
             parallel_task_timing=self.extract_parallel_task_timings(outcome.stdout),
             perf_metrics=perf_metrics,
             perf_csv_path=perf_csv_path,
@@ -1526,10 +1510,7 @@ class BenchmarkRunner:
 
     def _create_common_env(self) -> Dict[str, str]:
         """Return environment overrides shared by local benchmark runs."""
-        env: Dict[str, str] = {}
-        if "CARTS_BENCHMARKS_REPORT_INIT" not in os.environ:
-            env["CARTS_BENCHMARKS_REPORT_INIT"] = "1"
-        return env
+        return {}
 
     def _create_execution_plan(
         self,
@@ -1547,6 +1528,7 @@ class BenchmarkRunner:
         report_speedup: bool,
         env_overrides: Dict[str, str],
         persisted_env_overrides: Optional[Dict[str, str]] = None,
+        variant: Optional[str] = None,
     ) -> ConfigExecutionPlan:
         """Create the shared execution plan for one resolved benchmark config."""
         return ConfigExecutionPlan(
@@ -1567,6 +1549,7 @@ class BenchmarkRunner:
                 if persisted_env_overrides is not None
                 else None
             ),
+            variant=variant,
         )
 
     def run_with_thread_sweep(
@@ -1587,6 +1570,7 @@ class BenchmarkRunner:
         compile_args: Optional[str] = None,
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
+        variant: Optional[str] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
@@ -1607,8 +1591,8 @@ class BenchmarkRunner:
         # Determine effective config template
         effective_config = _resolve_effective_arts_config(bench_path, base_config)
 
-        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
-        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
+        base_nodes = get_arts_cfg_int(effective_config, "node_count") or 1
+        base_threads = get_arts_cfg_int(effective_config, "worker_threads") or 1
         base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
         desired_launcher = launcher if launcher is not None else base_launcher
 
@@ -1641,21 +1625,10 @@ class BenchmarkRunner:
                     omp_threads=actual_omp_threads,
                     launcher=desired_launcher,
                 )
-                _validate_thread_network_topology(
-                    effective_config, threads, desired_nodes, name
-                )
 
-                # Counter directory: artifact_manager path or explicit --counter-dir
-                run_counter_dir: Optional[Path] = None
-                if am:
-                    # Always set counterFolder so counters land in place
-                    run_counter_dir = am.get_counter_dir(name, config, 1)
-                elif counter_dir is not None:
-                    run_counter_dir = counter_dir
-
-                # Generate arts.cfg with thread count, launcher, node count, counter dir
+                # Generate arts.cfg with thread count, launcher, and node count.
                 arts_cfg = generate_arts_config(
-                    effective_config, threads, run_counter_dir,
+                    effective_config, threads, None,
                     desired_launcher, desired_nodes, benchmark_name=name
                 )
 
@@ -1706,6 +1679,7 @@ class BenchmarkRunner:
                     report_speedup=(desired_nodes == 1),
                     env_overrides=env,
                     persisted_env_overrides=env,
+                    variant=variant,
                 )
                 results.extend(ConfigExecutionExecutor(self, plan).execute())
 
@@ -1742,7 +1716,7 @@ class BenchmarkRunner:
             perf_interval: Interval in seconds for perf stat sampling (default: 0.1).
             perf_output_name: Filename for perf CSV output (default: perf_cache.csv).
             perf_output_dir: Directory for perf CSV output (default: executable's parent).
-            counter_dir: Optional path to override the embedded counterFolder config value
+            counter_dir: Optional path to override the embedded counter_folder config value
                 via the ARTS per-variable env var mechanism.
         """
         result = self._run_process_request(
@@ -1782,9 +1756,17 @@ class BenchmarkRunner:
         """Extract end-to-end timing info from benchmark output."""
         return parse_e2e_timings(output)
 
-    def extract_init_timings(self, output: str) -> Dict[str, float]:
-        """Extract runtime initialization timing info from benchmark output."""
-        return parse_init_timings(output)
+    def extract_startup_timings(self, output: str) -> Dict[str, float]:
+        """Extract startup timing info from benchmark output."""
+        return parse_startup_timings(output)
+
+    def extract_verification_timings(self, output: str) -> Dict[str, float]:
+        """Extract verification timing info from benchmark output."""
+        return parse_verification_timings(output)
+
+    def extract_cleanup_timings(self, output: str) -> Dict[str, float]:
+        """Extract cleanup timing info from benchmark output."""
+        return parse_cleanup_timings(output)
 
     def extract_parallel_task_timings(self, output: str) -> Optional[ParallelTaskTiming]:
         """Extract parallel region and task timing info from benchmark output.
@@ -1861,17 +1843,28 @@ class BenchmarkRunner:
         omp_result: RunResult,
         report_speedup: bool = True,
     ) -> TimingResult:
-        """Calculate speedup preferring E2E timings when available."""
+        """Calculate speedup preferring kernel timings when available."""
         arts_kernel = get_kernel_time(arts_result)
         omp_kernel = get_kernel_time(omp_result)
-        # Prefer counter-based E2E time from ARTS introspection JSON
-        arts_e2e = arts_result.counter_e2e_sec if arts_result.counter_e2e_sec is not None else get_e2e_time(arts_result)
+        arts_e2e = get_e2e_time(arts_result)
         omp_e2e = get_e2e_time(omp_result)
-        # Prefer counter-based init time from ARTS introspection JSON
-        arts_init = arts_result.counter_init_sec if arts_result.counter_init_sec is not None else get_init_time(arts_result)
-        omp_init = get_init_time(omp_result)
+        arts_startup = get_startup_time(arts_result)
+        omp_startup = get_startup_time(omp_result)
+        arts_verification = get_verification_time(arts_result)
+        omp_verification = get_verification_time(omp_result)
+        arts_cleanup = get_cleanup_time(arts_result)
+        omp_cleanup = get_cleanup_time(omp_result)
         arts_total = arts_result.duration_sec
         omp_total = omp_result.duration_sec
+
+        section_fields = dict(
+            arts_startup_sec=arts_startup,
+            omp_startup_sec=omp_startup,
+            arts_verification_sec=arts_verification,
+            omp_verification_sec=omp_verification,
+            arts_cleanup_sec=arts_cleanup,
+            omp_cleanup_sec=omp_cleanup,
+        )
 
         if arts_result.status != Status.PASS or omp_result.status != Status.PASS:
             return TimingResult(
@@ -1883,8 +1876,6 @@ class BenchmarkRunner:
                 omp_kernel_sec=omp_kernel,
                 arts_e2e_sec=arts_e2e,
                 omp_e2e_sec=omp_e2e,
-                arts_init_sec=arts_init,
-                omp_init_sec=omp_init,
                 arts_total_sec=arts_total,
                 omp_total_sec=omp_total,
                 speedup_basis=(
@@ -1894,18 +1885,19 @@ class BenchmarkRunner:
                     if (arts_kernel is not None and omp_kernel is not None)
                     else "total"
                 ),
+                **section_fields,
             )
 
-        # Prefer E2E timings when both are available, otherwise fall back to kernel timings,
+        # Prefer kernel timings when both are available, otherwise fall back to E2E timings,
         # otherwise fall back to total process duration.
-        if arts_e2e is not None and omp_e2e is not None:
-            arts_time = arts_e2e
-            omp_time = omp_e2e
-            speedup_basis = "e2e"
-        elif arts_kernel is not None and omp_kernel is not None:
+        if arts_kernel is not None and omp_kernel is not None:
             arts_time = arts_kernel
             omp_time = omp_kernel
             speedup_basis = "kernel"
+        elif arts_e2e is not None and omp_e2e is not None:
+            arts_time = arts_e2e
+            omp_time = omp_e2e
+            speedup_basis = "e2e"
         else:
             arts_time = arts_total
             omp_time = omp_total
@@ -1936,11 +1928,10 @@ class BenchmarkRunner:
             omp_kernel_sec=omp_kernel,
             arts_e2e_sec=arts_e2e,
             omp_e2e_sec=omp_e2e,
-            arts_init_sec=arts_init,
-            omp_init_sec=omp_init,
             arts_total_sec=arts_total,
             omp_total_sec=omp_total,
             speedup_basis=speedup_basis,
+            **section_fields,
         )
 
     def collect_artifacts(self, bench_path: Path) -> Artifacts:
@@ -2009,6 +2000,7 @@ class BenchmarkRunner:
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
         cflags: str = "",
+        variant: Optional[str] = None,
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -2016,14 +2008,15 @@ class BenchmarkRunner:
             phase_callback: Optional callback invoked when phase changes.
                            Used by run_all to update live display.
             partial_results: Optional dict to store partial results as phases complete.
+            variant: None=both, "arts"=ARTS only, "openmp"=OpenMP only.
         """
         bench_path = self.benchmarks_dir / name
 
         # Determine effective config template.
         effective_config = _resolve_effective_arts_config(bench_path, arts_config)
 
-        base_threads = get_arts_cfg_int(effective_config, "threads") or 1
-        base_nodes = get_arts_cfg_int(effective_config, "nodeCount") or 1
+        base_threads = get_arts_cfg_int(effective_config, "worker_threads") or 1
+        base_nodes = get_arts_cfg_int(effective_config, "node_count") or 1
         base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
 
         desired_threads = threads_override if threads_override is not None else base_threads
@@ -2040,12 +2033,9 @@ class BenchmarkRunner:
             omp_threads=actual_omp_threads,
             launcher=desired_launcher,
         )
-        _validate_thread_network_topology(
-            effective_config, desired_threads, desired_nodes, name
-        )
         am = self.artifact_manager  # shorthand (may be None)
 
-        # Skip benchmarks disabled for multi-node when running with nodeCount > 1
+        # Skip benchmarks disabled for multi-node when running with node_count > 1.
         if desired_nodes > 1 and (bench_path / ".disable-multinode").exists():
             return self._make_skip_result(
                 name, size,
@@ -2066,15 +2056,12 @@ class BenchmarkRunner:
             need_generated = True
         if launcher_override is not None and launcher_override != base_launcher:
             need_generated = True
-        if run_counter_dir is not None:
-            need_generated = True
-
         effective_arts_cfg: Path
         if need_generated:
             effective_arts_cfg = generate_arts_config(
                 effective_config,
                 desired_threads,
-                run_counter_dir,
+                None,
                 desired_launcher,
                 nodes_override,
                 benchmark_name=name,
@@ -2118,6 +2105,7 @@ class BenchmarkRunner:
             sweep_log_names=False,
             report_speedup=(desired_nodes == 1),
             env_overrides=self._create_common_env(),
+            variant=variant,
         )
         hooks = ExecutionHooks(
             phase_callback=phase_callback,
@@ -2143,6 +2131,7 @@ class BenchmarkRunner:
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
         cflags: str = "",
+        variant: Optional[str] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2171,6 +2160,7 @@ class BenchmarkRunner:
                         run_timestamp=run_timestamp,
                         perf_dir=perf_dir,
                         cflags=cflags,
+                        variant=variant,
                     )
                     results_list.append(result)
             self.results = results_list
@@ -2226,6 +2216,7 @@ class BenchmarkRunner:
                             run_timestamp=run_timestamp,
                             perf_dir=perf_dir,
                             cflags=cflags,
+                            variant=variant,
                         )
                     except Exception as e:
                         # Log error and continue to next benchmark
@@ -2680,16 +2671,24 @@ def get_e2e_time(run_result: RunResult) -> Optional[float]:
     return None
 
 
-def get_init_time(run_result: RunResult) -> Optional[float]:
-    """Get total runtime init time from run result (sum of all init timings)."""
-    if run_result.init_timings:
-        # Prefer the canonical keys when present to avoid accidental double counting
-        # if additional init signals are added (e.g., init.arts_runtime).
-        if "arts" in run_result.init_timings:
-            return run_result.init_timings["arts"]
-        if "omp" in run_result.init_timings:
-            return run_result.init_timings["omp"]
-        return sum(run_result.init_timings.values())
+def get_startup_time(run_result: RunResult) -> Optional[float]:
+    """Get total startup time from run result."""
+    if run_result.startup_timings:
+        return sum(run_result.startup_timings.values())
+    return None
+
+
+def get_verification_time(run_result: RunResult) -> Optional[float]:
+    """Get total verification time from run result."""
+    if run_result.verification_timings:
+        return sum(run_result.verification_timings.values())
+    return None
+
+
+def get_cleanup_time(run_result: RunResult) -> Optional[float]:
+    """Get total cleanup time from run result."""
+    if run_result.cleanup_timings:
+        return sum(run_result.cleanup_timings.values())
     return None
 
 
@@ -2705,10 +2704,7 @@ def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     total = sum(run_result.kernel_timings.values())
     count = len(run_result.kernel_timings)
 
-    if count == 1:
-        return total, f"{total:.4f}s"
-    else:
-        return total, f"{total:.4f}s [{count}]"
+    return total, f"{total:.2f}s"
 
 
 def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
@@ -2716,21 +2712,7 @@ def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     if not run_result.e2e_timings:
         return None, ""
     total = sum(run_result.e2e_timings.values())
-    count = len(run_result.e2e_timings)
-    if count == 1:
-        return total, f"{total:.4f}s"
-    return total, f"{total:.4f}s [{count}]"
-
-
-def format_init_time(run_result: RunResult) -> Tuple[Optional[float], str]:
-    """Format runtime init time for display. Returns (total_time, display_string)."""
-    if not run_result.init_timings:
-        return None, ""
-    total = sum(run_result.init_timings.values())
-    count = len(run_result.init_timings)
-    if count == 1:
-        return total, f"{total:.4f}s"
-    return total, f"{total:.4f}s [{count}]"
+    return total, f"{total:.2f}s"
 
 
 def create_results_table(results: List[BenchmarkResult]) -> Table:
@@ -2738,54 +2720,30 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("Build", justify="center")
-    table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
-    table.add_column("OMP Init", justify="right")
     table.add_column("OMP E2E", justify="right")
+    table.add_column("A.Startup", justify="right")
+    table.add_column("O.Startup", justify="right")
+    table.add_column("A.Kernel", justify="right")
+    table.add_column("O.Kernel", justify="right")
+    table.add_column("A.Verify", justify="right")
+    table.add_column("O.Verify", justify="right")
+    table.add_column("A.Cleanup", justify="right")
+    table.add_column("O.Cleanup", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
     has_fallback = False
-    has_multi_kernel = False
-    has_multi_e2e = False
     for r in results:
-        # Build status (combined)
-        if r.build_arts.status == Status.PASS and r.build_omp.status == Status.PASS:
-            build = f"[green]\u2713[/] {r.build_arts.duration_sec + r.build_omp.duration_sec:.1f}s"
-        else:
-            build = f"[red]\u2717[/] {r.build_arts.status.value}/{r.build_omp.status.value}"
-
-        # ARTS Init time from counter JSON
-        if r.run_arts.counter_init_sec is not None:
-            arts_init = f"{r.run_arts.counter_init_sec:.4f}s"
-        else:
-            arts_init = "[dim]-[/]"
-
-        # ARTS E2E time: prefer counter JSON, fall back to parsed stdout
-        if r.run_arts.counter_e2e_sec is not None:
-            arts_e2e = r.run_arts.counter_e2e_sec
-            arts_e2e_str = f"{arts_e2e:.4f}s"
-        else:
-            arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
-
+        arts_e2e, arts_e2e_str = format_e2e_time(r.run_arts)
         omp_e2e, omp_e2e_str = format_e2e_time(r.run_omp)
 
-        # OMP Init time from parsed stdout
-        omp_init = r.run_omp.init_timings.get("omp")
-        if omp_init is not None:
-            omp_init_str = f"{omp_init:.4f}s"
-        else:
-            omp_init_str = "[dim]-[/]"
-
-        # Track if any benchmark has multiple kernels / e2e segments
-        if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
-            has_multi_kernel = True
-        if r.run_arts.e2e_timings and len(r.run_arts.e2e_timings) > 1:
-            has_multi_e2e = True
-
-        # Run status with e2e time (fall back to kernel, then total duration)
-        if r.run_arts.status == Status.PASS:
+        # ARTS E2E: skip → compile failure → runtime failure → success
+        if r.build_arts.status == Status.SKIP:
+            run_arts = "[dim]- Skip[/]"
+        elif r.build_arts.status != Status.PASS:
+            run_arts = "[red]\u2717 Compile[/]"
+        elif r.run_arts.status == Status.PASS:
             if arts_e2e is not None:
                 run_arts = f"{status_symbol(r.run_arts.status)} {arts_e2e_str}"
             else:
@@ -2796,9 +2754,14 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                     run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
                 has_fallback = True
         else:
-            run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
+            run_arts = "[red]\u2717 Runtime[/]"
 
-        if r.run_omp.status == Status.PASS:
+        # OMP E2E: skip → compile failure → runtime failure → success
+        if r.build_omp.status == Status.SKIP:
+            run_omp = "[dim]- Skip[/]"
+        elif r.build_omp.status != Status.PASS:
+            run_omp = "[red]\u2717 Compile[/]"
+        elif r.run_omp.status == Status.PASS:
             if omp_e2e is not None:
                 run_omp = f"{status_symbol(r.run_omp.status)} {omp_e2e_str}"
             else:
@@ -2809,7 +2772,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                     run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
                 has_fallback = True
         else:
-            run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
+            run_omp = "[red]\u2717 Runtime[/]"
 
         # Correctness
         if r.verification.correct:
@@ -2819,6 +2782,19 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         else:
             correct = "[red]\u2717 NO[/]"
 
+        # Section times (both ARTS and OMP)
+        def _fmt_sec(val: "Optional[float]") -> str:
+            return f"{val:.2f}s" if val is not None else "[dim]-[/]"
+
+        startup_arts = _fmt_sec(r.timing.arts_startup_sec)
+        startup_omp = _fmt_sec(r.timing.omp_startup_sec)
+        kernel_arts = _fmt_sec(r.timing.arts_kernel_sec)
+        kernel_omp = _fmt_sec(r.timing.omp_kernel_sec)
+        verify_arts = _fmt_sec(r.timing.arts_verification_sec)
+        verify_omp = _fmt_sec(r.timing.omp_verification_sec)
+        cleanup_arts = _fmt_sec(r.timing.arts_cleanup_sec)
+        cleanup_omp = _fmt_sec(r.timing.omp_cleanup_sec)
+
         # Speedup (basis chosen in calculate_timing)
         if r.timing.speedup > 0:
             if r.timing.speedup >= 1.0:
@@ -2827,7 +2803,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                 speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
             else:
                 speedup = f"[red]{r.timing.speedup:.2f}x[/]"
-            if r.timing.speedup_basis != "e2e":
+            if r.timing.speedup_basis != "kernel":
                 speedup += "*"
                 has_fallback = True
         else:
@@ -2835,25 +2811,22 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
         table.add_row(
             r.name,
-            build,
-            arts_init,
             run_arts,
-            omp_init_str,
             run_omp,
+            startup_arts,
+            startup_omp,
+            kernel_arts,
+            kernel_omp,
+            verify_arts,
+            verify_omp,
+            cleanup_arts,
+            cleanup_omp,
             correct,
             speedup,
         )
 
-    # Build caption based on what notations are used
-    captions = []
-    if has_multi_kernel:
-        captions.append("[N] = sum of N kernels")
-    if has_multi_e2e:
-        captions.append("[N] = sum of N e2e segments")
     if has_fallback:
-        captions.append("* = speedup/time not based on e2e")
-    if captions:
-        table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
+        table.caption = "[dim]* = speedup not based on kernel[/]"
 
     return table
 
@@ -2909,94 +2882,67 @@ def create_live_table(
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
 
     table.add_column("Benchmark", style="cyan", no_wrap=True)
-    table.add_column("CARTS Build", justify="center")
-    table.add_column("ARTS Init", justify="right")
     table.add_column("ARTS E2E", justify="right")
-    table.add_column("OMP Init", justify="right")
     table.add_column("OMP E2E", justify="right")
+    table.add_column("A.Startup", justify="right")
+    table.add_column("O.Startup", justify="right")
+    table.add_column("A.Kernel", justify="right")
+    table.add_column("O.Kernel", justify="right")
+    table.add_column("A.Verify", justify="right")
+    table.add_column("O.Verify", justify="right")
+    table.add_column("A.Cleanup", justify="right")
+    table.add_column("O.Cleanup", justify="right")
     table.add_column("Correct", justify="center")
     table.add_column("Speedup", justify="right")
 
     has_fallback = False
-    has_multi_kernel = False
     for bench in benchmarks:
         if bench in results and results[bench]:
             # Completed runs - show running statistics
             runs_list = results[bench]
-            run_count = len(runs_list)
             r = runs_list[-1]  # Latest result for status checks
 
-            # CARTS Build time (only ARTS build, with statistics)
-            arts_build_times = [run.build_arts.duration_sec for run in runs_list
-                                if run.build_arts.status == Status.PASS]
-            if arts_build_times:
-                stats = compute_stats(arts_build_times)
-                stddev = stats.get('stddev', 0.0)
-                build = f"[green]\u2713[/] {stats['mean']:.1f}s ({stddev:.2f}s) [{run_count}]"
+            # ARTS E2E: skip → compile failure → runtime failure → mean time
+            if r.build_arts.status == Status.SKIP:
+                run_arts = "[dim]- Skip[/]"
+            elif r.build_arts.status != Status.PASS:
+                run_arts = "[red]\u2717 Compile[/]"
             else:
-                build = f"[red]\u2717[/] {r.build_arts.status.value}"
-
-            # ARTS Init time with statistics
-            arts_init_times = [run.run_arts.counter_init_sec for run in runs_list
-                               if run.run_arts.counter_init_sec is not None]
-            if arts_init_times:
-                stats = compute_stats(arts_init_times)
-                stddev = stats.get('stddev', 0.0)
-                arts_init = f"{stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            else:
-                arts_init = "[dim]-[/]"
-
-            # ARTS E2E time with statistics
-            arts_e2e_times = []
-            for run in runs_list:
-                if run.run_arts.counter_e2e_sec is not None:
-                    arts_e2e_times.append(run.run_arts.counter_e2e_sec)
-                elif run.run_arts.e2e_timings:
-                    arts_e2e_times.append(sum(run.run_arts.e2e_timings.values()))
-            if arts_e2e_times:
-                stats = compute_stats(arts_e2e_times)
-                stddev = stats.get('stddev', 0.0)
-                run_arts = f"[green]\u2713[/] {stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            elif r.run_arts.status == Status.PASS:
-                # Fallback to kernel times
-                arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
-                if arts_kernel is not None:
-                    run_arts = f"[green]\u2713[/] {arts_kernel_str}*"
+                arts_e2e_times = [sum(run.run_arts.e2e_timings.values()) for run in runs_list
+                                  if run.run_arts.e2e_timings]
+                if arts_e2e_times:
+                    stats = compute_stats(arts_e2e_times)
+                    run_arts = f"[green]\u2713[/] {stats['mean']:.2f}s"
+                elif r.run_arts.status == Status.PASS:
+                    arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
+                    if arts_kernel is not None:
+                        run_arts = f"[green]\u2713[/] {arts_kernel_str}*"
+                    else:
+                        run_arts = f"[green]\u2713[/] {r.run_arts.duration_sec:.2f}s*"
+                    has_fallback = True
                 else:
-                    run_arts = f"[green]\u2713[/] {r.run_arts.duration_sec:.2f}s*"
-                has_fallback = True
-            else:
-                run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.status.value}"
+                    run_arts = "[red]\u2717 Runtime[/]"
 
-            # OMP Init time with statistics
-            omp_init_times = [run.run_omp.init_timings.get("omp") for run in runs_list
-                              if run.run_omp.init_timings.get("omp") is not None]
-            if omp_init_times:
-                stats = compute_stats(omp_init_times)
-                stddev = stats.get('stddev', 0.0)
-                omp_init_str = f"{stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
+            # OMP E2E: skip → compile failure → runtime failure → mean time
+            if r.build_omp.status == Status.SKIP:
+                run_omp = "[dim]- Skip[/]"
+            elif r.build_omp.status != Status.PASS:
+                run_omp = "[red]\u2717 Compile[/]"
             else:
-                omp_init_str = "[dim]-[/]"
-
-            # OMP E2E time with statistics
-            omp_e2e_times = []
-            for run in runs_list:
-                if run.run_omp.e2e_timings:
-                    omp_e2e_times.append(sum(run.run_omp.e2e_timings.values()))
-            if omp_e2e_times:
-                stats = compute_stats(omp_e2e_times)
-                stddev = stats.get('stddev', 0.0)
-                run_omp = f"[green]\u2713[/] {stats['mean']:.4f}s ({stddev:.4f}s) [{run_count}]"
-            elif r.run_omp.status == Status.PASS:
-                # Fallback to kernel times
-                omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
-                if omp_kernel is not None:
-                    run_omp = f"[green]\u2713[/] {omp_kernel_str}*"
+                omp_e2e_times = [sum(run.run_omp.e2e_timings.values()) for run in runs_list
+                                 if run.run_omp.e2e_timings]
+                if omp_e2e_times:
+                    stats = compute_stats(omp_e2e_times)
+                    run_omp = f"[green]\u2713[/] {stats['mean']:.2f}s"
+                elif r.run_omp.status == Status.PASS:
+                    omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
+                    if omp_kernel is not None:
+                        run_omp = f"[green]\u2713[/] {omp_kernel_str}*"
+                    else:
+                        run_omp = f"[green]\u2713[/] {r.run_omp.duration_sec:.2f}s*"
+                    has_fallback = True
                 else:
-                    run_omp = f"[green]\u2713[/] {r.run_omp.duration_sec:.2f}s*"
-                has_fallback = True
-            else:
-                run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.status.value}"
+                    run_omp = "[red]\u2717 Runtime[/]"
 
             # Correctness (based on latest run)
             if r.verification.correct:
@@ -3006,90 +2952,77 @@ def create_live_table(
             else:
                 correct = "[red]\u2717 NO[/]"
 
-            # Speedup with statistics
+            # Speedup (mean only)
             speedups = [run.timing.speedup for run in runs_list if run.timing.speedup > 0]
             if speedups:
-                stats = compute_stats(speedups)
-                mean_speedup = stats['mean']
-                stddev = stats.get('stddev', 0.0)
+                mean_speedup = compute_stats(speedups)['mean']
                 if mean_speedup >= 1.0:
-                    speedup = f"[green]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
+                    speedup = f"[green]{mean_speedup:.2f}x[/]"
                 elif mean_speedup >= 0.8:
-                    speedup = f"[yellow]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
+                    speedup = f"[yellow]{mean_speedup:.2f}x[/]"
                 else:
-                    speedup = f"[red]{mean_speedup:.2f}x ({stddev:.2f}) [{run_count}][/]"
-                if r.timing.speedup_basis != "e2e":
-                    speedup = speedup.replace(f"[{run_count}]", f"[{run_count}]*")
+                    speedup = f"[red]{mean_speedup:.2f}x[/]"
+                if r.timing.speedup_basis != "kernel":
+                    speedup += "*"
                     has_fallback = True
             else:
                 speedup = "[dim]-[/]"
 
-            # Track if any benchmark has multiple kernels
-            if r.run_arts.kernel_timings and len(r.run_arts.kernel_timings) > 1:
-                has_multi_kernel = True
+            # Section times (both ARTS and OMP, latest run)
+            def _fmt_sec(val: "Optional[float]") -> str:
+                return f"{val:.2f}s" if val is not None else "[dim]-[/]"
 
-            table.add_row(bench, build, arts_init, run_arts, omp_init_str, run_omp, correct, speedup)
+            startup_arts = _fmt_sec(r.timing.arts_startup_sec)
+            startup_omp = _fmt_sec(r.timing.omp_startup_sec)
+            kernel_arts = _fmt_sec(r.timing.arts_kernel_sec)
+            kernel_omp = _fmt_sec(r.timing.omp_kernel_sec)
+            verify_arts = _fmt_sec(r.timing.arts_verification_sec)
+            verify_omp = _fmt_sec(r.timing.omp_verification_sec)
+            cleanup_arts = _fmt_sec(r.timing.arts_cleanup_sec)
+            cleanup_omp = _fmt_sec(r.timing.omp_cleanup_sec)
+
+            table.add_row(bench, run_arts, run_omp,
+                          startup_arts, startup_omp,
+                          kernel_arts, kernel_omp,
+                          verify_arts, verify_omp,
+                          cleanup_arts, cleanup_omp,
+                          correct, speedup)
 
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
-            arts_init = "[dim]-[/]"  # Default for in-progress phases
-            omp_init_str = "[dim]-[/]"  # Default for in-progress phases
             if current_phase == Phase.BUILD_ARTS:
-                build = "[yellow]⏳ ARTS...[/]"
-                run_arts = "[dim]-[/]"
+                run_arts = "[yellow]\u23f3 Building...[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.BUILD_OMP:
-                # Show ARTS build time if available (CARTS Build = ARTS only)
+                # ARTS build done or skipped
                 if current_partial and "build_arts" in current_partial:
-                    build_arts_result = current_partial["build_arts"]
-                    if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
+                    ba = current_partial["build_arts"]
+                    if ba.status == Status.SKIP:
+                        run_arts = "[dim]- Skip[/]"
+                    elif ba.status == Status.PASS:
+                        run_arts = "[dim]-[/]"
                     else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}"
+                        run_arts = "[red]\u2717 Compile[/]"
                 else:
-                    build = "[yellow]⏳ building...[/]"
-                run_arts = "[dim]-[/]"
-                run_omp = "[dim]-[/]"
+                    run_arts = "[dim]-[/]"
+                run_omp = "[yellow]\u23f3 Building...[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.RUN_ARTS:
-                # Show CARTS build time (ARTS only)
-                if current_partial and "build_arts" in current_partial:
-                    build_arts_result = current_partial["build_arts"]
-                    if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
-                    else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}"
-                else:
-                    build = "[green]✓[/]"
-                run_arts = "[yellow]⏳ running...[/]"
+                run_arts = "[yellow]\u23f3 Running...[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             elif current_phase == Phase.RUN_OMP:
-                # Show CARTS build time (ARTS only)
-                if current_partial and "build_arts" in current_partial:
-                    build_arts_result = current_partial["build_arts"]
-                    if build_arts_result.status == Status.PASS:
-                        build = f"[green]✓[/] {build_arts_result.duration_sec:.1f}s (0.00s) [1]"
-                    else:
-                        build = f"[red]✗[/] {build_arts_result.status.value}"
-                else:
-                    build = "[green]✓[/]"
                 # ARTS run completed, show e2e time if available in partial results
                 if current_partial and "run_arts" in current_partial:
                     run_arts_result = current_partial["run_arts"]
-                    # Prefer counter-based timing
-                    if run_arts_result.counter_init_sec is not None:
-                        arts_init = f"{run_arts_result.counter_init_sec:.4f}s"
-                    if run_arts_result.counter_e2e_sec is not None:
-                        arts_e2e = run_arts_result.counter_e2e_sec
-                        arts_e2e_str = f"{arts_e2e:.4f}s"
-                    else:
+                    if run_arts_result.status == Status.SKIP:
+                        run_arts = "[dim]- Skip[/]"
+                    elif run_arts_result.status == Status.PASS:
                         arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
-                    if run_arts_result.status == Status.PASS:
                         if arts_e2e is not None:
                             run_arts = f"{status_symbol(run_arts_result.status)} {arts_e2e_str}"
                         else:
@@ -3100,25 +3033,23 @@ def create_live_table(
                             else:
                                 run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.duration_sec:.2f}s*"
                     else:
-                        run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.status.value}"
+                        run_arts = "[red]\u2717 Runtime[/]"
                 else:
-                    run_arts = "[green]✓[/]"
-                run_omp = "[yellow]⏳ running...[/]"
+                    run_arts = "[green]\u2713[/]"
+                run_omp = "[yellow]\u23f3 Running...[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             else:
-                build = "[yellow]⏳...[/]"
-                run_arts = "[dim]-[/]"
+                run_arts = "[yellow]\u23f3...[/]"
                 run_omp = "[dim]-[/]"
                 correct = "[dim]-[/]"
                 speedup = "[dim]-[/]"
             table.add_row(
                 f"[bold]{bench}[/]",
-                build,
-                arts_init,
                 run_arts,
-                omp_init_str,
                 run_omp,
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
                 correct,
                 speedup,
             )
@@ -3128,21 +3059,14 @@ def create_live_table(
                 f"[dim]{bench}[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
-                "[dim]-[/]",
-                "[dim]-[/]",
-                "[dim]-[/]",
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
+                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
                 "[dim]-[/]",
                 "[dim]-[/]",
             )
 
-    # Build caption based on what notations are used
-    captions = []
-    if has_multi_kernel:
-        captions.append("[N] = sum of N kernels")
     if has_fallback:
-        captions.append("* = speedup/time not based on e2e")
-    if captions:
-        table.caption = "[dim]" + "  |  ".join(captions) + "[/]"
+        table.caption = "[dim]* = speedup not based on kernel[/]"
 
     return table
 
@@ -3231,8 +3155,6 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
         # Extract timings
         arts_build_times = []
         omp_build_times = []
-        arts_init_times = []
-        omp_init_times = []
         arts_e2e_times = []
         omp_e2e_times = []
         # Keep kernel times as optional context
@@ -3244,13 +3166,6 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
                 arts_build_times.append(r.build_arts.duration_sec)
             if r.build_omp.status == Status.PASS:
                 omp_build_times.append(r.build_omp.duration_sec)
-
-            arts_init = get_init_time(r.run_arts)
-            omp_init = get_init_time(r.run_omp)
-            if arts_init is not None:
-                arts_init_times.append(arts_init)
-            if omp_init is not None:
-                omp_init_times.append(omp_init)
 
             arts_e2e = get_e2e_time(r.run_arts)
             omp_e2e = get_e2e_time(r.run_omp)
@@ -3276,8 +3191,6 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
         stats[config_key] = {
             "arts_build_time": compute_stats(arts_build_times),
             "omp_build_time": compute_stats(omp_build_times),
-            "arts_init_time": compute_stats(arts_init_times),
-            "omp_init_time": compute_stats(omp_init_times),
             "arts_e2e_time": compute_stats(arts_e2e_times),
             "omp_e2e_time": compute_stats(omp_e2e_times),
             "arts_kernel_time": compute_stats(arts_kernel_times),
@@ -3426,7 +3339,9 @@ def export_json(
                 "checksum": r.run_arts.checksum,
                 "kernel_timings": r.run_arts.kernel_timings,
                 "e2e_timings": r.run_arts.e2e_timings,
-                "init_timings": r.run_arts.init_timings,
+                "startup_timings": r.run_arts.startup_timings,
+                "verification_timings": r.run_arts.verification_timings,
+                "cleanup_timings": r.run_arts.cleanup_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_arts.parallel_task_timing),
                 "perf_metrics": asdict(r.run_arts.perf_metrics) if r.run_arts.perf_metrics else None,
                 "perf_csv_path": r.run_arts.perf_csv_path,
@@ -3438,7 +3353,9 @@ def export_json(
                 "checksum": r.run_omp.checksum,
                 "kernel_timings": r.run_omp.kernel_timings,
                 "e2e_timings": r.run_omp.e2e_timings,
-                "init_timings": r.run_omp.init_timings,
+                "startup_timings": r.run_omp.startup_timings,
+                "verification_timings": r.run_omp.verification_timings,
+                "cleanup_timings": r.run_omp.cleanup_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
                 "perf_metrics": asdict(r.run_omp.perf_metrics) if r.run_omp.perf_metrics else None,
                 "perf_csv_path": r.run_omp.perf_csv_path,
@@ -3452,8 +3369,12 @@ def export_json(
                 "omp_kernel_sec": r.timing.omp_kernel_sec,
                 "arts_e2e_sec": r.timing.arts_e2e_sec,
                 "omp_e2e_sec": r.timing.omp_e2e_sec,
-                "arts_init_sec": r.timing.arts_init_sec,
-                "omp_init_sec": r.timing.omp_init_sec,
+                "arts_startup_sec": r.timing.arts_startup_sec,
+                "omp_startup_sec": r.timing.omp_startup_sec,
+                "arts_verification_sec": r.timing.arts_verification_sec,
+                "omp_verification_sec": r.timing.omp_verification_sec,
+                "arts_cleanup_sec": r.timing.arts_cleanup_sec,
+                "omp_cleanup_sec": r.timing.omp_cleanup_sec,
                 "arts_total_sec": r.timing.arts_total_sec,
                 "omp_total_sec": r.timing.omp_total_sec,
                 "note": r.timing.note,
@@ -3639,12 +3560,11 @@ def _make_experiment_step(
             if base_candidate.exists():
                 return str(base_candidate)
 
-        if p.exists():
-            return str(p.resolve())
-
         search_dirs: List[Path] = []
         if field == "arts_config":
-            search_dirs = [CONFIGS_DIR]
+            # Benchmark experiments live in the carts-benchmarks submodule, but
+            # the Docker runtime config lives in the parent CARTS repo.
+            search_dirs = [get_carts_dir(), CONFIGS_DIR]
         elif field == "profile":
             search_dirs = [PROFILES_DIR]
 
@@ -3652,6 +3572,9 @@ def _make_experiment_step(
             candidate = (search_dir / p).resolve()
             if candidate.exists():
                 return str(candidate)
+
+        if p.exists():
+            return str(p.resolve())
 
         raise ValueError(f"Cannot resolve {field} '{raw}' - file not found")
 
@@ -3738,6 +3661,9 @@ def _rebuild_arts(
     """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
     if not profile.exists():
         print_error(f"Profile not found: {profile}")
+        raise typer.Exit(1)
+    if debug < 0 or debug > 3:
+        print_error(f"Invalid ARTS debug level: {debug} (expected 0..3)")
         raise typer.Exit(1)
 
     cmd = [
@@ -3942,6 +3868,15 @@ def _parse_nodes_spec(spec: str) -> List[int]:
     except ValueError:
         return parse_node_spec(spec)
 
+
+def _format_sweep_display(values: List[int]) -> str:
+    """Format a small numeric sweep for concise CLI display."""
+    if len(values) == 1:
+        return str(values[0])
+    if len(values) <= 5:
+        return ", ".join(str(value) for value in values)
+    return f"{values[0]}-{values[-1]} ({len(values)} values)"
+
 _STEP_RESOLVER = StepResolver(
     configs_dir=CONFIGS_DIR,
     profiles_dir=PROFILES_DIR,
@@ -3971,6 +3906,7 @@ def _run_step(
     run_timestamp: str,
     cflags: Optional[str],
     quiet: bool,
+    variant: Optional[str] = None,
 ) -> List[BenchmarkResult]:
     """Execute one resolved step using existing run dispatch rules."""
     has_thread_sweep = bool(threads_list and len(threads_list) > 1)
@@ -4004,6 +3940,7 @@ def _run_step(
             compile_args=compile_args,
             perf_enabled=perf,
             perf_interval=perf_interval,
+            variant=variant,
         )
 
     if len(bench_list) > 1 and has_sweep:
@@ -4044,6 +3981,7 @@ def _run_step(
                     runs=runs,
                     run_timestamp=run_timestamp,
                     cflags=cflags or "",
+                    variant=variant,
                 )
                 results.extend(config_results)
         return results
@@ -4063,6 +4001,7 @@ def _run_step(
         runs=runs,
         run_timestamp=run_timestamp,
         cflags=cflags or "",
+        variant=variant,
     )
 
 
@@ -4072,7 +4011,8 @@ def _run_step_slurm(
     node_counts: List[int],
     runs: int,
     partition: Optional[str],
-    time_limit: str,
+    timeout: int,
+    time_limit: Optional[str],
     arts_config: Optional[Path],
     threads_list: Optional[List[int]],
     results_dir: Path,
@@ -4099,6 +4039,7 @@ def _run_step_slurm(
             benchmarks=bench_list,
             nodes=nodes_arg,
             size=size,
+            timeout=timeout,
             runs=runs,
             partition=partition,
             time_limit=time_limit,
@@ -4127,8 +4068,11 @@ def _run_step_slurm(
 
 def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
     """Rebuild ARTS when a resolved step requests instrumentation changes."""
-    if not step_config.should_rebuild_arts:
+    runtime_missing = not arts_runtime_is_installed()
+    if not step_config.should_rebuild_arts and not runtime_missing:
         return
+    if runtime_missing:
+        print_warning("ARTS runtime is not installed; forcing rebuild before benchmark step")
     _rebuild_arts(
         console,
         debug=step_config.debug,
@@ -4161,6 +4105,7 @@ def _run_local_resolved_step(
         run_timestamp=request.run_timestamp,
         cflags=step_config.cflags,
         quiet=request.quiet,
+        variant=request.variant,
     )
 
 
@@ -4177,6 +4122,7 @@ def _run_slurm_resolved_step(
         node_counts=step_config.node_counts or [],
         runs=step_config.runs,
         partition=request.partition,
+        timeout=step_config.timeout,
         time_limit=request.time_limit,
         arts_config=step_config.arts_config,
         threads_list=step_config.threads_list,
@@ -4290,11 +4236,16 @@ def run(
         False, "--slurm", help="Submit as SLURM batch jobs instead of local execution"),
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p", help="SLURM partition (only with --slurm)"),
-    time_limit: str = typer.Option(
-        "01:00:00", "--time-limit", help="SLURM time limit per job (only with --slurm)"),
+    time_limit: Optional[str] = typer.Option(
+        None, "--time-limit",
+        help="SLURM wall time per job (defaults to benchmark timeout + 30s; only with --slurm)"),
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
+    openmp: bool = typer.Option(
+        False, "--openmp", help="Run OpenMP only (skip ARTS build and run)"),
+    arts: bool = typer.Option(
+        False, "--arts", help="Run ARTS only (skip OpenMP build and run)"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -4311,6 +4262,11 @@ def run(
     except ValueError as e:
         print_error(str(e))
         raise typer.Exit(2)
+
+    if openmp and arts:
+        print_error("Cannot use --openmp and --arts together.")
+        raise typer.Exit(2)
+    variant: Optional[str] = "openmp" if openmp else ("arts" if arts else None)
 
     clean = not no_clean
     size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
@@ -4478,6 +4434,8 @@ def run(
     # Print header
     if not quiet:
         config_items = [f"size={effective_size_label}", f"timeout={timeout}s", f"clean={clean}"]
+        if variant:
+            config_items.append(f"variant={variant}")
         if base_threads_list:
             config_items.append(f"threads={threads}")
         if launcher is not None:
@@ -4505,29 +4463,42 @@ def run(
 
         # Show effective ARTS configuration
         if bench_list:
-            if arts_config:
-                effective_config = arts_config
-                config_source = "custom"
+            if len(steps) > 1:
+                console.print("ARTS Config (experiment): varies by step")
+                console.print("  Path: resolved from each step definition")
             else:
-                effective_config = DEFAULT_ARTS_CONFIG
-                config_source = "default"
+                display_step = _STEP_RESOLVER.resolve_step_config(
+                    steps[0],
+                    1,
+                    bench_list,
+                    step_defaults,
+                )
 
-            cfg = parse_arts_cfg(effective_config)
-            arts_threads = int(cfg.get("threads", "1"))
-            arts_nodes = int(cfg.get("nodeCount", "1"))
-            arts_launcher = cfg.get("launcher", "ssh")
+                if display_step.arts_config is not None:
+                    effective_config = display_step.arts_config
+                    config_source = f"step '{display_step.name}'"
+                elif arts_config:
+                    effective_config = arts_config
+                    config_source = "custom"
+                else:
+                    effective_config = DEFAULT_ARTS_CONFIG
+                    config_source = "default"
 
-            # Apply CLI overrides for display
-            if base_threads_list and len(base_threads_list) == 1:
-                arts_threads = int(base_threads_list[0])
-            if base_node_counts and len(base_node_counts) == 1:
-                arts_nodes = int(base_node_counts[0])
-            if launcher:
-                arts_launcher = launcher
+                cfg = parse_arts_cfg(effective_config)
+                arts_threads: str = str(int(cfg.get("worker_threads", "1")))
+                arts_nodes: str = str(int(cfg.get("node_count", "1")))
+                arts_launcher = cfg.get("launcher", "ssh")
 
-            items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
-            console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
-            console.print(f"  Path: {effective_config}")
+                if display_step.threads_list:
+                    arts_threads = _format_sweep_display(display_step.threads_list)
+                if display_step.node_counts:
+                    arts_nodes = format_node_counts_display(display_step.node_counts)
+                if display_step.launcher:
+                    arts_launcher = display_step.launcher
+
+                items = [f"threads={arts_threads}", f"nodes={arts_nodes}", f"launcher={arts_launcher}"]
+                console.print(f"ARTS Config ({config_source}): {', '.join(items)}")
+                console.print(f"  Path: {effective_config}")
 
         console.print(f"Benchmarks: {len(bench_list)}\n")
 
@@ -4559,6 +4530,7 @@ def run(
                 clean=clean,
                 quiet=quiet,
                 artifact_manager=am,
+                variant=variant,
             ),
         )
     except ValueError as e:
@@ -4791,13 +4763,17 @@ def _execute_slurm_batch(
     size: str = typer.Option(
         DEFAULT_SIZE, "--size", "-s",
         help=SIZE_HELP),
+    timeout: int = typer.Option(
+        DEFAULT_TIMEOUT, "--timeout",
+        help="Execution timeout in seconds inside each SLURM job"),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of runs per benchmark"),
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p",
         help="SLURM partition (uses cluster default if not specified)"),
-    time_limit: str = typer.Option(
-        "01:00:00", "--time", "-t", help="Time limit per job (HH:MM:SS)"),
+    time_limit: Optional[str] = typer.Option(
+        None, "--time-limit", "--time",
+        help="SLURM wall time per job (defaults to benchmark timeout + 30s)"),
     account: Optional[str] = typer.Option(
         None, "--account", "-A", help="SLURM account (if required)"),
     arts_config: Optional[Path] = typer.Option(
@@ -4881,9 +4857,12 @@ def _execute_slurm_batch(
     size = parse_size(size, "--size")
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
     require_slurm_commands(dry_run)
+    resolved_time_limit = resolve_slurm_time_limit(timeout, time_limit)
 
     # Parse node counts from --nodes parameter
     node_counts = parse_node_spec(nodes)
+    if not dry_run:
+        validate_requested_node_counts(node_counts, partition)
 
     # Determine explicit arts config override (if provided).
     explicit_arts_config = arts_config.resolve() if arts_config else None
@@ -4893,7 +4872,7 @@ def _execute_slurm_batch(
     # Get threads from explicit config or default config.
     if threads is None:
         thread_source_cfg = explicit_arts_config or DEFAULT_ARTS_CONFIG.resolve()
-        threads = get_arts_cfg_int(thread_source_cfg, "threads") or 8
+        threads = get_arts_cfg_int(thread_source_cfg, "worker_threads") or 8
 
     nodes_display = format_node_counts_display(node_counts)
 
@@ -4906,6 +4885,7 @@ def _execute_slurm_batch(
         f"Config: {config_display}",
         f"Nodes: {nodes_display}, Threads: {threads}",
         f"Runs per benchmark: {runs}, Size: {size}",
+        f"Timeout: {timeout}s (wall {resolved_time_limit})",
     ]
     if profile:
         subtitle_parts.append(f"Profile: {profile}")
@@ -4967,8 +4947,9 @@ def _execute_slurm_batch(
         node_counts=node_counts,
         size=size,
         runs=runs,
+        timeout=timeout,
         partition=partition,
-        time_limit=time_limit,
+        time_limit=resolved_time_limit,
         account=account,
         explicit_arts_config=explicit_arts_config,
         threads=threads,
@@ -4991,7 +4972,6 @@ def _execute_slurm_batch(
     )
     deps = SlurmExecutorDependencies(
         resolve_effective_arts_config=_resolve_effective_arts_config,
-        validate_thread_network_topology=_validate_thread_network_topology,
         parse_time_limit_seconds=parse_slurm_time_limit_seconds,
         get_carts_dir=get_carts_dir,
         get_benchmarks_dir=get_benchmarks_dir,
