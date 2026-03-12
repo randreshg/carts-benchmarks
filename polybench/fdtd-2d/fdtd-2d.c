@@ -17,7 +17,7 @@
 
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 50x1000x1000. */
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include "fdtd-2d.h"
 
 /* Array initialization. */

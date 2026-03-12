@@ -12,7 +12,7 @@
 
 #include <stdlib.h>
 #include <math.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 
 #ifndef NUM_SAMPLES
 #define NUM_SAMPLES 1000  /* Number of Monte Carlo samples */

@@ -1,6 +1,6 @@
 /* POLYBENCH - Seidel 2D
  */
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>

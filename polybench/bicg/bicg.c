@@ -18,7 +18,7 @@
 
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 4000. */
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include "bicg.h"
 
 #ifndef NREPS

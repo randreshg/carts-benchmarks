@@ -1,7 +1,7 @@
 /* POLYBENCH/GPU-OPENMP - 3D Convolution
  * Rewritten to use pointer-to-pointer-to-pointer for CARTS compatibility
  */
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include "convolution-3d.h"
 #include <omp.h>
 #include <stdlib.h>

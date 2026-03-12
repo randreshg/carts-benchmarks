@@ -27,7 +27,7 @@
 
 #include <float.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 
 // Problem size configuration
 #ifndef BATCH_SIZE

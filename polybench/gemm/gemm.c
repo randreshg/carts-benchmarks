@@ -1,6 +1,6 @@
 /* PolyBench-like GEMM (single-file, OpenMP) */
 
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>

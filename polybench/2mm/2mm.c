@@ -19,7 +19,7 @@
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 4000. */
 #include "2mm.h"
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 
 static void free_matrix(DATA_TYPE **matrix, int rows) {
   if (!matrix) {

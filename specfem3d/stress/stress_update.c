@@ -1,7 +1,7 @@
 #include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 
 #ifndef NX
 #define NX 40

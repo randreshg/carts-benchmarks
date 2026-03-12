@@ -7,7 +7,7 @@
  * Author: John Burkardt (modified by KaStORS team)
  */
 
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include <stdio.h>
 #include <stdlib.h>
 

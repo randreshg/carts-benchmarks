@@ -17,7 +17,7 @@
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is N=1024. */
 #include "template-for-new-benchmark.h"
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 
 
 /* Array initialization. */

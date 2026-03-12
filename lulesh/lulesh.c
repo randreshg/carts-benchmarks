@@ -45,7 +45,7 @@
 #if _OPENMP
 #include <omp.h>
 #endif
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -17,7 +17,7 @@
 
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 4096x4096. */
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include "convolution-2d.h"
 
 #ifndef NREPS

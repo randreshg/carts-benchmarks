@@ -8,7 +8,7 @@
  * CARTS adaptation: No global variables - arrays passed as parameters.
  */
 
-#include "arts/Utils/Benchmarks/CartsBenchmarks.h"
+#include "arts/utils/benchmarks/CartsBenchmarks.h"
 #include <float.h>
 #include <math.h>
 #include <omp.h>
