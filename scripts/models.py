@@ -1,7 +1,7 @@
 """
 Benchmark data models — enums and dataclasses used across the benchmark runner.
 
-These types are shared by benchmark_runner, benchmark_artifacts, and benchmark_metadata.
+These types are shared by runner, artifacts, and metadata.
 They depend only on the standard library.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 class Status(str, Enum):
     """Status of a build or run operation."""
@@ -142,6 +142,8 @@ class RunResult:
     startup_timings: Dict[str, float] = field(default_factory=dict)
     verification_timings: Dict[str, float] = field(default_factory=dict)
     cleanup_timings: Dict[str, float] = field(default_factory=dict)
+    startup_outlier: Optional[Dict[str, Any]] = None
+    startup_diagnostics: Dict[str, Any] = field(default_factory=dict)
     parallel_task_timing: Optional[ParallelTaskTiming] = None
     # Perf cache metrics
     perf_metrics: Optional[PerfCacheMetrics] = None

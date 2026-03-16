@@ -27,13 +27,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from statistics import mean, median, stdev
 
 logger = logging.getLogger(__name__)
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import typer
 
@@ -75,7 +76,7 @@ from slurm.experiment import (
 )
 
 # Shared constants and parsing
-from benchmark_common import (
+from common import (
     CHECKSUM_PATTERNS,
     SKIP_DIRS,
     BENCHMARK_CLEAN_DIR_NAMES,
@@ -88,6 +89,39 @@ from benchmark_common import (
     DEFAULT_ARTS_PORT,
     KERNEL_TIME_PATTERN,
     E2E_TIME_PATTERN,
+    VARIANT_ARTS,
+    VARIANT_OMP,
+    VARIANT_OPENMP,
+    SPEEDUP_BASIS_KERNEL,
+    SPEEDUP_BASIS_E2E,
+    SPEEDUP_BASIS_TOTAL,
+    SPEEDUP_BASIS_NA,
+    KEY_BUILD_ARTS,
+    KEY_BUILD_OMP,
+    KEY_RUN_ARTS,
+    KEY_RUN_OMP,
+    KEY_TIMING,
+    KEY_VERIFICATION,
+    KEY_CONFIG,
+    KEY_STATUS,
+    KEY_RUN_NUMBER,
+    KEY_RUN_PHASE,
+    KEY_SPEEDUP,
+    KEY_NAME,
+    KEY_SIZE,
+    KEY_ARTS_E2E_SEC,
+    KEY_OMP_E2E_SEC,
+    KEY_ARTS_OUTLIERS,
+    KEY_OMP_OUTLIERS,
+    KEY_ARTS_RAW_COUNT,
+    KEY_OMP_RAW_COUNT,
+    KEY_PAIRED_RAW_COUNT,
+    KEY_ARTS_FILTERED_COUNT,
+    KEY_OMP_FILTERED_COUNT,
+    KEY_PAIRED_FILTERED_COUNT,
+    KEY_IS_OUTLIER,
+    RESULTS_FILENAME,
+    STARTUP_OUTLIER_DIAGNOSTICS_FILENAME,
     parse_checksum,
     parse_kernel_timings,
     parse_e2e_timings,
@@ -102,20 +136,20 @@ from benchmark_common import (
 # ============================================================================
 
 # Data models (enums + dataclasses)
-from benchmark_models import (
+from models import (
     Status, Phase,
     BuildResult, WorkerTiming, ParallelTaskTiming, PerfCacheMetrics,
     RunResult, TimingResult, VerificationResult, ReferenceChecksum, ExperimentStep,
     Artifacts, BenchmarkConfig, BenchmarkResult,
 )
-from benchmark_execution import (
+from execution import (
     BenchmarkExecutionContext,
     BenchmarkProcessRequest,
     BenchmarkProcessRunner,
     BenchmarkRunFiles,
 )
-from benchmark_verification import verify_against_omp
-from benchmark_orchestration import (
+from verification import verify_against_omp
+from orchestration import (
     LocalStepExecutionRequest,
     ResolvedStepConfig,
     SlurmStepExecutionRequest,
@@ -123,18 +157,18 @@ from benchmark_orchestration import (
     StepExecutionOrchestrator,
     StepResolver,
 )
-from benchmark_pipeline import (
+from pipeline import (
     ConfigExecutionExecutor,
     ConfigExecutionPlan,
     ExecutionHooks,
 )
 
 # Artifact management
-from benchmark_artifacts import ArtifactManager
-from benchmark_report import generate_report
+from artifacts import ArtifactManager
+from report import generate_report
 
 # Reproducibility metadata
-from benchmark_metadata import (
+from metadata import (
     get_git_hash, get_compiler_version, get_cpu_info,
     get_reproducibility_metadata, _serialize_parallel_task_timing,
 )
@@ -196,6 +230,17 @@ SIZE_ALIASES: Dict[str, str] = {
 }
 SIZE_HELP = (
     "Dataset size: small, medium, large, extralarge, mini, standard"
+)
+DEFAULT_REPORTING_MODE = "median"
+DEFAULT_STARTUP_OUTLIER_POLICY: Dict[str, Any] = {
+    "enabled": True,
+    "z_threshold": 3.5,
+    "min_runs": 3,
+    "min_startup_sec": 0.05,
+    "min_relative_multiplier": 1.25,
+}
+DEFAULT_PERF_GATE_POLICY = (
+    CONFIGS_DIR / "perf-gates" / "openmp-surpass-stable-subset.json"
 )
 
 
@@ -866,7 +911,7 @@ class BenchmarkRunner:
         build_omp = self.build_benchmark(
             name,
             size,
-            variant="openmp",
+            variant=VARIANT_OPENMP,
             cflags=cflags,
             build_output_dir=reference_artifacts_dir,
         )
@@ -1096,7 +1141,7 @@ class BenchmarkRunner:
         self,
         name: str,
         size: str,
-        variant: str = "arts",
+        variant: str = VARIANT_ARTS,
         arts_config: Optional[Path] = None,
         cflags: str = "",
         compile_args: Optional[str] = None,
@@ -1148,10 +1193,10 @@ class BenchmarkRunner:
 
         env_overrides: Dict[str, str] = {}
         effective_arts_config = arts_config
-        if variant != "openmp" and effective_arts_config is None:
+        if variant != VARIANT_OPENMP and effective_arts_config is None:
             # Keep build behavior independent of current working directory.
             effective_arts_config = _resolve_effective_arts_config(bench_path)
-        if variant != "openmp" and effective_arts_config is not None:
+        if variant != VARIANT_OPENMP and effective_arts_config is not None:
             effective_arts_config = effective_arts_config.resolve()
             if build_output_dir is not None:
                 # Keep the exact compile-time config alongside the build artifacts.
@@ -1160,7 +1205,7 @@ class BenchmarkRunner:
                     shutil.copy2(effective_arts_config, local_cfg)
                 effective_arts_config = local_cfg
 
-        if variant == "openmp":
+        if variant == VARIANT_OPENMP:
             # Build only OpenMP variant using granular target
             cmd = [
                 "make",
@@ -1189,9 +1234,9 @@ class BenchmarkRunner:
             env_overrides["CARTS_COMPILE_WORKDIR"] = str(output_root)
 
         # Add ARTS config override if provided
-        if effective_arts_config and variant != "openmp":
+        if effective_arts_config and variant != VARIANT_OPENMP:
             cmd.append(f"ARTS_CFG={effective_arts_config.resolve()}")
-        if compile_args and variant != "openmp":
+        if compile_args and variant != VARIANT_OPENMP:
             escaped_args = compile_args.replace("\\", "\\\\").replace(" ", "\\ ")
             cmd.append(f"COMPILE_ARGS={escaped_args}")
 
@@ -1235,13 +1280,13 @@ class BenchmarkRunner:
                 self.console.print(f"[dim]  Log: {log_file}[/]")
 
             if result.returncode == 0:
-                expected_exe = arts_output_path if variant != "openmp" else omp_output_path
+                expected_exe = arts_output_path if variant != VARIANT_OPENMP else omp_output_path
                 executable = None
                 if expected_exe.is_file() and os.access(expected_exe, os.X_OK):
                     executable = str(expected_exe)
                 else:
                     executable = self._find_executable(bench_path, variant)
-                if variant != "openmp":
+                if variant != VARIANT_OPENMP:
                     config_error = _validate_embedded_arts_cfg(
                         output_root, effective_arts_config
                     )
@@ -1301,7 +1346,7 @@ class BenchmarkRunner:
 
     def _find_executable(self, bench_path: Path, variant: str) -> Optional[str]:
         """Find the generated executable."""
-        suffix = "_arts" if variant == "arts" else "_omp"
+        suffix = "_arts" if variant == VARIANT_ARTS else "_omp"
 
         # First check in the benchmark directory itself
         for exe in bench_path.glob(f"*{suffix}"):
@@ -1503,6 +1548,7 @@ class BenchmarkRunner:
             startup_timings=self.extract_startup_timings(outcome.stdout),
             verification_timings=self.extract_verification_timings(outcome.stdout),
             cleanup_timings=self.extract_cleanup_timings(outcome.stdout),
+            startup_diagnostics=dict(outcome.startup_diagnostics),
             parallel_task_timing=self.extract_parallel_task_timings(outcome.stdout),
             perf_metrics=perf_metrics,
             perf_csv_path=perf_csv_path,
@@ -1879,11 +1925,11 @@ class BenchmarkRunner:
                 arts_total_sec=arts_total,
                 omp_total_sec=omp_total,
                 speedup_basis=(
-                    "e2e"
+                    SPEEDUP_BASIS_E2E
                     if (arts_e2e is not None and omp_e2e is not None)
-                    else "kernel"
+                    else SPEEDUP_BASIS_KERNEL
                     if (arts_kernel is not None and omp_kernel is not None)
-                    else "total"
+                    else SPEEDUP_BASIS_TOTAL
                 ),
                 **section_fields,
             )
@@ -1893,20 +1939,20 @@ class BenchmarkRunner:
         if arts_kernel is not None and omp_kernel is not None:
             arts_time = arts_kernel
             omp_time = omp_kernel
-            speedup_basis = "kernel"
+            speedup_basis = SPEEDUP_BASIS_KERNEL
         elif arts_e2e is not None and omp_e2e is not None:
             arts_time = arts_e2e
             omp_time = omp_e2e
-            speedup_basis = "e2e"
+            speedup_basis = SPEEDUP_BASIS_E2E
         else:
             arts_time = arts_total
             omp_time = omp_total
-            speedup_basis = "total"
+            speedup_basis = SPEEDUP_BASIS_TOTAL
 
         if not report_speedup:
             speedup = 0.0
             note = "Speedup hidden for distributed runs (unfair comparison)"
-            speedup_basis = "n/a"
+            speedup_basis = SPEEDUP_BASIS_NA
         elif arts_time == 0:
             speedup = 0.0
             note = f"ARTS {speedup_basis} time is zero"
@@ -2692,6 +2738,381 @@ def get_cleanup_time(run_result: RunResult) -> Optional[float]:
     return None
 
 
+def _median(values: List[float]) -> Optional[float]:
+    """Return the median of a non-empty value list."""
+    return float(median(values)) if values else None
+
+
+def detect_startup_outliers(
+    values: List[float],
+    policy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Detect high startup outliers using a robust modified z-score policy."""
+    effective_policy = dict(DEFAULT_STARTUP_OUTLIER_POLICY)
+    if policy:
+        effective_policy.update(policy)
+
+    sample_count = len(values)
+    flags: List[bool] = [False] * sample_count
+    z_scores: List[float] = [0.0] * sample_count
+    median_value: Optional[float] = _median(values)
+    mad: Optional[float] = None
+    threshold: Optional[float] = None
+
+    if median_value is not None and (
+        effective_policy.get("enabled", True)
+        and sample_count >= int(effective_policy["min_runs"])
+    ):
+        deviations = [abs(v - median_value) for v in values]
+        mad = _median(deviations) or 0.0
+        min_startup = float(effective_policy["min_startup_sec"])
+        min_relative = float(effective_policy["min_relative_multiplier"])
+        floor_threshold = max(min_startup, median_value * min_relative)
+
+        if mad <= 1e-12:
+            threshold = floor_threshold
+            for idx, value in enumerate(values):
+                flags[idx] = value > threshold
+                z_scores[idx] = float("inf") if flags[idx] else 0.0
+        else:
+            z_threshold = float(effective_policy["z_threshold"])
+            robust_threshold = median_value + (z_threshold * mad / 0.6745)
+            threshold = max(robust_threshold, floor_threshold)
+            for idx, value in enumerate(values):
+                z_score = (0.6745 * (value - median_value)) / mad
+                z_scores[idx] = z_score
+                flags[idx] = value > threshold and z_score > z_threshold
+    elif median_value is not None:
+        mad = 0.0
+
+    return {
+        "outliers": flags,
+        "z_scores": z_scores,
+        "median": median_value,
+        "mad": mad,
+        "threshold": threshold,
+        "policy": effective_policy,
+    }
+
+
+def _collect_variant_outlier_map(
+    runs: List[BenchmarkResult],
+    *,
+    variant: str,
+    policy: Optional[Dict[str, Any]] = None,
+) -> Dict[int, Dict[str, Any]]:
+    """Return outlier classification for one variant keyed by run index."""
+    sample_indices: List[int] = []
+    startup_values: List[float] = []
+    for idx, run in enumerate(runs):
+        run_result = run.run_arts if variant == VARIANT_ARTS else run.run_omp
+        startup = get_startup_time(run_result)
+        if startup is None:
+            continue
+        sample_indices.append(idx)
+        startup_values.append(float(startup))
+
+    analysis = detect_startup_outliers(startup_values, policy=policy)
+    details: Dict[int, Dict[str, Any]] = {}
+    for sample_idx, run_idx in enumerate(sample_indices):
+        details[run_idx] = {
+            "variant": variant,
+            "startup_sec": startup_values[sample_idx],
+            KEY_IS_OUTLIER: bool(analysis["outliers"][sample_idx]),
+            "z_score": analysis["z_scores"][sample_idx],
+        }
+    return details
+
+
+def _compute_robust_summary(
+    items: list,
+    get_arts_e2e: Callable[[Any], Optional[float]],
+    get_omp_e2e: Callable[[Any], Optional[float]],
+    get_speedup: Callable[[Any], Optional[float]],
+    get_is_outlier: Callable[[int, Any], Tuple[bool, bool]],
+) -> Dict[str, Any]:
+    """Shared core for robust median summarization with outlier filtering.
+
+    Parameters
+    ----------
+    items : list
+        Ordered collection of run data (BenchmarkResult objects or dicts).
+    get_arts_e2e : callable
+        ``(item) -> Optional[float]`` returning the ARTS e2e time.
+    get_omp_e2e : callable
+        ``(item) -> Optional[float]`` returning the OMP e2e time.
+    get_speedup : callable
+        ``(item) -> Optional[float]`` returning the speedup value.
+    get_is_outlier : callable
+        ``(index, item) -> (arts_is_outlier, omp_is_outlier)``
+
+    Returns
+    -------
+    dict with keys: arts_value, omp_value, speedup_value, and per-metric
+    raw / filtered counts plus outlier index sets.
+    """
+    arts_outlier_indices: Set[int] = set()
+    omp_outlier_indices: Set[int] = set()
+    for idx, item in enumerate(items):
+        arts_out, omp_out = get_is_outlier(idx, item)
+        if arts_out:
+            arts_outlier_indices.add(idx)
+        if omp_out:
+            omp_outlier_indices.add(idx)
+
+    arts_e2e_all: List[float] = []
+    omp_e2e_all: List[float] = []
+    arts_e2e_filtered: List[float] = []
+    omp_e2e_filtered: List[float] = []
+    speedup_all: List[float] = []
+    speedup_filtered: List[float] = []
+
+    for idx, item in enumerate(items):
+        arts_val = get_arts_e2e(item)
+        if arts_val is not None:
+            arts_e2e_all.append(float(arts_val))
+            if idx not in arts_outlier_indices:
+                arts_e2e_filtered.append(float(arts_val))
+
+        omp_val = get_omp_e2e(item)
+        if omp_val is not None:
+            omp_e2e_all.append(float(omp_val))
+            if idx not in omp_outlier_indices:
+                omp_e2e_filtered.append(float(omp_val))
+
+        spd = get_speedup(item)
+        if spd is not None and spd > 0.0:
+            speedup_all.append(float(spd))
+            if idx not in arts_outlier_indices and idx not in omp_outlier_indices:
+                speedup_filtered.append(float(spd))
+
+    arts_value = _median(arts_e2e_filtered) if arts_e2e_filtered else _median(arts_e2e_all)
+    omp_value = _median(omp_e2e_filtered) if omp_e2e_filtered else _median(omp_e2e_all)
+    speedup_value = (
+        _median(speedup_filtered) if speedup_filtered else _median(speedup_all)
+    )
+
+    return {
+        "arts_value": arts_value,
+        "omp_value": omp_value,
+        "speedup_value": speedup_value,
+        "arts_raw_count": len(arts_e2e_all),
+        "omp_raw_count": len(omp_e2e_all),
+        "paired_raw_count": len(speedup_all),
+        "arts_filtered_count": len(arts_e2e_filtered),
+        "omp_filtered_count": len(omp_e2e_filtered),
+        "paired_filtered_count": len(speedup_filtered),
+        "arts_outlier_indices": arts_outlier_indices,
+        "omp_outlier_indices": omp_outlier_indices,
+    }
+
+
+def summarize_runs_robust(
+    runs: List[BenchmarkResult],
+    policy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compute robust run-level aggregates for display/export."""
+    if not runs:
+        return {
+            KEY_ARTS_E2E_SEC: None,
+            KEY_OMP_E2E_SEC: None,
+            KEY_SPEEDUP: None,
+            KEY_ARTS_RAW_COUNT: 0,
+            KEY_OMP_RAW_COUNT: 0,
+            KEY_PAIRED_RAW_COUNT: 0,
+            KEY_ARTS_FILTERED_COUNT: 0,
+            KEY_OMP_FILTERED_COUNT: 0,
+            KEY_PAIRED_FILTERED_COUNT: 0,
+            "run_count": 0,
+            KEY_ARTS_OUTLIERS: {},
+            KEY_OMP_OUTLIERS: {},
+        }
+
+    arts_outliers = _collect_variant_outlier_map(runs, variant=VARIANT_ARTS, policy=policy)
+    omp_outliers = _collect_variant_outlier_map(runs, variant=VARIANT_OMP, policy=policy)
+
+    def _is_outlier(idx: int, _item: Any) -> Tuple[bool, bool]:
+        a = arts_outliers.get(idx, {}).get(KEY_IS_OUTLIER, False)
+        o = omp_outliers.get(idx, {}).get(KEY_IS_OUTLIER, False)
+        return (bool(a), bool(o))
+
+    core = _compute_robust_summary(
+        items=runs,
+        get_arts_e2e=lambda run: get_e2e_time(run.run_arts),
+        get_omp_e2e=lambda run: get_e2e_time(run.run_omp),
+        get_speedup=lambda run: (
+            float(run.timing.speedup) if run.timing.speedup > 0 else None
+        ),
+        get_is_outlier=_is_outlier,
+    )
+
+    return {
+        KEY_ARTS_E2E_SEC: core["arts_value"],
+        KEY_OMP_E2E_SEC: core["omp_value"],
+        KEY_SPEEDUP: core["speedup_value"],
+        KEY_ARTS_RAW_COUNT: core["arts_raw_count"],
+        KEY_OMP_RAW_COUNT: core["omp_raw_count"],
+        KEY_PAIRED_RAW_COUNT: core["paired_raw_count"],
+        KEY_ARTS_FILTERED_COUNT: core["arts_filtered_count"],
+        KEY_OMP_FILTERED_COUNT: core["omp_filtered_count"],
+        KEY_PAIRED_FILTERED_COUNT: core["paired_filtered_count"],
+        "run_count": len(runs),
+        KEY_ARTS_OUTLIERS: arts_outliers,
+        KEY_OMP_OUTLIERS: omp_outliers,
+    }
+
+
+def _config_key(result: BenchmarkResult) -> Tuple[str, int, int, str]:
+    """Return the canonical grouping key for a benchmark result.
+
+    Groups by (name, arts_threads, arts_nodes, run_phase) so that runs
+    with different phases are never mixed into the same statistical group.
+    """
+    return (
+        result.name,
+        result.config.arts_threads,
+        result.config.arts_nodes,
+        result.run_phase or "",
+    )
+
+
+def annotate_startup_outliers(
+    results: List[BenchmarkResult],
+    *,
+    write_artifacts: bool = True,
+) -> Dict[str, int]:
+    """Annotate run results with startup outlier metadata and optional artifacts."""
+    from collections import defaultdict
+
+    grouped: Dict[Tuple[str, int, int, str], List[BenchmarkResult]] = defaultdict(list)
+    for result in results:
+        grouped[_config_key(result)].append(result)
+
+    total_arts = 0
+    total_omp = 0
+    for _key, runs in grouped.items():
+        runs_sorted = sorted(runs, key=lambda r: r.run_number)
+        summary = summarize_runs_robust(runs_sorted)
+        arts_outliers = summary[KEY_ARTS_OUTLIERS]
+        omp_outliers = summary[KEY_OMP_OUTLIERS]
+
+        for idx, run in enumerate(runs_sorted):
+            arts_detail = arts_outliers.get(idx)
+            omp_detail = omp_outliers.get(idx)
+            run.run_arts.startup_outlier = arts_detail
+            run.run_omp.startup_outlier = omp_detail
+            arts_is_outlier = bool(arts_detail and arts_detail.get(KEY_IS_OUTLIER))
+            omp_is_outlier = bool(omp_detail and omp_detail.get(KEY_IS_OUTLIER))
+            if arts_is_outlier:
+                total_arts += 1
+            if omp_is_outlier:
+                total_omp += 1
+            run.run_arts.startup_diagnostics = _prepare_startup_diagnostics_for_persistence(
+                run.run_arts.startup_diagnostics,
+                keep=arts_is_outlier,
+            )
+            run.run_omp.startup_diagnostics = _prepare_startup_diagnostics_for_persistence(
+                run.run_omp.startup_diagnostics,
+                keep=omp_is_outlier,
+            )
+            if write_artifacts:
+                _write_startup_outlier_artifacts(run)
+
+    return {"arts_outliers": total_arts, "omp_outliers": total_omp}
+
+
+def _truncate_lines(
+    lines: Any,
+    max_lines: int,
+) -> Tuple[Any, Optional[int]]:
+    """Truncate a list of lines, returning (truncated_list, dropped_count or None)."""
+    if not isinstance(lines, list) or len(lines) <= max_lines:
+        return lines, None
+    return lines[:max_lines], len(lines) - max_lines
+
+
+def _prepare_startup_diagnostics_for_persistence(
+    diagnostics: Dict[str, Any],
+    *,
+    keep: bool,
+) -> Dict[str, Any]:
+    """Persist diagnostics for outliers only, trimming large snapshots for readability."""
+    if not keep or not diagnostics:
+        return {}
+
+    payload = dict(diagnostics)
+    for key in (
+        "network_snapshot_pre",
+        "network_snapshot_post",
+        "process_snapshot_pre",
+        "process_snapshot_post",
+    ):
+        snapshot = payload.get(key)
+        if not isinstance(snapshot, dict):
+            continue
+        snap = dict(snapshot)
+        snap["stdout"], dropped = _truncate_lines(snap.get("stdout"), 80)
+        if dropped is not None:
+            snap["stdout_truncated"] = dropped
+        snap["stderr"], dropped = _truncate_lines(snap.get("stderr"), 40)
+        if dropped is not None:
+            snap["stderr_truncated"] = dropped
+        payload[key] = snap
+
+    # stdout_preview and stderr_preview are already capped at 20 lines by
+    # _preview_lines in benchmark_execution.py, so this is a no-op safety net.
+    for preview_key in ("stdout_preview", "stderr_preview"):
+        truncated, dropped = _truncate_lines(payload.get(preview_key), 20)
+        payload[preview_key] = truncated
+        if dropped is not None:
+            payload[f"{preview_key}_truncated"] = dropped
+
+    return payload
+
+
+def _write_startup_outlier_artifacts(result: BenchmarkResult) -> None:
+    """Write per-run startup diagnostics artifacts when outliers were flagged."""
+    if not (
+        (result.run_arts.startup_outlier and result.run_arts.startup_outlier.get(KEY_IS_OUTLIER))
+        or (result.run_omp.startup_outlier and result.run_omp.startup_outlier.get(KEY_IS_OUTLIER))
+    ):
+        return
+
+    run_dir = result.artifacts.run_dir
+    if not run_dir:
+        return
+
+    path = Path(run_dir)
+    if not path.exists():
+        return
+
+    payload: Dict[str, Any] = {
+        "benchmark": result.name,
+        "run_number": result.run_number,
+        "size": result.size,
+        "threads": result.config.arts_threads,
+        "nodes": result.config.arts_nodes,
+        "run_phase": result.run_phase,
+        "timestamp": datetime.now().isoformat(),
+        "startup_outliers": {
+            VARIANT_ARTS: result.run_arts.startup_outlier,
+            VARIANT_OMP: result.run_omp.startup_outlier,
+        },
+        "startup_timings": {
+            VARIANT_ARTS: result.run_arts.startup_timings,
+            VARIANT_OMP: result.run_omp.startup_timings,
+        },
+        "diagnostics": {
+            VARIANT_ARTS: result.run_arts.startup_diagnostics,
+            VARIANT_OMP: result.run_omp.startup_diagnostics,
+        },
+    }
+
+    out_path = path / STARTUP_OUTLIER_DIAGNOSTICS_FILENAME
+    with open(out_path, "w") as handle:
+        json.dump(payload, handle, indent=2, default=str)
+
+
 def format_kernel_time(run_result: RunResult) -> Tuple[Optional[float], str]:
     """Format kernel time for display. Returns (total_time, display_string).
 
@@ -2803,7 +3224,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                 speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
             else:
                 speedup = f"[red]{r.timing.speedup:.2f}x[/]"
-            if r.timing.speedup_basis != "kernel":
+            if r.timing.speedup_basis != SPEEDUP_BASIS_KERNEL:
                 speedup += "*"
                 has_fallback = True
         else:
@@ -2837,20 +3258,41 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
     failed = sum(1 for r in results if benchmark_result_failed(r))
     skipped = sum(1 for r in results if benchmark_result_skipped(r))
 
-    # Calculate geometric mean speedup based on e2e time (preferred)
+    # Calculate geometric mean from per-config robust median speedups.
+    from collections import defaultdict
     import math
-    speedups = []
-    for r in results:
-        if r.timing.speedup > 0:
-            speedups.append(r.timing.speedup)
+
+    grouped: Dict[Tuple[str, int, int, str], List[BenchmarkResult]] = defaultdict(list)
+    for result in results:
+        grouped[_config_key(result)].append(result)
+
+    speedups: List[float] = []
+    for runs in grouped.values():
+        robust = summarize_runs_robust(sorted(runs, key=lambda r: r.run_number))
+        if robust[KEY_SPEEDUP] and robust[KEY_SPEEDUP] > 0:
+            speedups.append(float(robust[KEY_SPEEDUP]))
 
     if speedups:
         bases = {r.timing.speedup_basis for r in results if r.timing.speedup > 0}
         basis_label = next(iter(bases)) if len(bases) == 1 else "mixed"
         geomean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
-        speedup_text = f"Geometric mean speedup ({basis_label}): [cyan]{geomean:.2f}x[/]"
+        speedup_text = (
+            f"Geometric mean speedup ({basis_label}, {DEFAULT_REPORTING_MODE} filtered): "
+            f"[cyan]{geomean:.2f}x[/]"
+        )
     else:
         speedup_text = ""
+
+    arts_outliers = sum(
+        1
+        for r in results
+        if r.run_arts.startup_outlier and r.run_arts.startup_outlier.get(KEY_IS_OUTLIER)
+    )
+    omp_outliers = sum(
+        1
+        for r in results
+        if r.run_omp.startup_outlier and r.run_omp.startup_outlier.get(KEY_IS_OUTLIER)
+    )
 
     content = (
         f"[green]\u2713 {passed}[/] passed  "
@@ -2858,6 +3300,9 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
         f"[dim]\u25cb {skipped}[/] skipped  "
         f"[cyan]\u23f1 {format_duration(duration)}[/]"
     )
+
+    content += f"\n\nReporting: [cyan]{DEFAULT_REPORTING_MODE}-of-N[/] with startup outlier filtering"
+    content += f"\nStartup outliers: ARTS={arts_outliers}, OpenMP={omp_outliers}"
 
     if speedup_text:
         content += f"\n\n{speedup_text}"
@@ -2868,6 +3313,21 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
 # NOTE: SVG/report generation code was removed.
 # Benchmark reports are generated automatically into each results directory.
 
+
+
+def _format_with_filter_marker(
+    value_str: str,
+    filtered_count: int,
+    raw_count: int,
+    marker: str = "\u2020",
+) -> Tuple[str, bool]:
+    """Append a filtered-marker to *value_str* when outliers were removed.
+
+    Returns ``(decorated_string, marker_was_appended)``.
+    """
+    if filtered_count > 0 and raw_count > filtered_count:
+        return value_str + marker, True
+    return value_str, False
 
 
 def create_live_table(
@@ -2896,23 +3356,30 @@ def create_live_table(
     table.add_column("Speedup", justify="right")
 
     has_fallback = False
+    has_filtered = False
     for bench in benchmarks:
         if bench in results and results[bench]:
             # Completed runs - show running statistics
             runs_list = results[bench]
             r = runs_list[-1]  # Latest result for status checks
+            robust = summarize_runs_robust(runs_list)
+            filtered_used = False
 
-            # ARTS E2E: skip → compile failure → runtime failure → mean time
+            # ARTS E2E: skip → compile failure → runtime failure → robust median
             if r.build_arts.status == Status.SKIP:
                 run_arts = "[dim]- Skip[/]"
             elif r.build_arts.status != Status.PASS:
                 run_arts = "[red]\u2717 Compile[/]"
             else:
-                arts_e2e_times = [sum(run.run_arts.e2e_timings.values()) for run in runs_list
-                                  if run.run_arts.e2e_timings]
-                if arts_e2e_times:
-                    stats = compute_stats(arts_e2e_times)
-                    run_arts = f"[green]\u2713[/] {stats['mean']:.2f}s"
+                arts_e2e = robust[KEY_ARTS_E2E_SEC]
+                if arts_e2e is not None:
+                    run_arts, arts_marked = _format_with_filter_marker(
+                        f"[green]\u2713[/] {arts_e2e:.2f}s",
+                        robust[KEY_ARTS_FILTERED_COUNT],
+                        robust[KEY_ARTS_RAW_COUNT],
+                    )
+                    if arts_marked:
+                        filtered_used = True
                 elif r.run_arts.status == Status.PASS:
                     arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
                     if arts_kernel is not None:
@@ -2923,17 +3390,21 @@ def create_live_table(
                 else:
                     run_arts = "[red]\u2717 Runtime[/]"
 
-            # OMP E2E: skip → compile failure → runtime failure → mean time
+            # OMP E2E: skip → compile failure → runtime failure → robust median
             if r.build_omp.status == Status.SKIP:
                 run_omp = "[dim]- Skip[/]"
             elif r.build_omp.status != Status.PASS:
                 run_omp = "[red]\u2717 Compile[/]"
             else:
-                omp_e2e_times = [sum(run.run_omp.e2e_timings.values()) for run in runs_list
-                                 if run.run_omp.e2e_timings]
-                if omp_e2e_times:
-                    stats = compute_stats(omp_e2e_times)
-                    run_omp = f"[green]\u2713[/] {stats['mean']:.2f}s"
+                omp_e2e = robust[KEY_OMP_E2E_SEC]
+                if omp_e2e is not None:
+                    run_omp, omp_marked = _format_with_filter_marker(
+                        f"[green]\u2713[/] {omp_e2e:.2f}s",
+                        robust[KEY_OMP_FILTERED_COUNT],
+                        robust["omp_raw_count"],
+                    )
+                    if omp_marked:
+                        filtered_used = True
                 elif r.run_omp.status == Status.PASS:
                     omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
                     if omp_kernel is not None:
@@ -2952,17 +3423,23 @@ def create_live_table(
             else:
                 correct = "[red]\u2717 NO[/]"
 
-            # Speedup (mean only)
-            speedups = [run.timing.speedup for run in runs_list if run.timing.speedup > 0]
-            if speedups:
-                mean_speedup = compute_stats(speedups)['mean']
-                if mean_speedup >= 1.0:
-                    speedup = f"[green]{mean_speedup:.2f}x[/]"
-                elif mean_speedup >= 0.8:
-                    speedup = f"[yellow]{mean_speedup:.2f}x[/]"
+            # Speedup (median on startup-filtered paired runs)
+            speedup_median = robust[KEY_SPEEDUP]
+            if speedup_median:
+                if speedup_median >= 1.0:
+                    speedup = f"[green]{speedup_median:.2f}x[/]"
+                elif speedup_median >= 0.8:
+                    speedup = f"[yellow]{speedup_median:.2f}x[/]"
                 else:
-                    speedup = f"[red]{mean_speedup:.2f}x[/]"
-                if r.timing.speedup_basis != "kernel":
+                    speedup = f"[red]{speedup_median:.2f}x[/]"
+                speedup, spd_marked = _format_with_filter_marker(
+                    speedup,
+                    robust["paired_filtered_count"],
+                    robust["paired_raw_count"],
+                )
+                if spd_marked:
+                    filtered_used = True
+                if r.timing.speedup_basis != SPEEDUP_BASIS_KERNEL:
                     speedup += "*"
                     has_fallback = True
             else:
@@ -2987,6 +3464,8 @@ def create_live_table(
                           verify_arts, verify_omp,
                           cleanup_arts, cleanup_omp,
                           correct, speedup)
+            if filtered_used:
+                has_filtered = True
 
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
@@ -3065,8 +3544,13 @@ def create_live_table(
                 "[dim]-[/]",
             )
 
+    caption_notes: List[str] = []
     if has_fallback:
-        table.caption = "[dim]* = speedup not based on kernel[/]"
+        caption_notes.append("* = speedup not based on kernel")
+    if has_filtered:
+        caption_notes.append("\u2020 = startup outliers filtered (median-of-N)")
+    if caption_notes:
+        table.caption = "[dim]" + " | ".join(caption_notes) + "[/]"
 
     return table
 
@@ -3143,15 +3627,15 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
     """Calculate statistics for multiple runs grouped by config."""
     from collections import defaultdict
 
-    # Group by config (name + threads + nodes)
-    groups: Dict[Tuple, List[BenchmarkResult]] = defaultdict(list)
+    # Group by config (name + threads + nodes + run_phase)
+    groups: Dict[Tuple[str, int, int, str], List[BenchmarkResult]] = defaultdict(list)
     for r in results:
-        key = (r.name, r.config.arts_threads, r.config.arts_nodes)
-        groups[key].append(r)
+        groups[_config_key(r)].append(r)
 
     stats = {}
     for key, runs in groups.items():
-        _name, threads, nodes = key
+        _name, threads, nodes, run_phase = key
+        robust = summarize_runs_robust(sorted(runs, key=lambda r: r.run_number))
         # Extract timings
         arts_build_times = []
         omp_build_times = []
@@ -3187,12 +3671,24 @@ def calculate_statistics(results: List[BenchmarkResult]) -> Dict[str, Dict]:
         config_key = f"{threads}_threads"
         if nodes > 1:
             config_key = f"{threads}_threads_{nodes}_nodes"
+        if run_phase:
+            config_key = f"{config_key}_{run_phase}"
 
         stats[config_key] = {
+            "reporting_mode": DEFAULT_REPORTING_MODE,
             "arts_build_time": compute_stats(arts_build_times),
             "omp_build_time": compute_stats(omp_build_times),
             "arts_e2e_time": compute_stats(arts_e2e_times),
             "omp_e2e_time": compute_stats(omp_e2e_times),
+            "arts_e2e_median_filtered": robust[KEY_ARTS_E2E_SEC],
+            "omp_e2e_median_filtered": robust[KEY_OMP_E2E_SEC],
+            "speedup_median_filtered": robust[KEY_SPEEDUP],
+            "arts_e2e_filtered_count": robust[KEY_ARTS_FILTERED_COUNT],
+            "omp_e2e_filtered_count": robust[KEY_OMP_FILTERED_COUNT],
+            "paired_speedup_filtered_count": robust["paired_filtered_count"],
+            "arts_e2e_raw_count": robust[KEY_ARTS_RAW_COUNT],
+            "omp_e2e_raw_count": robust["omp_raw_count"],
+            "paired_speedup_raw_count": robust["paired_raw_count"],
             "arts_kernel_time": compute_stats(arts_kernel_times),
             "omp_kernel_time": compute_stats(omp_kernel_times),
             "speedup": compute_stats(speedups),
@@ -3222,6 +3718,7 @@ def export_json(
     experiment_name: Optional[str] = None,
     experiment_description: Optional[str] = None,
     experiment_steps: Optional[List[Dict[str, Any]]] = None,
+    startup_outlier_counts: Optional[Dict[str, int]] = None,
 ) -> None:
     """Export results to JSON file with comprehensive reproducibility metadata."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3239,6 +3736,14 @@ def export_json(
         "size": size,
         "total_duration_seconds": total_duration,
         "runs_per_config": runs_per_config,
+        "reporting": {
+            "mode": DEFAULT_REPORTING_MODE,
+            "startup_outlier_filter": "see top-level startup_outlier_policy",
+            "startup_diagnostics": {
+                "capture": "outlier_runs",
+                "artifact": STARTUP_OUTLIER_DIAGNOSTICS_FILENAME,
+            },
+        },
         # Include reproducibility bundle
         "reproducibility": repro_metadata,
     }
@@ -3303,7 +3808,10 @@ def export_json(
         "pass_rate": passed / total if total > 0 else 0.0,
         "avg_speedup": avg_speedup,
         "geometric_mean_speedup": geomean_speedup,
+        "reporting_mode": DEFAULT_REPORTING_MODE,
     }
+    if startup_outlier_counts:
+        summary["startup_outliers"] = dict(startup_outlier_counts)
 
     # Add statistics when multiple runs
     if runs_per_config > 1:
@@ -3340,6 +3848,9 @@ def export_json(
                 "kernel_timings": r.run_arts.kernel_timings,
                 "e2e_timings": r.run_arts.e2e_timings,
                 "startup_timings": r.run_arts.startup_timings,
+                "startup_total_sec": get_startup_time(r.run_arts),
+                "startup_outlier": r.run_arts.startup_outlier,
+                "startup_diagnostics": r.run_arts.startup_diagnostics,
                 "verification_timings": r.run_arts.verification_timings,
                 "cleanup_timings": r.run_arts.cleanup_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_arts.parallel_task_timing),
@@ -3354,6 +3865,9 @@ def export_json(
                 "kernel_timings": r.run_omp.kernel_timings,
                 "e2e_timings": r.run_omp.e2e_timings,
                 "startup_timings": r.run_omp.startup_timings,
+                "startup_total_sec": get_startup_time(r.run_omp),
+                "startup_outlier": r.run_omp.startup_outlier,
+                "startup_diagnostics": r.run_omp.startup_diagnostics,
                 "verification_timings": r.run_omp.verification_timings,
                 "cleanup_timings": r.run_omp.cleanup_timings,
                 "parallel_task_timing": _serialize_parallel_task_timing(r.run_omp.parallel_task_timing),
@@ -3434,6 +3948,7 @@ def export_json(
 
     export_data = {
         "metadata": metadata,
+        "startup_outlier_policy": dict(DEFAULT_STARTUP_OUTLIER_POLICY),
         "summary": summary,
         "results": [result_to_dict(r) for r in results],
         "failures": failures,
@@ -4266,7 +4781,7 @@ def run(
     if openmp and arts:
         print_error("Cannot use --openmp and --arts together.")
         raise typer.Exit(2)
-    variant: Optional[str] = "openmp" if openmp else ("arts" if arts else None)
+    variant: Optional[str] = VARIANT_OPENMP if openmp else (VARIANT_ARTS if arts else None)
 
     clean = not no_clean
     size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
@@ -4536,6 +5051,8 @@ def run(
     except ValueError as e:
         console.print(f"\n[red]Error:[/] {e}")
         raise typer.Exit(1)
+
+    outlier_counts = annotate_startup_outliers(results, write_artifacts=True)
     total_duration = time.time() - start_time
 
     # Display results
@@ -4566,6 +5083,7 @@ def run(
         experiment_name=experiment_name,
         experiment_description=experiment_description,
         experiment_steps=experiment_steps,
+        startup_outlier_counts=outlier_counts,
     )
 
     report_path: Optional[Path] = None
@@ -4599,6 +5117,363 @@ def run(
     failed = sum(1 for r in results if benchmark_result_failed(r))
     if failed > 0:
         raise typer.Exit(1)
+
+
+def _resolve_results_json_path(path: Path) -> Path:
+    """Resolve a results.json path from either a file or results directory."""
+    candidate = path.resolve()
+    if candidate.is_file():
+        return candidate
+
+    if candidate.is_dir():
+        direct = candidate / RESULTS_FILENAME
+        if direct.is_file():
+            return direct
+        nested = sorted(
+            candidate.glob("*/results.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if nested:
+            return nested[0]
+
+    raise ValueError(f"Could not resolve results.json from: {path}")
+
+
+def _coerce(value: Any, type_fn: type = float, default: Any = None) -> Any:
+    """Coerce *value* to *type_fn* (e.g. ``float`` or ``int``).
+
+    Returns *default* when *value* is ``None`` or cannot be converted.
+    """
+    if value is None:
+        return default
+    try:
+        return type_fn(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _result_status_is_pass(result: Dict[str, Any], key: str) -> bool:
+    status = str(result.get(key, {}).get("status", "")).strip().lower()
+    return status == Status.PASS.value
+
+
+def _extract_e2e_sec(result: Dict[str, Any], variant: str) -> Optional[float]:
+    timing = result.get("timing", {})
+    timing_value = _coerce(timing.get(f"{variant}_e2e_sec"))
+    if timing_value is not None:
+        return timing_value
+
+    run_data = result.get(f"run_{variant}", {})
+    e2e_timings = run_data.get("e2e_timings")
+    if isinstance(e2e_timings, dict):
+        values = [_coerce(v) for v in e2e_timings.values()]
+        numeric_values = [v for v in values if v is not None]
+        if numeric_values:
+            return float(sum(numeric_values))
+    return None
+
+
+def _extract_startup_outlier(result: Dict[str, Any], variant: str) -> bool:
+    run_data = result.get(f"run_{variant}", {})
+    detail = run_data.get("startup_outlier")
+    return bool(isinstance(detail, dict) and detail.get(KEY_IS_OUTLIER))
+
+
+def _summarize_result_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return {
+            "speedup_median_filtered": None,
+            "arts_e2e_median_filtered": None,
+            "omp_e2e_median_filtered": None,
+            "arts_outlier_count": 0,
+            "omp_outlier_count": 0,
+        }
+
+    rows_sorted = sorted(rows, key=lambda r: _coerce(r.get("run_number"), int) or 0)
+
+    core = _compute_robust_summary(
+        items=rows_sorted,
+        get_arts_e2e=lambda row: _extract_e2e_sec(row, VARIANT_ARTS),
+        get_omp_e2e=lambda row: _extract_e2e_sec(row, VARIANT_OMP),
+        get_speedup=lambda row: _coerce(row.get(KEY_TIMING, {}).get(KEY_SPEEDUP)),
+        get_is_outlier=lambda idx, row: (
+            _extract_startup_outlier(row, VARIANT_ARTS),
+            _extract_startup_outlier(row, VARIANT_OMP),
+        ),
+    )
+
+    return {
+        "speedup_median_filtered": core["speedup_value"],
+        "arts_e2e_median_filtered": core["arts_value"],
+        "omp_e2e_median_filtered": core["omp_value"],
+        "arts_outlier_count": len(core["arts_outlier_indices"]),
+        "omp_outlier_count": len(core["omp_outlier_indices"]),
+    }
+
+
+def _evaluate_perf_gate_entry(
+    all_rows: List[Dict[str, Any]],
+    entry: Dict[str, Any],
+    defaults: Dict[str, Any],
+) -> Dict[str, Any]:
+    name = entry.get("name")
+    if not name:
+        raise ValueError("Each perf-gate benchmark entry must include 'name'")
+
+    size = entry.get("size", defaults.get("size"))
+    threads = _coerce(entry.get("threads", defaults.get("threads")), int)
+    nodes = _coerce(entry.get("nodes", defaults.get("nodes")), int)
+    run_phase = str(entry.get("run_phase", defaults.get("run_phase", "")) or "")
+
+    required = bool(entry.get("required", defaults.get("required", True)))
+    require_success = bool(
+        entry.get("require_success", defaults.get("require_success", True))
+    )
+    require_correct = bool(
+        entry.get("require_correct", defaults.get("require_correct", True))
+    )
+
+    max_startup_outliers: Dict[str, Any] = {}
+    defaults_outliers = defaults.get("max_startup_outliers")
+    entry_outliers = entry.get("max_startup_outliers")
+    if isinstance(defaults_outliers, dict):
+        max_startup_outliers.update(defaults_outliers)
+    if isinstance(entry_outliers, dict):
+        max_startup_outliers.update(entry_outliers)
+
+    min_speedup = _coerce(entry.get("min_speedup"))
+    baseline_speedup = _coerce(entry.get("baseline_speedup"))
+    tolerance_pct = _coerce(entry.get("tolerance_pct"))
+    if min_speedup is None and baseline_speedup is not None:
+        tolerance = tolerance_pct if tolerance_pct is not None else 0.10
+        min_speedup = baseline_speedup * (1.0 - tolerance)
+
+    max_arts_e2e_sec = _coerce(entry.get("max_arts_e2e_sec"))
+
+    rows = []
+    for row in all_rows:
+        if row.get("name") != name:
+            continue
+        if size and row.get("size") != size:
+            continue
+        cfg = row.get("config", {})
+        if threads is not None and _coerce(cfg.get("arts_threads"), int) != threads:
+            continue
+        if nodes is not None and _coerce(cfg.get("arts_nodes"), int) != nodes:
+            continue
+        if (row.get("run_phase") or "") != run_phase:
+            continue
+        rows.append(row)
+
+    summary = _summarize_result_rows(rows)
+    reasons: List[str] = []
+
+    if not rows:
+        reasons.append("no matching results")
+    else:
+        all_success = all(
+            _result_status_is_pass(row, "build_arts")
+            and _result_status_is_pass(row, "build_omp")
+            and _result_status_is_pass(row, "run_arts")
+            and _result_status_is_pass(row, "run_omp")
+            for row in rows
+        )
+        all_correct = all(
+            bool(row.get("verification", {}).get("correct")) for row in rows
+        )
+        speedup = summary["speedup_median_filtered"]
+        arts_e2e = summary["arts_e2e_median_filtered"]
+
+        if require_success and not all_success:
+            reasons.append("build/run failure")
+        if require_correct and not all_correct:
+            reasons.append("correctness mismatch")
+        if min_speedup is not None and (speedup is None or speedup < min_speedup):
+            reasons.append(f"speedup {speedup if speedup is not None else 'n/a'} < {min_speedup:.3f}")
+        if max_arts_e2e_sec is not None and (arts_e2e is None or arts_e2e > max_arts_e2e_sec):
+            reasons.append(
+                f"ARTS e2e {arts_e2e if arts_e2e is not None else 'n/a'} > {max_arts_e2e_sec:.3f}s"
+            )
+
+        max_arts_outliers = _coerce(max_startup_outliers.get("arts"), int)
+        max_omp_outliers = _coerce(max_startup_outliers.get("omp"), int)
+        if (
+            max_arts_outliers is not None
+            and summary["arts_outlier_count"] > max_arts_outliers
+        ):
+            reasons.append(
+                f"ARTS startup outliers {summary['arts_outlier_count']} > {max_arts_outliers}"
+            )
+        if (
+            max_omp_outliers is not None
+            and summary["omp_outlier_count"] > max_omp_outliers
+        ):
+            reasons.append(
+                f"OpenMP startup outliers {summary['omp_outlier_count']} > {max_omp_outliers}"
+            )
+
+    return {
+        "id": f"{name}|{size}|{threads}|{nodes}|{run_phase}",
+        "name": name,
+        "size": size,
+        "threads": threads,
+        "nodes": nodes,
+        "run_phase": run_phase,
+        "required": required,
+        "min_speedup": min_speedup,
+        "summary": summary,
+        "pass": len(reasons) == 0,
+        "reasons": reasons,
+    }
+
+
+def _perf_gate_entry_id(entry: Dict[str, Any], defaults: Dict[str, Any]) -> str:
+    """Build a stable identifier for a perf-gate policy entry."""
+    name = entry.get("name", "")
+    size = entry.get("size", defaults.get("size"))
+    threads = _coerce(entry.get("threads", defaults.get("threads")), int)
+    nodes = _coerce(entry.get("nodes", defaults.get("nodes")), int)
+    run_phase = str(entry.get("run_phase", defaults.get("run_phase", "")) or "")
+    return f"{name}|{size}|{threads}|{nodes}|{run_phase}"
+
+
+@app.command(name="perf-gate")
+def perf_gate(
+    results: Path = typer.Argument(
+        ...,
+        help="Path to a results.json file or an experiment directory.",
+    ),
+    policy: Path = typer.Option(
+        DEFAULT_PERF_GATE_POLICY,
+        "--policy",
+        help="Perf-gate policy JSON.",
+    ),
+    strict_advisory: bool = typer.Option(
+        False,
+        "--strict-advisory",
+        help="Treat advisory benchmark failures as gate failures.",
+    ),
+) -> None:
+    """Evaluate benchmark results against a threshold policy.
+
+    Flake-policy fields (max_attempts, min_passes_required) are accepted
+    in the policy JSON for documentation purposes but retry logic should
+    be handled by CI.  This command evaluates a single results file and
+    reports pass/fail.
+    """
+    try:
+        policy_path = policy.resolve()
+        with open(policy_path, "r") as handle:
+            policy_doc = json.load(handle)
+    except FileNotFoundError:
+        print_error(f"Perf-gate policy not found: {policy}")
+        raise typer.Exit(2)
+    except json.JSONDecodeError as exc:
+        print_error(f"Invalid JSON in perf-gate policy: {policy} ({exc})")
+        raise typer.Exit(2)
+
+    entries = policy_doc.get("benchmarks")
+    if not isinstance(entries, list) or not entries:
+        print_error("Perf-gate policy must define a non-empty 'benchmarks' list")
+        raise typer.Exit(2)
+
+    defaults = policy_doc.get("defaults", {})
+
+    # Note: flake_policy.max_attempts / min_passes_required are kept in the
+    # policy schema for documentation but retries should be driven by CI.
+    flake_policy = policy_doc.get("flake_policy", {})
+    if _coerce(flake_policy.get("max_attempts"), int, 1) > 1:
+        print_warning(
+            "flake_policy.max_attempts > 1 is ignored; CI should handle retries."
+        )
+
+    try:
+        resolved_results = _resolve_results_json_path(results)
+        with open(resolved_results, "r") as handle:
+            doc = json.load(handle)
+    except FileNotFoundError:
+        print_error(f"Results file not found: {results}")
+        raise typer.Exit(2)
+    except json.JSONDecodeError as exc:
+        print_error(f"Invalid JSON in results file: {results} ({exc})")
+        raise typer.Exit(2)
+    except ValueError as exc:
+        print_error(str(exc))
+        raise typer.Exit(2)
+
+    rows = doc.get("results")
+    if not isinstance(rows, list):
+        print_error(f"Invalid results payload (missing list 'results'): {resolved_results}")
+        raise typer.Exit(2)
+
+    evaluations = [
+        _evaluate_perf_gate_entry(rows, entry, defaults) for entry in entries
+    ]
+    eval_by_id = {item["id"]: item for item in evaluations}
+
+    print_header(
+        "Benchmark Perf Gate",
+        f"Policy: {policy_path}\nResults: {resolved_results}",
+    )
+
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
+    table.add_column("Benchmark", style="cyan")
+    table.add_column("Req", justify="center")
+    table.add_column("Speedup", justify="right")
+    table.add_column("Min", justify="right")
+    table.add_column("Outliers", justify="right")
+    table.add_column("Status", justify="center")
+    table.add_column("Notes")
+
+    required_failures = 0
+    advisory_failures = 0
+
+    for entry in entries:
+        eval_id = _perf_gate_entry_id(entry, defaults)
+        result = eval_by_id[eval_id]
+
+        speedup = result["summary"]["speedup_median_filtered"]
+        min_speedup = result["min_speedup"]
+        arts_outliers = result["summary"]["arts_outlier_count"]
+        omp_outliers = result["summary"]["omp_outlier_count"]
+
+        if result["pass"]:
+            status_text = f"[green]{Symbols.PASS} PASS[/]"
+            notes = ""
+        else:
+            if result["required"]:
+                required_failures += 1
+                status_text = f"[red]{Symbols.FAIL} FAIL[/]"
+            else:
+                advisory_failures += 1
+                status_text = f"[yellow]! advisory[/]"
+            notes = "; ".join(result["reasons"])
+
+        table.add_row(
+            result["name"],
+            "yes" if result["required"] else "no",
+            f"{speedup:.3f}x" if speedup is not None else "-",
+            f"{min_speedup:.3f}x" if min_speedup is not None else "-",
+            f"A:{arts_outliers} O:{omp_outliers}",
+            status_text,
+            notes,
+        )
+
+    console.print(table)
+
+    if required_failures > 0:
+        print_error(f"Perf gate failed: {required_failures} required benchmark target(s) failed.")
+        raise typer.Exit(1)
+    if strict_advisory and advisory_failures > 0:
+        print_error(
+            f"Perf gate failed in strict advisory mode: {advisory_failures} advisory target(s) failed."
+        )
+        raise typer.Exit(1)
+
+    if advisory_failures > 0:
+        print_warning(f"Perf gate passed with {advisory_failures} advisory target failure(s).")
+    print_success("Perf gate passed.")
 
 
 @app.command()
@@ -4650,11 +5525,11 @@ def build(
     # Determine variants to build
     variants = []
     if openmp:
-        variants.append("openmp")
+        variants.append(VARIANT_OPENMP)
     elif arts:
-        variants.append("arts")
+        variants.append(VARIANT_ARTS)
     else:
-        variants = ["arts", "openmp"]
+        variants = [VARIANT_ARTS, VARIANT_OPENMP]
 
     print_header("Build Benchmarks", f"{len(bench_list)} benchmarks, size={size}")
 

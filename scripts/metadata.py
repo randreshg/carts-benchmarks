@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from benchmark_models import ParallelTaskTiming
+from models import ParallelTaskTiming
 
 logger = logging.getLogger(__name__)
 

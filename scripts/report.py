@@ -13,10 +13,29 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from benchmark_common import parse_all_counters, parse_perf_csv
+from common import (
+    ARTS_CFG_FILENAME,
+    COUNTERS_DIR_NAME,
+    FAIL_STATUSES,
+    MANIFEST_JSON_FILENAME,
+    PERF_DIR_NAME,
+    RESULT_JSON_FILENAME,
+    RESULTS_FILENAME,
+    RUN_CONFIG_JSON_FILENAME,
+    SLURM_ERR_FILENAME,
+    SLURM_OUT_FILENAME,
+    STATUS_FAIL,
+    STATUS_PASS,
+    STATUS_SKIP,
+    STATUS_WARN,
+    VARIANT_ARTS,
+    VARIANT_OMP,
+    parse_all_counters,
+    parse_perf_csv,
+)
 
 if TYPE_CHECKING:
-    from benchmark_models import BenchmarkResult, ExperimentStep
+    from models import BenchmarkResult, ExperimentStep
 
 try:
     from openpyxl import Workbook
@@ -928,7 +947,7 @@ def _verification_state(
     reference_checksum: Any,
 ) -> Optional[bool]:
     status_text = _status_text(status)
-    if status_text != "PASS":
+    if status_text != STATUS_PASS:
         return False
 
     note_text = str(verification_note or "").strip().lower()
@@ -1036,10 +1055,10 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "omp_total_sec": result.timing.omp_total_sec,
             "speedup": result.timing.speedup,
             "artifact_run_dir": artifacts.run_dir,
-            "artifact_run_config": str(Path(artifacts.run_dir) / "run_config.json") if artifacts.run_dir else None,
-            "artifact_result_json": str(Path(artifacts.run_dir) / "result.json") if artifacts.run_dir else None,
-            "artifact_slurm_out": str(Path(artifacts.run_dir) / "slurm.out") if artifacts.run_dir else None,
-            "artifact_slurm_err": str(Path(artifacts.run_dir) / "slurm.err") if artifacts.run_dir else None,
+            "artifact_run_config": str(Path(artifacts.run_dir) / RUN_CONFIG_JSON_FILENAME) if artifacts.run_dir else None,
+            "artifact_result_json": str(Path(artifacts.run_dir) / RESULT_JSON_FILENAME) if artifacts.run_dir else None,
+            "artifact_slurm_out": str(Path(artifacts.run_dir) / SLURM_OUT_FILENAME) if artifacts.run_dir else None,
+            "artifact_slurm_err": str(Path(artifacts.run_dir) / SLURM_ERR_FILENAME) if artifacts.run_dir else None,
             "artifact_build_dir": artifacts.build_dir,
             "artifact_arts_config": artifacts.arts_config,
             "artifact_counter_dir": artifacts.counters_dir,
@@ -1084,8 +1103,8 @@ def _flatten_result_serialized(
 
     benchmark = result.get("benchmark") or result.get("name")
     config = result.get("config") or {}
-    arts = result.get("arts") or result.get("run_arts") or {}
-    omp = result.get("omp") or result.get("run_omp") or {}
+    arts = result.get(VARIANT_ARTS) or result.get("run_arts") or {}
+    omp = result.get(VARIANT_OMP) or result.get("run_omp") or {}
     slurm = result.get("slurm") or {}
     diagnostics = result.get("diagnostics") or {}
     slurm_stderr = diagnostics.get("slurm_stderr") if isinstance(diagnostics, dict) else {}
@@ -1113,8 +1132,8 @@ def _flatten_result_serialized(
                 "connection_refused_count",
             )
         )
-    if status == "PASS" and detected_runtime_warning and status_detail == "PASS":
-        status_detail = "WARN"
+    if status == STATUS_PASS and detected_runtime_warning and status_detail == STATUS_PASS:
+        status_detail = STATUS_WARN
 
     row.update(
         {
@@ -1230,7 +1249,7 @@ def _flatten_result_serialized(
     candidate_dirs: List[Path] = []
     run_dir = result.get("_run_dir")
     if isinstance(run_dir, str) and run_dir:
-        candidate_dirs.append(Path(run_dir) / "counters")
+        candidate_dirs.append(Path(run_dir) / COUNTERS_DIR_NAME)
 
     artifact_counter_dir = _counter_dir_from_artifacts(result.get("artifacts"))
     if artifact_counter_dir is not None:
@@ -1254,7 +1273,7 @@ def _flatten_result_serialized(
                 / bench_name
                 / f"{int(threads_value)}t_{int(nodes_value)}n"
                 / f"run_{int(run_number_value)}"
-                / "counters"
+                / COUNTERS_DIR_NAME
             )
             candidate_dirs.append(local_counter_dir)
 
@@ -1346,7 +1365,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
         else:
             arts_e2e_cv = (arts_e2e_std / arts_e2e_mean) * 100.0
 
-        pass_count = sum(1 for r in runs if str(r.get("status", "")).upper() == "PASS")
+        pass_count = sum(1 for r in runs if str(r.get("status", "")).upper() == STATUS_PASS)
         fail_count = len(runs) - pass_count
         warn_count = sum(1 for r in runs if r.get("runtime_warning") is True)
         verified_count = sum(1 for r in runs if r.get("verified") is True)
@@ -1988,10 +2007,10 @@ def _build_overview_sheet(
         benchmarks_run: str,
     ) -> None:
         statuses = [str(r.get("status") or "").upper() for r in phase_rows]
-        passed = sum(1 for s in statuses if s == "PASS")
+        passed = sum(1 for s in statuses if s == STATUS_PASS)
         verified = sum(1 for r in phase_rows if r.get("verified") is True)
-        failed = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
-        warn = sum(1 for r in phase_rows if _status_text(r.get("status_detail")) == "WARN")
+        failed = sum(1 for s in statuses if s in FAIL_STATUSES)
+        warn = sum(1 for r in phase_rows if _status_text(r.get("status_detail")) == STATUS_WARN)
         rows_with_counters = sum(
             1
             for r in phase_rows
@@ -2240,8 +2259,8 @@ def _build_issues_sheet(workbook: Workbook, result_rows: List[Dict[str, Any]]) -
         row
         for row in result_rows
         if (
-            _status_text(row.get("status")) not in {"PASS", "SKIP"}
-            or _status_text(row.get("status_detail")) == "WARN"
+            _status_text(row.get("status")) not in {STATUS_PASS, STATUS_SKIP}
+            or _status_text(row.get("status_detail")) == STATUS_WARN
             or row.get("runtime_warning") is True
             or (row.get("has_counters") is True and row.get("counter_complete") is False)
             or row.get("verified") is False
@@ -2544,11 +2563,11 @@ def _apply_status_fill(worksheet: Any, columns: List[str]) -> None:
         text = str(cell.value or "").upper()
         if not text:
             continue
-        if text == "PASS":
+        if text == STATUS_PASS:
             cell.fill = pass_fill
-        elif text in {"FAIL", "CRASH", "TIMEOUT"}:
+        elif text in FAIL_STATUSES:
             cell.fill = fail_fill
-        elif text == "SKIP":
+        elif text == STATUS_SKIP:
             cell.fill = warn_fill
 
 
@@ -2765,7 +2784,7 @@ def _build_scaling_sheet(workbook: Workbook, summary_rows: List[Dict[str, Any]])
 
 
 def _load_results_metadata(experiment_dir: Path) -> Dict[str, Any]:
-    results_json = experiment_dir / "results.json"
+    results_json = experiment_dir / RESULTS_FILENAME
     if not results_json.exists():
         return {}
 
@@ -2778,7 +2797,7 @@ def _load_results_metadata(experiment_dir: Path) -> Dict[str, Any]:
 
 
 def _load_manifest_command(experiment_dir: Path) -> Optional[str]:
-    manifest_json = experiment_dir / "manifest.json"
+    manifest_json = experiment_dir / MANIFEST_JSON_FILENAME
     if not manifest_json.exists():
         return None
 
@@ -2892,9 +2911,9 @@ def _append_metadata_sheet(
 
 def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     statuses = [str(r.get("status") or "").upper() for r in result_rows]
-    pass_count = sum(1 for s in statuses if s == "PASS")
-    fail_count = sum(1 for s in statuses if s in {"FAIL", "CRASH", "TIMEOUT"})
-    skip_count = sum(1 for s in statuses if s == "SKIP")
+    pass_count = sum(1 for s in statuses if s == STATUS_PASS)
+    fail_count = sum(1 for s in statuses if s in FAIL_STATUSES)
+    skip_count = sum(1 for s in statuses if s == STATUS_SKIP)
     warn_count = sum(1 for r in result_rows if r.get("runtime_warning") is True)
     verified_count = sum(1 for r in result_rows if r.get("verified") is True)
 
@@ -2989,8 +3008,8 @@ def _write_report(
         )
     ]
     if any(
-        _status_text(row.get("status")) not in {"PASS", "SKIP"}
-        or _status_text(row.get("status_detail")) == "WARN"
+        _status_text(row.get("status")) not in {STATUS_PASS, STATUS_SKIP}
+        or _status_text(row.get("status_detail")) == STATUS_WARN
         or row.get("runtime_warning") is True
         or (row.get("has_counters") is True and row.get("counter_complete") is False)
         or row.get("verified") is False

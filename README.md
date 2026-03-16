@@ -82,6 +82,34 @@ ARTS rebuild notes:
 - Experiment-step `debug` values are raw ARTS runtime levels when a step rebuilds ARTS: `0`=errors only, `1`=warnings, `2`=info, `3`=debug.
 - If the installed ARTS runtime is missing, the benchmark runner now forces `carts build --arts` before executing the step, even when the step did not explicitly request a rebuild.
 
+### `carts benchmarks perf-gate`
+
+Evaluate benchmark results against a threshold policy.
+
+```bash
+carts benchmarks perf-gate RESULTS_JSON_OR_DIR [--policy PATH]
+```
+
+Examples:
+
+```bash
+# Gate against default policy
+carts benchmarks perf-gate \
+  external/carts-benchmarks/results/20260316_063058/results.json
+
+# Gate with explicit policy
+carts benchmarks perf-gate \
+  external/carts-benchmarks/results/20260316_063058/ \
+  --policy external/carts-benchmarks/configs/perf-gates/openmp-surpass-stable-subset.json
+```
+
+Policy notes:
+- Accepts a single results path (file or directory containing `results.json`).
+- Default policy: `configs/perf-gates/openmp-surpass-stable-subset.json`.
+- Thresholds: `baseline_speedup` + `tolerance_pct` (derives minimum) or direct `min_speedup`.
+- Benchmarks can be `required: false` for advisory tracking.
+- For flake handling (retries), wrap the command in CI retry logic.
+
 ### `carts benchmarks build`
 
 Build benchmarks without running.

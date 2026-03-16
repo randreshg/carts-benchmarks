@@ -1,7 +1,7 @@
 """
 Shared constants and parsing functions for CARTS benchmarks.
 
-Used by benchmark_runner.py, slurm/batch.py,
+Used by runner.py, slurm/batch.py,
 and slurm/job_result.py.
 Stdlib-only — no external dependencies.
 """
@@ -74,6 +74,85 @@ BENCHMARK_SHARED_CLEAN_DIR_NAMES = [
     "perfs",
     ".generated_configs",
 ]
+
+
+# ============================================================================
+# Variant and Basis Identifiers
+# ============================================================================
+
+VARIANT_ARTS = "arts"
+VARIANT_OMP = "omp"
+VARIANT_OPENMP = "openmp"
+
+SPEEDUP_BASIS_KERNEL = "kernel"
+SPEEDUP_BASIS_E2E = "e2e"
+SPEEDUP_BASIS_TOTAL = "total"
+SPEEDUP_BASIS_NA = "n/a"
+
+# ============================================================================
+# Serialization / Dict Key Constants
+# ============================================================================
+
+# Top-level result fields
+KEY_BUILD_ARTS = "build_arts"
+KEY_BUILD_OMP = "build_omp"
+KEY_RUN_ARTS = "run_arts"
+KEY_RUN_OMP = "run_omp"
+KEY_TIMING = "timing"
+KEY_VERIFICATION = "verification"
+KEY_CONFIG = "config"
+KEY_STATUS = "status"
+KEY_RUN_NUMBER = "run_number"
+KEY_RUN_PHASE = "run_phase"
+KEY_SPEEDUP = "speedup"
+KEY_NAME = "name"
+KEY_SIZE = "size"
+
+# Summary / robust statistics keys
+KEY_ARTS_E2E_SEC = "arts_e2e_sec"
+KEY_OMP_E2E_SEC = "omp_e2e_sec"
+KEY_ARTS_OUTLIERS = "arts_outliers"
+KEY_OMP_OUTLIERS = "omp_outliers"
+KEY_ARTS_RAW_COUNT = "arts_raw_count"
+KEY_OMP_RAW_COUNT = "omp_raw_count"
+KEY_PAIRED_RAW_COUNT = "paired_raw_count"
+KEY_ARTS_FILTERED_COUNT = "arts_filtered_count"
+KEY_OMP_FILTERED_COUNT = "omp_filtered_count"
+KEY_PAIRED_FILTERED_COUNT = "paired_filtered_count"
+
+# Outlier detail keys
+KEY_IS_OUTLIER = "is_outlier"
+
+# ============================================================================
+# Status Strings (used across SLURM results, report, and job_result)
+# ============================================================================
+
+STATUS_PASS = "PASS"
+STATUS_FAIL = "FAIL"
+STATUS_CRASH = "CRASH"
+STATUS_TIMEOUT = "TIMEOUT"
+STATUS_WARN = "WARN"
+STATUS_SKIP = "SKIP"
+
+# Statuses that indicate a failed/non-passing result
+FAIL_STATUSES = frozenset({STATUS_FAIL, STATUS_CRASH, STATUS_TIMEOUT})
+
+# ============================================================================
+# Well-known Filenames
+# ============================================================================
+
+RESULTS_FILENAME = "results.json"
+RESULT_JSON_FILENAME = "result.json"
+RUN_CONFIG_JSON_FILENAME = "run_config.json"
+MANIFEST_JSON_FILENAME = "manifest.json"
+JOB_MANIFEST_JSON_FILENAME = "job_manifest.json"
+SLURM_OUT_FILENAME = "slurm.out"
+SLURM_ERR_FILENAME = "slurm.err"
+ARTS_CFG_FILENAME = "arts.cfg"
+REFERENCE_JSON_FILENAME = "reference.json"
+COUNTERS_DIR_NAME = "counters"
+PERF_DIR_NAME = "perf"
+STARTUP_OUTLIER_DIAGNOSTICS_FILENAME = "startup_outlier_diagnostics.json"
 
 
 # ============================================================================

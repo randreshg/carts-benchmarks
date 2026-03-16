@@ -69,6 +69,7 @@ counters/
 DbGraph_*.dot
 *.json
 !configs/experiments/*.json
+!configs/perf-gates/*.json
 logs/
 build/
 .artsPrintLock

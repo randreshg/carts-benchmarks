@@ -16,8 +16,8 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from benchmark_models import ExperimentStep  # noqa: E402
-from benchmark_report import generate_report_from_rows  # noqa: E402
+from models import ExperimentStep  # noqa: E402
+from report import generate_report_from_rows  # noqa: E402
 
 
 class BenchmarkReportWorkbookTest(unittest.TestCase):

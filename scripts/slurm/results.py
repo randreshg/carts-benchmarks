@@ -9,9 +9,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from benchmark_common import aggregate_perf_csvs, parse_perf_csv
+from common import (
+    PERF_DIR_NAME,
+    RESULT_JSON_FILENAME,
+    RUN_CONFIG_JSON_FILENAME,
+    SLURM_ERR_FILENAME,
+    SLURM_OUT_FILENAME,
+    STATUS_FAIL,
+    STATUS_PASS,
+    STATUS_TIMEOUT,
+    STATUS_WARN,
+    VARIANT_ARTS,
+    VARIANT_OMP,
+    aggregate_perf_csvs,
+    parse_perf_csv,
+)
 
-from .models import SlurmJobStatus, SubmissionFailure
+from .models import (
+    SLURM_STATE_COMPLETED,
+    SLURM_STATE_DRY_RUN,
+    SLURM_STATE_SUBMIT_FAILED,
+    SLURM_STATE_TIMEOUT,
+    SLURM_STATE_UNKNOWN,
+    SlurmJobStatus,
+    SubmissionFailure,
+)
 
 
 def _parse_key_value_tokens(text: str) -> Dict[str, str]:
@@ -50,7 +72,7 @@ def _run_snapshot_cmd(command: List[str], timeout: int) -> Dict[str, Any]:
 
 
 def _load_run_config(run_dir: Path) -> Dict[str, Any]:
-    run_config_file = run_dir / "run_config.json"
+    run_config_file = run_dir / RUN_CONFIG_JSON_FILENAME
     if not run_config_file.exists():
         return {}
     try:
@@ -78,6 +100,8 @@ def _apply_run_config(result: Dict[str, Any], run_config: Dict[str, Any]) -> Non
         result["compile_args"] = run_config.get("compile_args")
     if "cflags" in run_config:
         result["cflags"] = run_config.get("cflags")
+    if "reporting" in run_config:
+        result["reporting"] = run_config.get("reporting")
     if "config" in run_config and isinstance(run_config["config"], dict):
         result["config"] = run_config["config"]
     if "reference" in run_config and isinstance(run_config["reference"], dict):
@@ -121,7 +145,7 @@ def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, 
 
 
 def _apply_perf_artifacts(result: Dict[str, Any], run_dir: Path) -> None:
-    perf_dir = run_dir / "perf"
+    perf_dir = run_dir / PERF_DIR_NAME
     if not perf_dir.exists():
         return
 
@@ -138,13 +162,13 @@ def _apply_perf_artifacts(result: Dict[str, Any], run_dir: Path) -> None:
     if arts_perf_files:
         perf_metrics = aggregate_perf_csvs(arts_perf_files)
         if perf_metrics:
-            arts = result.setdefault("arts", {})
+            arts = result.setdefault(VARIANT_ARTS, {})
             arts["perf_metrics"] = perf_metrics
             arts["perf_csv_path"] = str(perf_dir)
     if omp_perf_file.exists():
         omp_perf_metrics = parse_perf_csv(omp_perf_file)
         if omp_perf_metrics:
-            omp = result.setdefault("omp", {})
+            omp = result.setdefault(VARIANT_OMP, {})
             omp["perf_metrics"] = omp_perf_metrics
             omp["perf_csv_path"] = str(omp_perf_file)
 
@@ -311,11 +335,11 @@ class SlurmResultCollector:
         parsed = snapshot.get("scontrol", {}).get("parsed", {})
         snapshot_nodelist = parsed.get("NodeList")
         resolved_nodelist = status.node_list or snapshot_nodelist
-        result_status = "TIMEOUT" if status.state == "TIMEOUT" else "FAIL"
+        result_status = STATUS_TIMEOUT if status.state == SLURM_STATE_TIMEOUT else STATUS_FAIL
         failure_error = error
-        if status.state == "TIMEOUT" and error.startswith("No result.json found"):
+        if status.state == SLURM_STATE_TIMEOUT and error.startswith(f"No {RESULT_JSON_FILENAME} found"):
             failure_error = (
-                f"SLURM job timed out before result.json was written: {run_dir} "
+                f"SLURM job timed out before {RESULT_JSON_FILENAME} was written: {run_dir} "
                 "(increase --time-limit or reduce workload)."
             )
         failure: Dict[str, Any] = {
@@ -333,14 +357,14 @@ class SlurmResultCollector:
             "_run_dir": str(run_dir),
             "artifacts": {
                 "run_dir": str(run_dir),
-                "run_config": str(run_dir / "run_config.json"),
-                "result_json": str(run_dir / "result.json"),
-                "slurm_out": str(run_dir / "slurm.out"),
-                "slurm_err": str(run_dir / "slurm.err"),
+                "run_config": str(run_dir / RUN_CONFIG_JSON_FILENAME),
+                "result_json": str(run_dir / RESULT_JSON_FILENAME),
+                "slurm_out": str(run_dir / SLURM_OUT_FILENAME),
+                "slurm_err": str(run_dir / SLURM_ERR_FILENAME),
             },
             "diagnostics": {
-                "slurm_out": _summarize_log(run_dir / "slurm.out"),
-                "slurm_err": _summarize_log(run_dir / "slurm.err"),
+                "slurm_out": _summarize_log(run_dir / SLURM_OUT_FILENAME),
+                "slurm_err": _summarize_log(run_dir / SLURM_ERR_FILENAME),
                 "slurm_snapshot": snapshot,
             },
         }
@@ -359,14 +383,14 @@ class SlurmResultCollector:
         results: List[Dict[str, Any]] = []
 
         for job_id, status in self.job_statuses.items():
-            if status.state == "DRY_RUN":
+            if status.state == SLURM_STATE_DRY_RUN:
                 continue
 
             if not status.run_dir:
                 results.append({
                     "benchmark": status.benchmark_name,
                     "run_number": status.run_number,
-                    "status": "FAIL",
+                    "status": STATUS_FAIL,
                     "slurm": {
                         "job_id": job_id,
                         "state": status.state,
@@ -379,7 +403,7 @@ class SlurmResultCollector:
                 })
                 continue
 
-            result_file = status.run_dir / "result.json"
+            result_file = status.run_dir / RESULT_JSON_FILENAME
             run_config = _load_run_config(status.run_dir)
 
             if result_file.exists():
@@ -387,14 +411,14 @@ class SlurmResultCollector:
                     result = json.loads(result_file.read_text())
                     slurm_info = result.setdefault("slurm", {})
                     effective_state = status.state
-                    if effective_state == "UNKNOWN" and result.get("status") == "PASS":
-                        effective_state = "COMPLETED"
+                    if effective_state == SLURM_STATE_UNKNOWN and result.get("status") == STATUS_PASS:
+                        effective_state = SLURM_STATE_COMPLETED
                         result.setdefault("diagnostics", {}).setdefault(
                             "slurm_state_inference",
                             {
-                                "state": "COMPLETED",
+                                "state": SLURM_STATE_COMPLETED,
                                 "reason": (
-                                    "Inferred from a successful result.json because "
+                                    f"Inferred from a successful {RESULT_JSON_FILENAME} because "
                                     "SLURM accounting did not return a final state."
                                 ),
                             },
@@ -410,10 +434,10 @@ class SlurmResultCollector:
                     _apply_run_config(result, run_config)
                     result.setdefault("artifacts", {}).update({
                         "run_dir": str(status.run_dir),
-                        "run_config": str(status.run_dir / "run_config.json"),
+                        "run_config": str(status.run_dir / RUN_CONFIG_JSON_FILENAME),
                         "result_json": str(result_file),
-                        "slurm_out": str(status.run_dir / "slurm.out"),
-                        "slurm_err": str(status.run_dir / "slurm.err"),
+                        "slurm_out": str(status.run_dir / SLURM_OUT_FILENAME),
+                        "slurm_err": str(status.run_dir / SLURM_ERR_FILENAME),
                     })
                     _apply_compile_artifact_paths(result, run_config)
                     _apply_perf_artifacts(result, status.run_dir)
@@ -425,10 +449,10 @@ class SlurmResultCollector:
                             "has_warning": True,
                             "reasons": warning_reasons,
                         }
-                        if str(result.get("status", "")).upper() == "PASS":
-                            result["status_detail"] = "WARN"
+                        if str(result.get("status", "")).upper() == STATUS_PASS:
+                            result["status_detail"] = STATUS_WARN
 
-                    if result.get("status") != "PASS" or warning_reasons:
+                    if result.get("status") != STATUS_PASS or warning_reasons:
                         result.setdefault("diagnostics", {}).setdefault(
                             "slurm_snapshot",
                             self._collect_slurm_snapshot(status.job_id),
@@ -438,7 +462,7 @@ class SlurmResultCollector:
                     results.append(
                         self._build_failure_result(
                             status,
-                            "Failed to parse result.json",
+                            f"Failed to parse {RESULT_JSON_FILENAME}",
                             status.run_dir,
                             run_config,
                         )
@@ -447,7 +471,7 @@ class SlurmResultCollector:
                 results.append(
                     self._build_failure_result(
                         status,
-                        f"No result.json found in {status.run_dir}",
+                        f"No {RESULT_JSON_FILENAME} found in {status.run_dir}",
                         status.run_dir,
                         run_config,
                     )
@@ -478,23 +502,23 @@ def build_submission_failure_results(
         result: Dict[str, Any] = {
             "benchmark": failure.benchmark_name,
             "run_number": failure.run_number,
-            "status": "FAIL",
-            "status_detail": "SUBMIT_FAILED",
+            "status": STATUS_FAIL,
+            "status_detail": SLURM_STATE_SUBMIT_FAILED,
             "error": f"SLURM submission failed: {failure.error}",
             "_run_dir": str(run_dir),
             "slurm": {
                 "job_id": None,
-                "state": "SUBMIT_FAILED",
+                "state": SLURM_STATE_SUBMIT_FAILED,
                 "exit_code": None,
                 "elapsed": None,
                 "nodelist": None,
             },
             "artifacts": {
                 "run_dir": str(run_dir),
-                "run_config": str(run_dir / "run_config.json"),
-                "result_json": str(run_dir / "result.json"),
-                "slurm_out": str(run_dir / "slurm.out"),
-                "slurm_err": str(run_dir / "slurm.err"),
+                "run_config": str(run_dir / RUN_CONFIG_JSON_FILENAME),
+                "result_json": str(run_dir / RESULT_JSON_FILENAME),
+                "slurm_out": str(run_dir / SLURM_OUT_FILENAME),
+                "slurm_err": str(run_dir / SLURM_ERR_FILENAME),
                 "sbatch_script": str(failure.script_path),
             },
             "diagnostics": {

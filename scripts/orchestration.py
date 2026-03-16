@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Protocol, Sequence, Tuple
 
-from benchmark_artifacts import ArtifactManager
-from benchmark_models import BenchmarkResult, ExperimentStep
+from artifacts import ArtifactManager
+from models import BenchmarkResult, ExperimentStep
 
 
 @dataclass(frozen=True)

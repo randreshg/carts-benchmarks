@@ -14,8 +14,8 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from benchmark_models import ExperimentStep  # noqa: E402
-from benchmark_orchestration import (  # noqa: E402
+from models import ExperimentStep  # noqa: E402
+from orchestration import (  # noqa: E402
     LocalStepExecutionRequest,
     SlurmStepExecutionRequest,
     StepCliDefaults,

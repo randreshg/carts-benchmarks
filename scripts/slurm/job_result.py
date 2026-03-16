@@ -34,7 +34,17 @@ from typing import Any, Dict, List, Optional, Tuple
 # benchmark_common.py lives in the parent scripts/ directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmark_common import (
+from common import (
+    COUNTERS_DIR_NAME,
+    RESULT_JSON_FILENAME,
+    RUN_CONFIG_JSON_FILENAME,
+    SLURM_ERR_FILENAME,
+    SLURM_OUT_FILENAME,
+    STATUS_PASS,
+    STATUS_FAIL,
+    STATUS_WARN,
+    VARIANT_ARTS,
+    VARIANT_OMP,
     parse_checksum,
     parse_kernel_timings,
     parse_e2e_timings,
@@ -42,8 +52,8 @@ from benchmark_common import (
     parse_verification_timings,
     parse_cleanup_timings,
 )
-from benchmark_models import Status, VerificationResult
-from benchmark_verification import verify_against_omp, verify_against_reference
+from models import Status, VerificationResult
+from verification import verify_against_omp, verify_against_reference
 
 
 def read_slurm_output(output_dir: Path, job_id: str) -> Tuple[str, str]:
@@ -59,8 +69,8 @@ def read_slurm_output(output_dir: Path, job_id: str) -> Tuple[str, str]:
     Returns:
         Tuple of (stdout, stderr) contents
     """
-    stdout_candidates = [output_dir / "slurm.out", output_dir / f"slurm-{job_id}.out"]
-    stderr_candidates = [output_dir / "slurm.err", output_dir / f"slurm-{job_id}.err"]
+    stdout_candidates = [output_dir / SLURM_OUT_FILENAME, output_dir / f"slurm-{job_id}.out"]
+    stderr_candidates = [output_dir / SLURM_ERR_FILENAME, output_dir / f"slurm-{job_id}.err"]
 
     stdout = ""
     for candidate in stdout_candidates:
@@ -125,7 +135,7 @@ def determine_status(
             tolerance,
         )
 
-    return ("PASS" if verification.correct else "FAIL", verification)
+    return (STATUS_PASS if verification.correct else STATUS_FAIL, verification)
 
 
 def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[str, Any]:
@@ -211,7 +221,7 @@ def generate_result(
         Result dictionary
     """
     run_config: Dict[str, Any] = {}
-    run_config_file = output_dir / "run_config.json"
+    run_config_file = output_dir / RUN_CONFIG_JSON_FILENAME
     if run_config_file.exists():
         try:
             payload = json.loads(run_config_file.read_text())
@@ -278,7 +288,7 @@ def generate_result(
             int(reference_omp_threads) if reference_omp_threads is not None else None
         ),
     )
-    diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != "PASS"))
+    diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != STATUS_PASS))
 
     # Build result
     result = {
@@ -296,7 +306,7 @@ def generate_result(
             "mode": verification_result.mode,
             "reference_omp_threads": verification_result.reference_omp_threads,
         },
-        "arts": {
+        VARIANT_ARTS: {
             "exit_code": arts_exit,
             "duration_sec": arts_duration,
             "checksum": arts_checksum,
@@ -306,7 +316,7 @@ def generate_result(
             "verification_timings": arts_verification,
             "cleanup_timings": arts_cleanup,
         },
-        "omp": {
+        VARIANT_OMP: {
             "exit_code": omp_exit,
             "duration_sec": omp_duration if omp_exit != -1 else None,
             "checksum": omp_checksum if omp_exit != -1 else None,
@@ -323,15 +333,15 @@ def generate_result(
         },
         "artifacts": {
             "run_dir": str(output_dir),
-            "slurm_out": str(output_dir / "slurm.out"),
-            "slurm_err": str(output_dir / "slurm.err"),
+            "slurm_out": str(output_dir / SLURM_OUT_FILENAME),
+            "slurm_err": str(output_dir / SLURM_ERR_FILENAME),
             "counter_dir": str(counter_dir) if counter_dir else None,
         },
         "diagnostics": diagnostics,
     }
 
-    if status == "PASS" and diagnostics.get("runtime_warning", {}).get("has_warning"):
-        result["status_detail"] = "WARN"
+    if status == STATUS_PASS and diagnostics.get("runtime_warning", {}).get("has_warning"):
+        result["status_detail"] = STATUS_WARN
 
     # Compute speedup if both ran
     if omp_exit != -1 and omp_duration > 0 and arts_duration > 0:

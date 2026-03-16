@@ -54,8 +54,27 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from benchmark_common import PERF_CACHE_EVENTS
+from common import (
+    ARTS_CFG_FILENAME,
+    COUNTERS_DIR_NAME,
+    FAIL_STATUSES,
+    JOB_MANIFEST_JSON_FILENAME,
+    MANIFEST_JSON_FILENAME,
+    PERF_DIR_NAME,
+    PERF_CACHE_EVENTS,
+    RESULT_JSON_FILENAME,
+    RESULTS_FILENAME,
+    STATUS_PASS,
+)
 from .models import (
+    SLURM_STATE_CANCELLED,
+    SLURM_STATE_COMPLETED,
+    SLURM_STATE_DRY_RUN,
+    SLURM_STATE_FAILED,
+    SLURM_STATE_PENDING,
+    SLURM_STATE_RUNNING,
+    SLURM_STATE_TIMEOUT,
+    SLURM_STATE_UNKNOWN,
     TERMINAL_JOB_STATES,
     SlurmBatchResult,
     SlurmJobConfig,
@@ -81,7 +100,7 @@ def _create_pending_job_status(job_id: str, config: SlurmJobConfig) -> SlurmJobS
         benchmark_name=config.benchmark_name,
         run_number=config.run_number,
         node_count=config.node_count,
-        state="PENDING",
+        state=SLURM_STATE_PENDING,
         run_dir=config.run_dir,
     )
 
@@ -303,10 +322,10 @@ def generate_sbatch_script(
 
     # CRITICAL: Use absolute paths - jobs may run from different working directories
     run_dir = config.run_dir.resolve()
-    counter_dir = run_dir / "counters"
-    result_json = run_dir / "result.json"
-    runtime_arts_cfg = run_dir / "arts.cfg"
-    perf_dir = run_dir / "perf" if config.perf else None
+    counter_dir = run_dir / COUNTERS_DIR_NAME
+    result_json = run_dir / RESULT_JSON_FILENAME
+    runtime_arts_cfg = run_dir / ARTS_CFG_FILENAME
+    perf_dir = run_dir / PERF_DIR_NAME if config.perf else None
 
     arts_config_abs = config.arts_config_path.resolve() if config.arts_config_path else None
     executable_arts_abs = config.executable_arts.resolve() if config.executable_arts else None
@@ -463,7 +482,7 @@ def generate_arts_config_for_node(
     content = base_config.read_text()
 
     # CRITICAL: Use absolute paths - jobs run from different working directories
-    counter_dir_placeholder = (build_node_dir / "counters").resolve()
+    counter_dir_placeholder = (build_node_dir / COUNTERS_DIR_NAME).resolve()
 
     content = _set_cfg_key(content, "counter_folder", str(counter_dir_placeholder))
     content = _set_cfg_key(content, "node_count", str(node_count))
@@ -476,7 +495,7 @@ def generate_arts_config_for_node(
     content = _comment_cfg_key(content, "master_node", "managed by SLURM")
 
     # Write to build directory (use absolute path)
-    config_path = (build_node_dir / "arts.cfg").resolve()
+    config_path = (build_node_dir / ARTS_CFG_FILENAME).resolve()
     build_node_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(content)
 
@@ -556,7 +575,7 @@ def submit_all_jobs(
             # Use fake job ID for dry run
             fake_id = f"DRY_{config.benchmark_name}_{config.run_number}"
             status = _create_pending_job_status(fake_id, config)
-            status.state = "DRY_RUN"
+            status.state = SLURM_STATE_DRY_RUN
             job_statuses[fake_id] = status
         return job_statuses, submission_failures
 
@@ -787,10 +806,10 @@ def poll_jobs(job_statuses: Dict[str, SlurmJobStatus]) -> Dict[str, str]:
         for job_id in job_ids:
             if job_id not in states:
                 fallback_state = _get_scontrol_status(job_id).state
-                if fallback_state == "UNKNOWN":
+                if fallback_state == SLURM_STATE_UNKNOWN:
                     existing_status = job_statuses[job_id]
                     if _has_completed_run_artifact(existing_status):
-                        states[job_id] = "UNKNOWN"
+                        states[job_id] = SLURM_STATE_UNKNOWN
                     else:
                         states[job_id] = existing_status.state
                 else:
@@ -863,7 +882,7 @@ def _query_sacct_statuses(job_ids: List[str]) -> Dict[str, SlurmJobStatus]:
     return statuses
 
 
-def _empty_slurm_status(job_id: str, state: str = "UNKNOWN") -> SlurmJobStatus:
+def _empty_slurm_status(job_id: str, state: str = SLURM_STATE_UNKNOWN) -> SlurmJobStatus:
     """Create a placeholder SLURM status when accounting data is unavailable."""
     return SlurmJobStatus(
         job_id=job_id,
@@ -876,7 +895,7 @@ def _empty_slurm_status(job_id: str, state: str = "UNKNOWN") -> SlurmJobStatus:
 
 def _get_scontrol_status(job_id: str) -> SlurmJobStatus:
     """Get the best-effort job status from scontrol."""
-    state = "UNKNOWN"
+    state = SLURM_STATE_UNKNOWN
     exit_code = None
     start_time = None
     end_time = None
@@ -920,14 +939,14 @@ def _get_scontrol_status(job_id: str) -> SlurmJobStatus:
 
 def _has_completed_run_artifact(status: SlurmJobStatus) -> bool:
     """Return True when the job produced its per-run result artifact."""
-    return bool(status.run_dir and (status.run_dir / "result.json").exists())
+    return bool(status.run_dir and (status.run_dir / RESULT_JSON_FILENAME).exists())
 
 
 def _is_effectively_terminal(status: SlurmJobStatus) -> bool:
     """Return whether the job can be treated as terminal for orchestration."""
     if status.state in TERMINAL_JOB_STATES:
         return True
-    return status.state == "UNKNOWN" and _has_completed_run_artifact(status)
+    return status.state == SLURM_STATE_UNKNOWN and _has_completed_run_artifact(status)
 
 
 def _apply_final_status_metadata(
@@ -966,13 +985,13 @@ def _build_job_state_table(
         state_counts[status.state] = state_counts.get(status.state, 0) + 1
 
     state_colors = {
-        "PENDING": Colors.SKIP,
-        "RUNNING": Colors.RUNNING,
-        "COMPLETED": Colors.PASS,
-        "FAILED": Colors.FAIL,
-        "TIMEOUT": Colors.FAIL,
-        "CANCELLED": Colors.SKIP,
-        "UNKNOWN": Colors.DIM,
+        SLURM_STATE_PENDING: Colors.SKIP,
+        SLURM_STATE_RUNNING: Colors.RUNNING,
+        SLURM_STATE_COMPLETED: Colors.PASS,
+        SLURM_STATE_FAILED: Colors.FAIL,
+        SLURM_STATE_TIMEOUT: Colors.FAIL,
+        SLURM_STATE_CANCELLED: Colors.SKIP,
+        SLURM_STATE_UNKNOWN: Colors.DIM,
     }
     for state, count in sorted(state_counts.items()):
         color = state_colors.get(state, Colors.DIM)
@@ -1179,7 +1198,7 @@ def write_job_manifest(
         },
     }
 
-    manifest_path = experiment_dir / "job_manifest.json"
+    manifest_path = experiment_dir / JOB_MANIFEST_JSON_FILENAME
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2, default=str)
 
@@ -1205,13 +1224,13 @@ def write_aggregated_results(
         "metadata": metadata,
         "summary": {
             "total_jobs": len(results),
-            "successful": sum(1 for r in results if r.get("status") == "PASS"),
-            "failed": sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT")),
+            "successful": sum(1 for r in results if r.get("status") == STATUS_PASS),
+            "failed": sum(1 for r in results if r.get("status") in FAIL_STATUSES),
         },
         "results": results,
     }
 
-    results_path = experiment_dir / "results.json"
+    results_path = experiment_dir / RESULTS_FILENAME
     with open(results_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
 
@@ -1230,16 +1249,16 @@ def write_slurm_manifest(
 
     This gives both run and run --slurm the same entry point for analysis tools.
     """
-    passed = sum(1 for r in results if r.get("status") == "PASS")
-    failed = sum(1 for r in results if r.get("status") in ("FAIL", "CRASH", "TIMEOUT"))
+    passed = sum(1 for r in results if r.get("status") == STATUS_PASS)
+    failed = sum(1 for r in results if r.get("status") in FAIL_STATUSES)
 
     manifest = {
         "version": 1,
         "created": datetime.now().isoformat(),
         "command": command,
         "layout": {
-            "results_json": "results.json",
-            "job_manifest": "job_manifest.json",
+            "results_json": RESULTS_FILENAME,
+            "job_manifest": JOB_MANIFEST_JSON_FILENAME,
         },
         "summary": {
             "total_jobs": len(results),
@@ -1250,7 +1269,7 @@ def write_slurm_manifest(
         "reproducibility": reproducibility,
     }
 
-    manifest_path = experiment_dir / "manifest.json"
+    manifest_path = experiment_dir / MANIFEST_JSON_FILENAME
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2, default=str)
 

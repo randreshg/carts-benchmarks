@@ -13,7 +13,7 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import benchmark_runner  # noqa: E402
+import runner  # noqa: E402
 
 
 class _FakeRunner:
@@ -38,20 +38,20 @@ class _CapturingExecutor:
 
 class SlurmBatchRequestConstructionTest(unittest.TestCase):
     def test_execute_slurm_batch_passes_max_jobs_to_request(self) -> None:
-        with mock.patch.object(benchmark_runner, "BenchmarkRunner", _FakeRunner), mock.patch.object(
-            benchmark_runner, "SlurmBatchExecutor", _CapturingExecutor
-        ), mock.patch.object(benchmark_runner, "require_slurm_commands", lambda dry_run: None), mock.patch.object(
-            benchmark_runner, "find_invalid_benchmarks", lambda runner, requested: []
+        with mock.patch.object(runner, "BenchmarkRunner", _FakeRunner), mock.patch.object(
+            runner, "SlurmBatchExecutor", _CapturingExecutor
+        ), mock.patch.object(runner, "require_slurm_commands", lambda dry_run: None), mock.patch.object(
+            runner, "find_invalid_benchmarks", lambda runner, requested: []
         ), mock.patch.object(
-            benchmark_runner, "find_multinode_disabled_benchmarks", lambda runner, bench_list: set()
+            runner, "find_multinode_disabled_benchmarks", lambda runner, bench_list: set()
         ), mock.patch.object(
-            benchmark_runner, "print_header", lambda *args, **kwargs: None
+            runner, "print_header", lambda *args, **kwargs: None
         ), mock.patch.object(
-            benchmark_runner, "print_info", lambda *args, **kwargs: None
+            runner, "print_info", lambda *args, **kwargs: None
         ), mock.patch.object(
-            benchmark_runner, "print_warning", lambda *args, **kwargs: None
+            runner, "print_warning", lambda *args, **kwargs: None
         ):
-            benchmark_runner._execute_slurm_batch(
+            runner._execute_slurm_batch(
                 benchmarks=["polybench/gemm"],
                 nodes="1",
                 size="small",

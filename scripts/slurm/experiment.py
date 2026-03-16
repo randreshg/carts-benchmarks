@@ -25,10 +25,19 @@ from carts_styles import (
     print_warning,
 )
 
-from benchmark_artifacts import ArtifactManager
-from benchmark_metadata import get_reproducibility_metadata
-from benchmark_models import BenchmarkConfig, ExperimentStep, ReferenceChecksum, Status
-from benchmark_report import generate_report_from_rows
+from artifacts import ArtifactManager
+from common import (
+    ARTS_CFG_FILENAME,
+    COUNTERS_DIR_NAME,
+    FAIL_STATUSES,
+    JOB_MANIFEST_JSON_FILENAME,
+    STATUS_PASS,
+    VARIANT_ARTS,
+    VARIANT_OPENMP,
+)
+from metadata import get_reproducibility_metadata
+from models import BenchmarkConfig, ExperimentStep, ReferenceChecksum, Status
+from report import generate_report_from_rows
 
 from . import batch as slurm_batch
 
@@ -443,7 +452,7 @@ class SlurmBatchExecutor:
 
                 dst_arts = build_node_dir / src_arts.name
                 dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
-                build_arts_cfg = build_node_dir / "arts.cfg"
+                build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
 
                 if dst_arts.exists() and build_arts_cfg.exists():
                     with print_lock:
@@ -455,7 +464,7 @@ class SlurmBatchExecutor:
                         self.host.build_benchmark(
                             bench,
                             self.request.size,
-                            variant="openmp",
+                            variant=VARIANT_OPENMP,
                             cflags=self.request.cflags or "",
                             build_output_dir=build_node_dir,
                         )
@@ -488,7 +497,7 @@ class SlurmBatchExecutor:
                 build_arts = self.host.build_benchmark(
                     bench,
                     self.request.size,
-                    variant="arts",
+                    variant=VARIANT_ARTS,
                     arts_config=build_arts_cfg,
                     cflags=self.request.cflags or "",
                     compile_args=self.request.compile_args,
@@ -515,7 +524,7 @@ class SlurmBatchExecutor:
                     build_omp = self.host.build_benchmark(
                         bench,
                         self.request.size,
-                        variant="openmp",
+                        variant=VARIANT_OPENMP,
                         cflags=self.request.cflags or "",
                         build_output_dir=build_node_dir,
                     )
@@ -579,7 +588,7 @@ class SlurmBatchExecutor:
                     run_num,
                     arts_cfg_path=build_arts_cfg,
                     runtime_arts_overrides={
-                        "counter_folder": str((run_dir / "counters").resolve())
+                        "counter_folder": str((run_dir / COUNTERS_DIR_NAME).resolve()),
                     },
                     size=self.request.size,
                     cflags=self.request.cflags,
@@ -681,7 +690,7 @@ class SlurmBatchExecutor:
             submitted_jobs=len(job_statuses),
             failed_submissions=failed_submissions,
         )
-        manifest_file = experiment_dir / "job_manifest.json"
+        manifest_file = experiment_dir / JOB_MANIFEST_JSON_FILENAME
         existing_job_statuses = load_existing_job_statuses(manifest_file)
         existing_job_statuses.update(job_statuses)
         manifest_path = slurm_batch.write_job_manifest(
@@ -758,11 +767,11 @@ class SlurmBatchExecutor:
             repro,
         )
 
-        successful = sum(1 for row in merged_results if row.get("status") == "PASS")
+        successful = sum(1 for row in merged_results if row.get("status") == STATUS_PASS)
         failed = sum(
             1
             for row in merged_results
-            if row.get("status") in ("FAIL", "CRASH", "TIMEOUT")
+            if row.get("status") in FAIL_STATUSES
         )
         summary_content = (
             f"{format_summary_line(successful, failed, len(merged_results) - successful - failed)}\n\n"

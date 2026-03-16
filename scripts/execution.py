@@ -7,11 +7,12 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from benchmark_common import PERF_CACHE_EVENTS
-from benchmark_models import BenchmarkConfig, Status
+from common import PERF_CACHE_EVENTS
+from models import BenchmarkConfig, Status
 
 from rich.console import Console
 
@@ -72,6 +73,7 @@ class BenchmarkProcessRequest:
     perf_output_name: str = "perf_cache.csv"
     perf_output_dir: Optional[Path] = None
     counter_dir: Optional[Path] = None
+    capture_diagnostics: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class ProcessExecutionOutcome:
     stdout: str
     stderr: str
     perf_output: Optional[Path] = None
+    startup_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 class BenchmarkProcessRunner:
@@ -118,6 +121,10 @@ class BenchmarkProcessRunner:
             cmd = self._wrap_with_perf(cmd, request, perf_output)
 
         self._print_debug_command(cmd, request.env)
+        if request.capture_diagnostics:
+            startup_diagnostics = self._capture_startup_diagnostics(request, cmd, run_env)
+        else:
+            startup_diagnostics: Dict[str, Any] = {}
 
         start = time.time()
         proc: Optional[subprocess.Popen[str]] = None
@@ -134,23 +141,33 @@ class BenchmarkProcessRunner:
             stdout_text, stderr_text = proc.communicate(timeout=request.timeout)
             duration = time.time() - start
             exit_code = proc.returncode if proc.returncode is not None else -1
+            if request.capture_diagnostics:
+                startup_diagnostics.update(
+                    self._finalize_startup_diagnostics(
+                        exit_code=exit_code,
+                        duration=duration,
+                        stdout_text=stdout_text,
+                        stderr_text=stderr_text,
+                    )
+                )
 
             self._write_run_log(
                 request,
                 cmd,
                 duration=duration,
                 exit_code=exit_code,
-                stdout_text=stdout_text or "",
-                stderr_text=stderr_text or "",
+                stdout_text=stdout_text,
+                stderr_text=stderr_text,
             )
 
             return ProcessExecutionOutcome(
                 status=self._status_from_exit_code(exit_code),
                 duration_sec=duration,
                 exit_code=exit_code,
-                stdout=stdout_text or "",
-                stderr=stderr_text or "",
+                stdout=stdout_text,
+                stderr=stderr_text,
                 perf_output=perf_output if perf_output and perf_output.exists() else None,
+                startup_diagnostics=startup_diagnostics,
             )
         except subprocess.TimeoutExpired as exc:
             duration = time.time() - start
@@ -171,6 +188,16 @@ class BenchmarkProcessRunner:
                 except Exception:
                     pass
 
+            if request.capture_diagnostics:
+                startup_diagnostics.update(
+                    self._finalize_startup_diagnostics(
+                        exit_code=124,
+                        duration=duration,
+                        stdout_text=stdout_text,
+                        stderr_text=f"{stderr_text}\n{timeout_note}".strip(),
+                        note=timeout_note,
+                    )
+                )
             self._write_run_log(
                 request,
                 cmd,
@@ -189,9 +216,20 @@ class BenchmarkProcessRunner:
                 stdout=stdout_text,
                 stderr=f"{stderr_text}\n{timeout_note}".strip(),
                 perf_output=perf_output if perf_output and perf_output.exists() else None,
+                startup_diagnostics=startup_diagnostics,
             )
         except Exception as exc:
             duration = time.time() - start
+            if request.capture_diagnostics:
+                startup_diagnostics.update(
+                    self._finalize_startup_diagnostics(
+                        exit_code=-1,
+                        duration=duration,
+                        stdout_text="",
+                        stderr_text=str(exc),
+                        note="Runner exception",
+                    )
+                )
             self._write_run_log(
                 request,
                 cmd,
@@ -208,6 +246,7 @@ class BenchmarkProcessRunner:
                 stdout="",
                 stderr=str(exc),
                 perf_output=perf_output if perf_output and perf_output.exists() else None,
+                startup_diagnostics=startup_diagnostics,
             )
 
     def _build_command(self, request: BenchmarkProcessRequest) -> List[str]:
@@ -372,3 +411,101 @@ class BenchmarkProcessRunner:
         if isinstance(value, bytes):
             return value.decode(errors="replace")
         return str(value)
+
+    def _capture_startup_diagnostics(
+        self,
+        request: BenchmarkProcessRequest,
+        cmd: List[str],
+        env: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Capture launch-time context used for startup outlier triage."""
+        return {
+            "captured_at": datetime.now().isoformat(),
+            "cwd": str(Path(request.executable).parent),
+            "launcher": request.launcher,
+            "node_count": request.node_count,
+            "threads": request.threads,
+            "timeout_sec": request.timeout,
+            "command": cmd,
+            "env": self._redact_env(env),
+            "network_snapshot_pre": self._snapshot_command(["ss", "-lntup"], timeout=3),
+            "process_snapshot_pre": self._snapshot_command(
+                ["ps", "-eo", "pid,ppid,pcpu,pmem,etime,comm"], timeout=3
+            ),
+        }
+
+    def _finalize_startup_diagnostics(
+        self,
+        *,
+        exit_code: int,
+        duration: float,
+        stdout_text: str,
+        stderr_text: str,
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Attach completion-side snapshots and compact output excerpts."""
+        payload: Dict[str, Any] = {
+            "completed_at": datetime.now().isoformat(),
+            "exit_code": exit_code,
+            "duration_sec": duration,
+            "stdout_preview": self._preview_lines(stdout_text),
+            "stderr_preview": self._preview_lines(stderr_text),
+            "network_snapshot_post": self._snapshot_command(["ss", "-lntup"], timeout=3),
+            "process_snapshot_post": self._snapshot_command(
+                ["ps", "-eo", "pid,ppid,pcpu,pmem,etime,comm"], timeout=3
+            ),
+        }
+        if note:
+            payload["note"] = note
+        return payload
+
+    @staticmethod
+    def _redact_env(env: Dict[str, str]) -> Dict[str, str]:
+        """Keep only runtime-relevant env vars."""
+        kept: Dict[str, str] = {}
+        allow_prefixes = ("OMP_", "ARTS_", "SLURM_", "counter_")
+        allow_exact = {
+            "PATH",
+            "LD_LIBRARY_PATH",
+            "PWD",
+            "HOME",
+            "USER",
+        }
+
+        for key, value in env.items():
+            if key in allow_exact or key.startswith(allow_prefixes):
+                kept[key] = str(value)
+        return kept
+
+    @staticmethod
+    def _preview_lines(text: str, max_lines: int = 20) -> List[str]:
+        lines = [line for line in text.splitlines() if line.strip()]
+        return lines[:max_lines]
+
+    @staticmethod
+    def _snapshot_command(command: List[str], timeout: int) -> Dict[str, Any]:
+        """Run a quick system snapshot command for diagnostics."""
+        snapshot: Dict[str, Any] = {
+            "command": command,
+            "ok": False,
+        }
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            snapshot["return_code"] = proc.returncode
+            snapshot["ok"] = proc.returncode == 0
+            stdout_lines = proc.stdout.splitlines()
+            stderr_lines = proc.stderr.splitlines()
+            snapshot["stdout"] = stdout_lines[:120]
+            snapshot["stderr"] = stderr_lines[:40]
+        except FileNotFoundError:
+            snapshot["error"] = f"{command[0]} not found"
+        except subprocess.TimeoutExpired:
+            snapshot["error"] = f"{command[0]} timed out after {timeout}s"
+        except Exception as exc:
+            snapshot["error"] = str(exc)
+        return snapshot

@@ -135,6 +135,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 run_dir=run_dir,
                 size="small",
                 threads=4,
+                timeout_seconds=60,
             )
 
             generate_sbatch_script(config, script_path, job_result_script)

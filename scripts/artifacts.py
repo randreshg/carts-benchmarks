@@ -17,8 +17,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from benchmark_models import BenchmarkConfig, BenchmarkResult, Status
-from benchmark_metadata import get_reproducibility_metadata
+from common import (
+    ARTS_CFG_FILENAME,
+    COUNTERS_DIR_NAME,
+    MANIFEST_JSON_FILENAME,
+    PERF_DIR_NAME,
+    REFERENCE_JSON_FILENAME,
+    RESULTS_FILENAME,
+    RUN_CONFIG_JSON_FILENAME,
+)
+from models import BenchmarkConfig, BenchmarkResult, Status
+from metadata import get_reproducibility_metadata
 
 
 def _get_carts_dir() -> Path:
@@ -77,8 +86,8 @@ class ArtifactManager:
     def __init__(self, base_results_dir: Path, timestamp: str):
         self.experiment_dir = base_results_dir / timestamp
         self.experiment_dir.mkdir(parents=True, exist_ok=True)
-        self.results_json_path = self.experiment_dir / "results.json"
-        self.manifest_path = self.experiment_dir / "manifest.json"
+        self.results_json_path = self.experiment_dir / RESULTS_FILENAME
+        self.manifest_path = self.experiment_dir / MANIFEST_JSON_FILENAME
         self._manifest_benchmarks: Dict[str, Dict] = {}
         self._phase_label: Optional[str] = None
 
@@ -105,12 +114,12 @@ class ArtifactManager:
         return d
 
     def get_counter_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
-        d = self.get_run_dir(benchmark_name, config, run_number) / "counters"
+        d = self.get_run_dir(benchmark_name, config, run_number) / COUNTERS_DIR_NAME
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def get_perf_dir(self, benchmark_name: str, config: BenchmarkConfig, run_number: int) -> Path:
-        d = self.get_run_dir(benchmark_name, config, run_number) / "perf"
+        d = self.get_run_dir(benchmark_name, config, run_number) / PERF_DIR_NAME
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -170,7 +179,7 @@ class ArtifactManager:
     ) -> Optional[Dict[str, Any]]:
         ref_file = self.get_reference_root(
             benchmark_name, size, omp_threads, cflags
-        ) / "reference.json"
+        ) / REFERENCE_JSON_FILENAME
         if not ref_file.exists():
             return None
         try:
@@ -188,7 +197,7 @@ class ArtifactManager:
         payload: Dict[str, Any],
     ) -> Path:
         ref_dir = self.get_reference_root(benchmark_name, size, omp_threads, cflags)
-        ref_file = ref_dir / "reference.json"
+        ref_file = ref_dir / REFERENCE_JSON_FILENAME
         with open(ref_file, "w") as f:
             json.dump(payload, f, indent=2, default=str)
         return ref_file
@@ -215,6 +224,7 @@ class ArtifactManager:
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
+        reporting: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """Save the effective arts.cfg and a run_config.json into the run directory.
 
@@ -225,7 +235,7 @@ class ArtifactManager:
 
         # Copy the effective arts.cfg used for this run
         if arts_cfg_path and arts_cfg_path.exists():
-            dest = run_dir / "arts.cfg"
+            dest = run_dir / ARTS_CFG_FILENAME
             content = arts_cfg_path.read_text()
             if runtime_arts_overrides:
                 content = _apply_arts_cfg_overrides(content, runtime_arts_overrides)
@@ -242,6 +252,23 @@ class ArtifactManager:
                 "arts_nodes": config.arts_nodes,
                 "omp_threads": config.omp_threads,
                 "launcher": config.launcher,
+            },
+            "reporting": reporting
+            if reporting is not None
+            else {
+                "mode": "median",
+                "startup_outlier_filter": {
+                    "enabled": True,
+                    "method": "modified_zscore_high",
+                    "z_threshold": 3.5,
+                    "min_runs": 3,
+                    "min_startup_sec": 0.05,
+                    "min_relative_multiplier": 1.25,
+                },
+                "startup_diagnostics": {
+                    "capture": "outlier_runs",
+                    "artifact": "startup_outlier_diagnostics.json",
+                },
             },
         }
         if size is not None:
@@ -283,7 +310,7 @@ class ArtifactManager:
             run_config["reference"] = reference
         run_config["timestamp"] = datetime.now().isoformat()
 
-        config_path = run_dir / "run_config.json"
+        config_path = run_dir / RUN_CONFIG_JSON_FILENAME
         with open(config_path, "w") as f:
             json.dump(run_config, f, indent=2, default=str)
 
@@ -354,7 +381,7 @@ class ArtifactManager:
             "created": datetime.now().isoformat(),
             "command": command,
             "layout": {
-                "results_json": "results.json",
+                "results_json": RESULTS_FILENAME,
                 "benchmarks": self._manifest_benchmarks,
             },
             "summary": {

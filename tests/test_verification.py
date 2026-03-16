@@ -12,8 +12,8 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from benchmark_models import Status  # noqa: E402
-from benchmark_verification import verify_against_omp, verify_against_reference  # noqa: E402
+from models import Status  # noqa: E402
+from verification import verify_against_omp, verify_against_reference  # noqa: E402
 from slurm.job_result import determine_status  # noqa: E402
 
 

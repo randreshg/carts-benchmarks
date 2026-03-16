@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from benchmark_models import Status, VerificationMode, VerificationResult
+from models import Status, VerificationMode, VerificationResult
 
 
 def _compare_checksum_values(

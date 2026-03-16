@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol, Tuple
 
-from benchmark_common import filter_benchmark_output
-from benchmark_execution import BenchmarkExecutionContext, BenchmarkRunFiles
-from benchmark_models import (
+from common import VARIANT_ARTS, VARIANT_OPENMP, filter_benchmark_output
+from execution import BenchmarkExecutionContext, BenchmarkRunFiles
+from models import (
     Artifacts,
     BenchmarkResult,
     BuildResult,
@@ -159,15 +159,15 @@ class ConfigExecutionExecutor:
 
     def _build_variants(self, hooks: ExecutionHooks) -> ConfigBuildOutputs:
         execution = self.plan.execution
-        variant = self.plan.variant  # None=both, "arts", "openmp"
+        variant = self.plan.variant  # None=both, VARIANT_ARTS, VARIANT_OPENMP
         skip_result = BuildResult(status=Status.SKIP, duration_sec=0.0, output="")
 
-        if variant != "openmp":
+        if variant != VARIANT_OPENMP:
             hooks.emit_phase(Phase.BUILD_ARTS)
             build_arts = self.host.build_benchmark(
                 execution.name,
                 execution.size,
-                "arts",
+                VARIANT_ARTS,
                 execution.effective_arts_cfg,
                 execution.effective_cflags,
                 self.plan.compile_args,
@@ -177,12 +177,12 @@ class ConfigExecutionExecutor:
             build_arts = skip_result
         hooks.store_partial("build_arts", build_arts)
 
-        if variant != "arts":
+        if variant != VARIANT_ARTS:
             hooks.emit_phase(Phase.BUILD_OMP)
             build_omp = self.host.build_benchmark(
                 execution.name,
                 execution.size,
-                "openmp",
+                VARIANT_OPENMP,
                 None,
                 execution.effective_cflags,
                 build_output_dir=execution.build_output_dir,
