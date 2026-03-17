@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol, Tuple
 
+from sniff import Colors
+from scripts.arts_config import KEY_COUNTER_FOLDER
 from common import VARIANT_ARTS, VARIANT_OPENMP, filter_benchmark_output
 from execution import BenchmarkExecutionContext, BenchmarkRunFiles
 from models import (
@@ -407,7 +409,7 @@ class ConfigExecutionExecutor:
             run_number,
             arts_cfg_path=run_cfg_path,
             runtime_arts_overrides=(
-                {"counter_folder": str(counter_path)}
+                {KEY_COUNTER_FOLDER: str(counter_path)}
                 if counter_path is not None
                 else None
             ),
@@ -437,21 +439,21 @@ class ConfigExecutionExecutor:
         arts_output = filter_benchmark_output(arts_combined)
         omp_output = filter_benchmark_output(omp_combined)
 
-        self.host.console.print(f"\n[bold cyan]═══ CARTS Output ({benchmark_name}) ═══[/]")
+        self.host.console.print(f"\n[{Colors.HEADER}]═══ CARTS Output ({benchmark_name}) ═══[/{Colors.HEADER}]")
         if arts_output:
             self.host.console.print(arts_output)
         elif arts_combined.strip():
             self.host.console.print(arts_combined.strip())
         else:
-            self.host.console.print("[dim](no benchmark output)[/]")
+            self.host.console.print(f"[{Colors.DEBUG}](no benchmark output)[/{Colors.DEBUG}]")
 
-        self.host.console.print(f"\n[bold green]═══ OMP Output ({benchmark_name}) ═══[/]")
+        self.host.console.print(f"\n[{Colors.SUCCESS}]═══ OMP Output ({benchmark_name}) ═══[/{Colors.SUCCESS}]")
         if omp_output:
             self.host.console.print(omp_output)
         elif omp_combined.strip():
             self.host.console.print(omp_combined.strip())
         else:
-            self.host.console.print("[dim](no benchmark output)[/]")
+            self.host.console.print(f"[{Colors.DEBUG}](no benchmark output)[/{Colors.DEBUG}]")
         self.host.console.print()
 
     @staticmethod

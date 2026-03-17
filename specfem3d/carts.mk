@@ -9,9 +9,4 @@ BENCHMARKS_ROOT := $(abspath $(SPECFEM3D_ROOT)/..)
 # Shared includes for SPECFEM3D suite
 INCLUDES ?= -I$(SPECFEM3D_ROOT)/common
 
-# Auto-detect arts.cfg at suite level
-ifneq ($(wildcard $(SPECFEM3D_ROOT)/arts.cfg),)
-  ARTS_CFG ?= $(SPECFEM3D_ROOT)/arts.cfg
-endif
-
 include $(BENCHMARKS_ROOT)/common/carts.mk

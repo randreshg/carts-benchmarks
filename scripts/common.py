@@ -62,6 +62,7 @@ BENCHMARK_CLEAN_FILE_GLOBS = [
     "*-metadata.json",
     ".carts-metadata.json",
     ".artsPrintLock",
+    "arts.cfg",
     "core",
     "core.*",
     "vgcore.*",

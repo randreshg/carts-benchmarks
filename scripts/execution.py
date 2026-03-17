@@ -15,6 +15,8 @@ from common import PERF_CACHE_EVENTS
 from models import BenchmarkConfig, Status
 
 from rich.console import Console
+from sniff import Colors
+from scripts.arts_config import KEY_COUNTER_FOLDER
 
 
 @dataclass(frozen=True)
@@ -112,7 +114,7 @@ class BenchmarkProcessRunner:
         if request.env:
             run_env.update(request.env)
         if request.counter_dir:
-            run_env["counter_folder"] = str(request.counter_dir)
+            run_env[KEY_COUNTER_FOLDER] = str(request.counter_dir)
 
         cmd = self._build_command(request)
         perf_output: Optional[Path] = None
@@ -307,13 +309,13 @@ class BenchmarkProcessRunner:
                 return True
             if self.verbose or self.debug >= 1:
                 self.console.print(
-                    "[yellow]Warning: perf not available (permission denied or not installed). "
-                    "Running without perf profiling.[/]"
+                    f"[{Colors.WARNING}]Warning: perf not available (permission denied or not installed). "
+                    f"Running without perf profiling.[/{Colors.WARNING}]"
                 )
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             if self.verbose or self.debug >= 1:
                 self.console.print(
-                    "[yellow]Warning: perf not found. Running without perf profiling.[/]"
+                    f"[{Colors.WARNING}]Warning: perf not found. Running without perf profiling.[/{Colors.WARNING}]"
                 )
         return False
 
@@ -322,9 +324,9 @@ class BenchmarkProcessRunner:
             return
         env_str = " ".join(f"{k}={v}" for k, v in env.items())
         if env_str:
-            self.console.print(f"[dim]$ {env_str} {' '.join(cmd)}[/]")
+            self.console.print(f"[{Colors.DEBUG}]$ {env_str} {' '.join(cmd)}[/{Colors.DEBUG}]")
         else:
-            self.console.print(f"[dim]$ {' '.join(cmd)}[/]")
+            self.console.print(f"[{Colors.DEBUG}]$ {' '.join(cmd)}[/{Colors.DEBUG}]")
 
     def _write_run_log(
         self,
@@ -343,11 +345,11 @@ class BenchmarkProcessRunner:
                 lines = (stdout_text + stderr_text).strip().split("\n")
                 if len(lines) > 10:
                     self.console.print(
-                        f"[dim]  ({len(lines)} lines of output, use log_file to capture)[/]"
+                        f"[{Colors.DEBUG}]  ({len(lines)} lines of output, use log_file to capture)[/{Colors.DEBUG}]"
                     )
                 elif lines and lines[0]:
                     for line in lines[:10]:
-                        self.console.print(f"[dim]  {line}[/]")
+                        self.console.print(f"[{Colors.DEBUG}]  {line}[/{Colors.DEBUG}]")
             return
 
         request.log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -372,7 +374,7 @@ class BenchmarkProcessRunner:
                     handle.write("\n")
 
         if self.debug >= 2:
-            self.console.print(f"[dim]  Log: {request.log_file}[/]")
+            self.console.print(f"[{Colors.DEBUG}]  Log: {request.log_file}[/{Colors.DEBUG}]")
 
     def _terminate_timed_out_process(self, proc: subprocess.Popen[str]) -> None:
         try:

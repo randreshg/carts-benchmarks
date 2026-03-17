@@ -263,23 +263,23 @@ gcc -O2 -fopenmp -lm batchnorm.c -o batchnorm -DBATCH_SIZE=4 -DCHANNELS=64 -DHEI
 
 ### Build with CARTS
 ```bash
-cd /Users/randreshg/Documents/carts
+cd carts
 
 # Batch normalization
-./tools/carts cgeist \
+carts cgeist \
   external/carts-benchmarks/ml-kernels/batchnorm/batchnorm.c \
   -DBATCH_SIZE=4 -DCHANNELS=64 -DHEIGHT=32 -DWIDTH=32 \
   -fopenmp -O2 -lm
 
 # Pooling
-./tools/carts cgeist \
+carts cgeist \
   external/carts-benchmarks/ml-kernels/pooling/pooling.c \
   -DBATCH_SIZE=4 -DCHANNELS=64 -DHEIGHT=64 -DWIDTH=64 \
   -DPOOL_SIZE=2 -DSTRIDE=2 \
   -fopenmp -O2 -lm
 
 # Activations
-./tools/carts cgeist \
+carts cgeist \
   external/carts-benchmarks/ml-kernels/activations/activations.c \
   -DSIZE=1048576 \
   -fopenmp -O2 -lm

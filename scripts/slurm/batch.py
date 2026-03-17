@@ -41,11 +41,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from carts_styles import (
+from sniff import (
+    Colors,
     console as _shared_console,
-    Colors, Symbols,
-    print_header, print_footer, print_step, print_success, print_error,
+    print_header, print_step, print_success, print_error,
     print_warning, print_info,
+)
+from carts_styles import print_footer
+from scripts.arts_config import (
+    KEY_COUNTER_FOLDER,
+    KEY_LAUNCHER,
+    KEY_MASTER_NODE,
+    KEY_NODE_COUNT,
+    KEY_NODES,
+    KEY_WORKER_THREADS,
+    upsert_cfg_value as _set_cfg_key,
+    comment_cfg_key as _comment_cfg_key,
 )
 
 from rich.console import Console
@@ -439,25 +450,6 @@ def generate_sbatch_script(
     script_path.chmod(0o755)
 
 
-def _set_cfg_key(content: str, key: str, value: str) -> str:
-    """Set a key=value in arts.cfg content, adding it after [ARTS] if absent."""
-    pattern = rf"^{re.escape(key)}\s*=.*$"
-    replacement = f"{key}={value}"
-    if re.search(pattern, content, re.MULTILINE):
-        return re.sub(pattern, replacement, content, flags=re.MULTILINE)
-    return content.replace("[ARTS]", f"[ARTS]\n{replacement}", 1)
-
-
-def _comment_cfg_key(content: str, key: str, reason: str) -> str:
-    """Comment out a key in arts.cfg content."""
-    pattern = rf"^{re.escape(key)}\s*=.*$"
-    if re.search(pattern, content, re.MULTILINE):
-        return re.sub(
-            pattern, f"# {key}= ({reason})", content, flags=re.MULTILINE
-        )
-    return content
-
-
 def generate_arts_config_for_node(
     base_config: Path,
     build_node_dir: Path,
@@ -484,15 +476,15 @@ def generate_arts_config_for_node(
     # CRITICAL: Use absolute paths - jobs run from different working directories
     counter_dir_placeholder = (build_node_dir / COUNTERS_DIR_NAME).resolve()
 
-    content = _set_cfg_key(content, "counter_folder", str(counter_dir_placeholder))
-    content = _set_cfg_key(content, "node_count", str(node_count))
-    content = _set_cfg_key(content, "worker_threads", str(threads))
-    content = _set_cfg_key(content, "launcher", "slurm")
+    content = _set_cfg_key(content, KEY_COUNTER_FOLDER, str(counter_dir_placeholder))
+    content = _set_cfg_key(content, KEY_NODE_COUNT, str(node_count))
+    content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
+    content = _set_cfg_key(content, KEY_LAUNCHER, "slurm")
 
     # Clear nodes and master_node - SLURM launcher ignores these.
     # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)
-    content = _comment_cfg_key(content, "nodes", "managed by SLURM")
-    content = _comment_cfg_key(content, "master_node", "managed by SLURM")
+    content = _comment_cfg_key(content, KEY_NODES, "managed by SLURM")
+    content = _comment_cfg_key(content, KEY_MASTER_NODE, "managed by SLURM")
 
     # Write to build directory (use absolute path)
     config_path = (build_node_dir / ARTS_CFG_FILENAME).resolve()
@@ -977,7 +969,7 @@ def _build_job_state_table(
 ) -> Table:
     """Create the standard SLURM job-state table used by live displays."""
     table = Table(title=title, box=None)
-    table.add_column("State", style="bold")
+    table.add_column("State", style=Colors.HIGHLIGHT)
     table.add_column("Count", justify="right")
 
     state_counts: Dict[str, int] = {}
@@ -988,8 +980,8 @@ def _build_job_state_table(
         SLURM_STATE_PENDING: Colors.SKIP,
         SLURM_STATE_RUNNING: Colors.RUNNING,
         SLURM_STATE_COMPLETED: Colors.PASS,
-        SLURM_STATE_FAILED: Colors.FAIL,
-        SLURM_STATE_TIMEOUT: Colors.FAIL,
+        SLURM_STATE_FAILED: Colors.ERROR,
+        SLURM_STATE_TIMEOUT: Colors.ERROR,
         SLURM_STATE_CANCELLED: Colors.SKIP,
         SLURM_STATE_UNKNOWN: Colors.DIM,
     }
@@ -1006,18 +998,18 @@ def _build_job_state_table(
     ):
         table.add_row("", "")
         if active_count is not None:
-            table.add_row("[bold]Active[/bold]", str(active_count))
+            table.add_row(f"[{Colors.HIGHLIGHT}]Active[/{Colors.HIGHLIGHT}]", str(active_count))
         if queued_count is not None:
-            table.add_row("[bold]Queued[/bold]", str(queued_count))
+            table.add_row(f"[{Colors.HIGHLIGHT}]Queued[/{Colors.HIGHLIGHT}]", str(queued_count))
         if failed_submissions:
             table.add_row(
-                f"[{Colors.FAIL}]Submit failures[/{Colors.FAIL}]",
+                f"[{Colors.ERROR}]Submit failures[/{Colors.ERROR}]",
                 str(failed_submissions),
             )
         if poll_status_label is not None:
-            table.add_row("[bold]Polling[/bold]", poll_status_label)
+            table.add_row(f"[{Colors.HIGHLIGHT}]Polling[/{Colors.HIGHLIGHT}]", poll_status_label)
         if last_poll_label is not None:
-            table.add_row("[bold]Last poll[/bold]", last_poll_label)
+            table.add_row(f"[{Colors.HIGHLIGHT}]Last poll[/{Colors.HIGHLIGHT}]", last_poll_label)
 
     return table
 

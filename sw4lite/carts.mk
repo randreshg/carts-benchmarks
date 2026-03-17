@@ -9,9 +9,4 @@ BENCHMARKS_ROOT := $(abspath $(SW4LITE_ROOT)/..)
 # Shared includes for SW4Lite suite
 INCLUDES ?= -I$(SW4LITE_ROOT)/common
 
-# Auto-detect arts.cfg at suite level
-ifneq ($(wildcard $(SW4LITE_ROOT)/arts.cfg),)
-  ARTS_CFG ?= $(SW4LITE_ROOT)/arts.cfg
-endif
-
 include $(BENCHMARKS_ROOT)/common/carts.mk

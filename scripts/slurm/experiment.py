@@ -15,15 +15,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
-from carts_styles import (
+from sniff import (
+    Colors,
     console,
-    format_summary_line,
-    print_footer,
     print_info,
     print_step,
     print_success,
     print_warning,
 )
+from scripts import format_summary_line
+from carts_styles import print_footer
+from scripts.arts_config import KEY_COUNTER_FOLDER
 
 from artifacts import ArtifactManager
 from common import (
@@ -432,8 +434,8 @@ class SlurmBatchExecutor:
                     )
                 with print_lock:
                     console.print(
-                        f"  {bench} multinode reference checksum... [green]OK[/] "
-                        f"[dim]({reference.checksum}, {self.request.threads} OMP threads)[/]"
+                        f"  {bench} multinode reference checksum... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}] "
+                        f"[{Colors.DEBUG}]({reference.checksum}, {self.request.threads} OMP threads)[/{Colors.DEBUG}]"
                     )
                 reference_checksums[bench] = reference
 
@@ -458,7 +460,7 @@ class SlurmBatchExecutor:
                     with print_lock:
                         console.print(
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
-                            "[cyan]SKIP (exists)[/]"
+                            f"[{Colors.INFO}]SKIP (exists)[/{Colors.INFO}]"
                         )
                     if node_count == 1 and dst_omp and not dst_omp.exists():
                         self.host.build_benchmark(
@@ -484,7 +486,7 @@ class SlurmBatchExecutor:
                     with print_lock:
                         console.print(
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
-                            "[red]MISSING (--no-build)[/]"
+                            f"[{Colors.ERROR}]MISSING (--no-build)[/{Colors.ERROR}]"
                         )
                     continue
 
@@ -506,7 +508,7 @@ class SlurmBatchExecutor:
                 if build_arts.status != Status.PASS:
                     with print_lock:
                         console.print(
-                            f"  {bench} (nodes={node_count}, threads={self.request.threads})... [red]FAILED[/]"
+                            f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.ERROR}]FAILED[/{Colors.ERROR}]"
                         )
                         if self.request.verbose:
                             console.print(f"    {build_arts.output[:200]}...")
@@ -515,7 +517,7 @@ class SlurmBatchExecutor:
                     with print_lock:
                         console.print(
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
-                            "[red]FAILED (missing ARTS executable in artifacts dir)[/]"
+                            f"[{Colors.ERROR}]FAILED (missing ARTS executable in artifacts dir)[/{Colors.ERROR}]"
                         )
                     continue
 
@@ -534,7 +536,7 @@ class SlurmBatchExecutor:
 
                 with print_lock:
                     console.print(
-                        f"  {bench} (nodes={node_count}, threads={self.request.threads})... [green]OK[/]"
+                        f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
                     )
                 results.append(((bench, node_count), (dst_arts, dst_omp, build_arts_cfg)))
             return results
@@ -588,7 +590,7 @@ class SlurmBatchExecutor:
                     run_num,
                     arts_cfg_path=build_arts_cfg,
                     runtime_arts_overrides={
-                        "counter_folder": str((run_dir / COUNTERS_DIR_NAME).resolve()),
+                        KEY_COUNTER_FOLDER: str((run_dir / COUNTERS_DIR_NAME).resolve()),
                     },
                     size=self.request.size,
                     cflags=self.request.cflags,
@@ -781,7 +783,7 @@ class SlurmBatchExecutor:
         )
         if report_path:
             summary_content += f"\nReport: {report_path}"
-        style = "green" if failed == 0 else "red"
+        style = Colors.SUCCESS if failed == 0 else Colors.ERROR
         print_footer(f"Experiment Complete — {summary_content}", style=style)
 
         if failed_submissions > 0:

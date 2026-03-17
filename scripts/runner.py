@@ -38,17 +38,29 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import typer
 
-from carts_styles import (
-    console as _shared_console,
+from sniff import (
     Colors, Symbols,
-    print_header, print_footer, print_step, print_success, print_error,
+    console as _shared_console,
+    print_header, print_step, print_success, print_error,
     print_warning, print_info, print_debug as _print_debug,
-    create_progress as _create_progress, create_results_table,
-    create_summary_panel as _create_summary_panel_styles,
-    format_summary_line, format_passed, format_failed, format_skipped,
-    status_symbol as _status_symbol_str,
 )
-from scripts.arts_config import parse_arts_cfg as _shared_parse_arts_cfg
+from scripts import format_passed, format_failed, format_skipped
+from scripts.arts_config import (
+    parse_arts_cfg,
+    EMBEDDED_KEYS,
+    KEY_COUNTER_FOLDER,
+    KEY_LAUNCHER,
+    KEY_MASTER_NODE,
+    KEY_NODE_COUNT,
+    KEY_NODES,
+    KEY_WORKER_THREADS,
+    get_cfg_int as get_arts_cfg_int,
+    get_cfg_str as get_arts_cfg_str,
+    get_cfg_nodes as get_arts_cfg_nodes,
+    upsert_cfg_value as _upsert_arts_cfg_value,
+    extract_embedded_cfg as _extract_embedded_arts_cfg,
+    validate_embedded_cfg as _validate_embedded_arts_cfg,
+)
 
 from rich import box
 from rich.console import Console, Group
@@ -242,11 +254,6 @@ DEFAULT_STARTUP_OUTLIER_POLICY: Dict[str, Any] = {
 DEFAULT_PERF_GATE_POLICY = (
     CONFIGS_DIR / "perf-gates" / "openmp-surpass-stable-subset.json"
 )
-
-
-def get_benchmarks_dir() -> Path:
-    """Get the benchmarks directory."""
-    return BENCHMARKS_DIR
 
 
 # ============================================================================
@@ -514,15 +521,6 @@ def _sanitize_config_token(value: str, fallback: str = "default") -> str:
     return token or fallback
 
 
-def _upsert_arts_cfg_value(content: str, key: str, value: object) -> str:
-    """Replace or insert one top-level ARTS config assignment."""
-    line = f"{key}={value}"
-    pattern = rf"^{re.escape(key)}\s*=.*$"
-    if re.search(pattern, content, re.MULTILINE):
-        return re.sub(pattern, line, content, flags=re.MULTILINE)
-    return content.replace("[ARTS]", f"[ARTS]\n{line}", 1)
-
-
 def generate_arts_config(
     base_path: Path,
     threads: int,
@@ -554,11 +552,11 @@ def generate_arts_config(
     content = base_path.read_text()
 
     # CLI --threads maps to ARTS worker_threads in the v2 runtime schema.
-    content = _upsert_arts_cfg_value(content, "worker_threads", threads)
+    content = _upsert_arts_cfg_value(content, KEY_WORKER_THREADS, threads)
 
     # Handle node override.
     if nodes_override is not None:
-        content = _upsert_arts_cfg_value(content, "node_count", nodes_override)
+        content = _upsert_arts_cfg_value(content, KEY_NODE_COUNT, nodes_override)
         if launcher == "ssh":
             all_nodes = get_arts_cfg_nodes(base_path)
             if nodes_override > len(all_nodes):
@@ -568,19 +566,19 @@ def generate_arts_config(
                     f"Example: carts benchmarks run --arts-config /opt/carts/docker/arts-docker.cfg --nodes {nodes_override}"
                 )
             truncated = all_nodes[:nodes_override]
-            content = _upsert_arts_cfg_value(content, "nodes", ",".join(truncated))
-            content = _upsert_arts_cfg_value(content, "master_node", truncated[0])
+            content = _upsert_arts_cfg_value(content, KEY_NODES, ",".join(truncated))
+            content = _upsert_arts_cfg_value(content, KEY_MASTER_NODE, truncated[0])
 
     # Update launcher
-    content = _upsert_arts_cfg_value(content, "launcher", launcher)
+    content = _upsert_arts_cfg_value(content, KEY_LAUNCHER, launcher)
 
     # Add counter settings if requested
     if counter_dir:
-        content = _upsert_arts_cfg_value(content, "counter_folder", counter_dir)
+        content = _upsert_arts_cfg_value(content, KEY_COUNTER_FOLDER, counter_dir)
 
     # Determine node count for filename
     node_count = nodes_override if nodes_override else get_arts_cfg_int(
-        base_path, "node_count") or 1
+        base_path, KEY_NODE_COUNT) or 1
 
     # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
     # The carts-benchmarks directory is shared across all nodes via mounted volume.
@@ -623,116 +621,6 @@ def _resolve_effective_arts_config(
     return DEFAULT_ARTS_CONFIG.resolve()
 
 
-def parse_arts_cfg(path: Optional[Path]) -> Dict[str, str]:
-    """Parse an ARTS config file (arts.cfg) into a key/value dict.
-
-    Delegates to shared implementation in scripts.arts_config.
-    """
-    return _shared_parse_arts_cfg(path)
-
-
-_EMBEDDED_ARTS_CFG_KEYS = (
-    "worker_threads",
-    "receiver_threads",
-    "sender_threads",
-    "node_count",
-    "launcher",
-    "protocol",
-    "default_ports",
-)
-
-
-def _read_text_lossy(path: Path) -> str:
-    """Read a text or binary artifact into a string for inspection."""
-    try:
-        return path.read_text(errors="replace")
-    except Exception:
-        try:
-            return path.read_bytes().decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-
-def _extract_embedded_arts_cfg(artifacts_dir: Path) -> Dict[str, str]:
-    """Extract embedded ARTS config values from LLVM IR or executable output."""
-    candidates = sorted(artifacts_dir.glob("*-arts.ll"))
-    if not candidates:
-        candidates = sorted(artifacts_dir.glob("*_arts"))
-
-    for candidate in candidates:
-        text = _read_text_lossy(candidate)
-        if not text:
-            continue
-
-        embedded: Dict[str, str] = {}
-        for key in _EMBEDDED_ARTS_CFG_KEYS:
-            match = re.search(
-                rf"{re.escape(key)}=(.*?)(?:\\0A|\x00|\r|\n|\")",
-                text,
-            )
-            if match:
-                embedded[key] = match.group(1)
-        if embedded:
-            return embedded
-
-    return {}
-
-
-def _validate_embedded_arts_cfg(
-    artifacts_dir: Path,
-    expected_cfg: Optional[Path],
-) -> Optional[str]:
-    """Return an error string if the built artifact embeds the wrong config."""
-    if expected_cfg is None or not expected_cfg.exists():
-        return None
-
-    expected = parse_arts_cfg(expected_cfg)
-    if not expected:
-        return f"Failed to parse expected arts.cfg: {expected_cfg}"
-
-    embedded = _extract_embedded_arts_cfg(artifacts_dir)
-    if not embedded:
-        return (
-            "Failed to inspect generated ARTS artifact for embedded config "
-            f"in {artifacts_dir}"
-        )
-
-    mismatches: List[str] = []
-    for key in _EMBEDDED_ARTS_CFG_KEYS:
-        expected_value = expected.get(key)
-        if expected_value is None:
-            continue
-        embedded_value = embedded.get(key)
-        if embedded_value != expected_value:
-            mismatches.append(
-                f"{key}: expected '{expected_value}', embedded '{embedded_value}'"
-            )
-
-    if not mismatches:
-        return None
-
-    return (
-        "Generated ARTS artifact embeds a different config than the compile-time "
-        f"arts.cfg. cfg={expected_cfg}, artifacts={artifacts_dir}. "
-        + "; ".join(mismatches)
-    )
-
-
-def get_arts_cfg_int(path: Optional[Path], key: str) -> Optional[int]:
-    vals = parse_arts_cfg(path)
-    if key not in vals:
-        return None
-    try:
-        return int(vals[key])
-    except Exception:
-        logger.debug("Failed to convert arts.cfg key '%s' to int", key, exc_info=True)
-        return None
-
-
-def get_arts_cfg_str(path: Optional[Path], key: str) -> Optional[str]:
-    vals = parse_arts_cfg(path)
-    v = vals.get(key)
-    return v if v else None
 
 
 def parse_node_spec(spec: str) -> List[int]:
@@ -780,14 +668,6 @@ def parse_node_spec(spec: str) -> List[int]:
     return sorted(result)
 
 
-def get_arts_cfg_nodes(path: Optional[Path]) -> List[str]:
-    """Parse nodes= field from arts.cfg into list of hostnames.
-
-    Returns list of hostnames from the nodes= field, or ["localhost"] if not found.
-    """
-    cfg = parse_arts_cfg(path)
-    nodes_str = cfg.get("nodes", "localhost")
-    return [n.strip() for n in nodes_str.split(",") if n.strip()]
 
 
 
@@ -818,7 +698,7 @@ class BenchmarkRunner:
         self.debug = debug
         self.artifact_manager = artifact_manager
         self.carts_dir = get_carts_dir()
-        self.benchmarks_dir = get_benchmarks_dir()
+        self.benchmarks_dir = BENCHMARKS_DIR
         self.results: List[BenchmarkResult] = []
         self._reference_cache: Dict[Tuple[str, str, str, int], ReferenceChecksum] = {}
 
@@ -1245,10 +1125,10 @@ class BenchmarkRunner:
             env_prefix = " ".join(f"{k}={v}" for k, v in env_overrides.items())
             if env_prefix:
                 self.console.print(
-                    f"[dim]$ cd {bench_path} && {env_prefix} {' '.join(cmd)}[/]"
+                    f"[{Colors.DEBUG}]$ cd {bench_path} && {env_prefix} {' '.join(cmd)}[/{Colors.DEBUG}]"
                 )
             else:
-                self.console.print(f"[dim]$ cd {bench_path} && {' '.join(cmd)}[/]")
+                self.console.print(f"[{Colors.DEBUG}]$ cd {bench_path} && {' '.join(cmd)}[/{Colors.DEBUG}]")
 
         start = time.time()
 
@@ -1277,7 +1157,7 @@ class BenchmarkRunner:
                     if result.stderr:
                         f.write("=== STDERR ===\n")
                         f.write(result.stderr)
-                self.console.print(f"[dim]  Log: {log_file}[/]")
+                self.console.print(f"[{Colors.DEBUG}]  Log: {log_file}[/{Colors.DEBUG}]")
 
             if result.returncode == 0:
                 expected_exe = arts_output_path if variant != VARIANT_OPENMP else omp_output_path
@@ -1637,9 +1517,9 @@ class BenchmarkRunner:
         # Determine effective config template
         effective_config = _resolve_effective_arts_config(bench_path, base_config)
 
-        base_nodes = get_arts_cfg_int(effective_config, "node_count") or 1
-        base_threads = get_arts_cfg_int(effective_config, "worker_threads") or 1
-        base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
+        base_nodes = get_arts_cfg_int(effective_config, KEY_NODE_COUNT) or 1
+        base_threads = get_arts_cfg_int(effective_config, KEY_WORKER_THREADS) or 1
+        base_launcher = get_arts_cfg_str(effective_config, KEY_LAUNCHER) or "ssh"
         desired_launcher = launcher if launcher is not None else base_launcher
 
         effective_node_counts = [n if n is not None else base_nodes
@@ -2061,9 +1941,9 @@ class BenchmarkRunner:
         # Determine effective config template.
         effective_config = _resolve_effective_arts_config(bench_path, arts_config)
 
-        base_threads = get_arts_cfg_int(effective_config, "worker_threads") or 1
-        base_nodes = get_arts_cfg_int(effective_config, "node_count") or 1
-        base_launcher = get_arts_cfg_str(effective_config, "launcher") or "ssh"
+        base_threads = get_arts_cfg_int(effective_config, KEY_WORKER_THREADS) or 1
+        base_nodes = get_arts_cfg_int(effective_config, KEY_NODE_COUNT) or 1
+        base_launcher = get_arts_cfg_str(effective_config, KEY_LAUNCHER) or "ssh"
 
         desired_threads = threads_override if threads_override is not None else base_threads
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
@@ -2267,7 +2147,7 @@ class BenchmarkRunner:
                     except Exception as e:
                         # Log error and continue to next benchmark
                         self.console.print(
-                            f"[red]Error running {bench}:[/] {e}")
+                            f"[{Colors.ERROR}]Error running {bench}:[/{Colors.ERROR}] {e}")
                         result = self._make_error_result(bench, size, str(e))
 
                     # Update results and refresh display
@@ -2320,7 +2200,7 @@ class BenchmarkRunner:
                         results_list.append(result)
                     except Exception as e:
                         self.console.print(
-                            f"[red]Error running {bench}:[/] {e}")
+                            f"[{Colors.ERROR}]Error running {bench}:[/{Colors.ERROR}] {e}")
                         results_list.append(
                             self._make_error_result(bench, size, str(e)))
 
@@ -2356,7 +2236,7 @@ class BenchmarkRunner:
                         results_list.append(result)
                     except Exception as e:
                         self.console.print(
-                            f"[red]Error running {bench}:[/] {e}")
+                            f"[{Colors.ERROR}]Error running {bench}:[/{Colors.ERROR}] {e}")
                         error_result = self._make_error_result(
                             bench, size, str(e))
                         results_dict[bench] = error_result
@@ -2628,36 +2508,40 @@ def _run_single_worker(
 # ============================================================================
 
 
+_STATUS_TEXT_STYLES: dict[Status, tuple[str, str]] = {
+    Status.PASS:    (Colors.SUCCESS, "PASS"),
+    Status.FAIL:    (Colors.ERROR,   "FAIL"),
+    Status.CRASH:   (Colors.ERROR,   "CRASH"),
+    Status.TIMEOUT: (Colors.WARNING, "TIMEOUT"),
+    Status.SKIP:    (Colors.DEBUG,   "SKIP"),
+}
+
+
 def status_text(status: Status) -> Text:
     """Create colored text for a status."""
-    if status == Status.PASS:
-        return Text("PASS", style="bold green")
-    elif status == Status.FAIL:
-        return Text("FAIL", style="bold red")
-    elif status == Status.CRASH:
-        return Text("CRASH", style="bold red")
-    elif status == Status.TIMEOUT:
-        return Text("TIMEOUT", style="bold yellow")
-    elif status == Status.SKIP:
-        return Text("SKIP", style="dim")
-    else:
-        return Text("N/A", style="dim")
+    entry = _STATUS_TEXT_STYLES.get(status)
+    if entry is None:
+        return Text("N/A", style=Colors.DEBUG)
+    style, label = entry
+    return Text(label, style=style)
+
+
+_STATUS_SYMBOL_STYLES: dict[Status, tuple[str, str]] = {
+    Status.PASS:    (Colors.SUCCESS, Symbols.PASS),
+    Status.FAIL:    (Colors.ERROR,   Symbols.FAIL),
+    Status.CRASH:   (Colors.ERROR,   Symbols.FAIL),
+    Status.TIMEOUT: (Colors.WARNING, Symbols.TIMEOUT),
+    Status.SKIP:    (Colors.DEBUG,   Symbols.SKIP),
+}
 
 
 def status_symbol(status: Status) -> str:
     """Get symbol for a status."""
-    if status == Status.PASS:
-        return "[green]\u2713[/]"
-    elif status == Status.FAIL:
-        return "[red]\u2717[/]"
-    elif status == Status.CRASH:
-        return "[red]\u2717[/]"
-    elif status == Status.TIMEOUT:
-        return "[yellow]\u23f1[/]"
-    elif status == Status.SKIP:
-        return "[dim]\u25cb[/]"
-    else:
-        return "[dim]-[/]"
+    entry = _STATUS_SYMBOL_STYLES.get(status)
+    if entry is None:
+        return f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+    color, symbol = entry
+    return f"[{color}]{symbol}[/{color}]"
 
 
 def benchmark_result_passed(result: BenchmarkResult) -> bool:
@@ -3138,9 +3022,9 @@ def format_e2e_time(run_result: RunResult) -> Tuple[Optional[float], str]:
 
 def create_results_table(results: List[BenchmarkResult]) -> Table:
     """Create a rich table from benchmark results."""
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
+    table = Table(box=box.ROUNDED, show_header=True, header_style=Colors.HIGHLIGHT)
 
-    table.add_column("Benchmark", style="cyan", no_wrap=True)
+    table.add_column("Benchmark", style=Colors.INFO, no_wrap=True)
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("A.Startup", justify="right")
@@ -3161,9 +3045,9 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
 
         # ARTS E2E: skip → compile failure → runtime failure → success
         if r.build_arts.status == Status.SKIP:
-            run_arts = "[dim]- Skip[/]"
+            run_arts = f"[{Colors.DEBUG}]- Skip[/{Colors.DEBUG}]"
         elif r.build_arts.status != Status.PASS:
-            run_arts = "[red]\u2717 Compile[/]"
+            run_arts = f"[{Colors.ERROR}]{Symbols.FAIL} Compile[/{Colors.ERROR}]"
         elif r.run_arts.status == Status.PASS:
             if arts_e2e is not None:
                 run_arts = f"{status_symbol(r.run_arts.status)} {arts_e2e_str}"
@@ -3175,13 +3059,13 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                     run_arts = f"{status_symbol(r.run_arts.status)} {r.run_arts.duration_sec:.2f}s*"
                 has_fallback = True
         else:
-            run_arts = "[red]\u2717 Runtime[/]"
+            run_arts = f"[{Colors.ERROR}]{Symbols.FAIL} Runtime[/{Colors.ERROR}]"
 
         # OMP E2E: skip → compile failure → runtime failure → success
         if r.build_omp.status == Status.SKIP:
-            run_omp = "[dim]- Skip[/]"
+            run_omp = f"[{Colors.DEBUG}]- Skip[/{Colors.DEBUG}]"
         elif r.build_omp.status != Status.PASS:
-            run_omp = "[red]\u2717 Compile[/]"
+            run_omp = f"[{Colors.ERROR}]{Symbols.FAIL} Compile[/{Colors.ERROR}]"
         elif r.run_omp.status == Status.PASS:
             if omp_e2e is not None:
                 run_omp = f"{status_symbol(r.run_omp.status)} {omp_e2e_str}"
@@ -3193,19 +3077,19 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
                     run_omp = f"{status_symbol(r.run_omp.status)} {r.run_omp.duration_sec:.2f}s*"
                 has_fallback = True
         else:
-            run_omp = "[red]\u2717 Runtime[/]"
+            run_omp = f"[{Colors.ERROR}]{Symbols.FAIL} Runtime[/{Colors.ERROR}]"
 
         # Correctness
         if r.verification.correct:
-            correct = "[green]\u2713 YES[/]"
+            correct = f"[{Colors.SUCCESS}]{Symbols.PASS} YES[/{Colors.SUCCESS}]"
         elif r.run_arts.status != Status.PASS or r.run_omp.status != Status.PASS:
-            correct = "[dim]- N/A[/]"
+            correct = f"[{Colors.DEBUG}]- N/A[/{Colors.DEBUG}]"
         else:
-            correct = "[red]\u2717 NO[/]"
+            correct = f"[{Colors.ERROR}]{Symbols.FAIL} NO[/{Colors.ERROR}]"
 
         # Section times (both ARTS and OMP)
         def _fmt_sec(val: "Optional[float]") -> str:
-            return f"{val:.2f}s" if val is not None else "[dim]-[/]"
+            return f"{val:.2f}s" if val is not None else f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
 
         startup_arts = _fmt_sec(r.timing.arts_startup_sec)
         startup_omp = _fmt_sec(r.timing.omp_startup_sec)
@@ -3219,16 +3103,16 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         # Speedup (basis chosen in calculate_timing)
         if r.timing.speedup > 0:
             if r.timing.speedup >= 1.0:
-                speedup = f"[green]{r.timing.speedup:.2f}x[/]"
+                speedup = f"[{Colors.SUCCESS}]{r.timing.speedup:.2f}x[/{Colors.SUCCESS}]"
             elif r.timing.speedup >= 0.8:
-                speedup = f"[yellow]{r.timing.speedup:.2f}x[/]"
+                speedup = f"[{Colors.WARNING}]{r.timing.speedup:.2f}x[/{Colors.WARNING}]"
             else:
-                speedup = f"[red]{r.timing.speedup:.2f}x[/]"
+                speedup = f"[{Colors.ERROR}]{r.timing.speedup:.2f}x[/{Colors.ERROR}]"
             if r.timing.speedup_basis != SPEEDUP_BASIS_KERNEL:
                 speedup += "*"
                 has_fallback = True
         else:
-            speedup = "[dim]-[/]"
+            speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
 
         table.add_row(
             r.name,
@@ -3247,7 +3131,7 @@ def create_results_table(results: List[BenchmarkResult]) -> Table:
         )
 
     if has_fallback:
-        table.caption = "[dim]* = speedup not based on kernel[/]"
+        table.caption = f"[{Colors.DEBUG}]* = speedup not based on kernel[/{Colors.DEBUG}]"
 
     return table
 
@@ -3278,7 +3162,7 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
         geomean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
         speedup_text = (
             f"Geometric mean speedup ({basis_label}, {DEFAULT_REPORTING_MODE} filtered): "
-            f"[cyan]{geomean:.2f}x[/]"
+            f"[{Colors.INFO}]{geomean:.2f}x[/{Colors.INFO}]"
         )
     else:
         speedup_text = ""
@@ -3295,19 +3179,19 @@ def create_summary_panel(results: List[BenchmarkResult], duration: float) -> Pan
     )
 
     content = (
-        f"[green]\u2713 {passed}[/] passed  "
-        f"[red]\u2717 {failed}[/] failed  "
-        f"[dim]\u25cb {skipped}[/] skipped  "
-        f"[cyan]\u23f1 {format_duration(duration)}[/]"
+        f"{format_passed(passed)}  "
+        f"{format_failed(failed)}  "
+        f"{format_skipped(skipped)}  "
+        f"[{Colors.INFO}]{Symbols.TIMEOUT} {format_duration(duration)}[/{Colors.INFO}]"
     )
 
-    content += f"\n\nReporting: [cyan]{DEFAULT_REPORTING_MODE}-of-N[/] with startup outlier filtering"
+    content += f"\n\nReporting: [{Colors.INFO}]{DEFAULT_REPORTING_MODE}-of-N[/{Colors.INFO}] with startup outlier filtering"
     content += f"\nStartup outliers: ARTS={arts_outliers}, OpenMP={omp_outliers}"
 
     if speedup_text:
         content += f"\n\n{speedup_text}"
 
-    return Panel(content, title="Summary", border_style="blue")
+    return Panel(content, title="Summary", border_style=Colors.STEP)
 
 
 # NOTE: SVG/report generation code was removed.
@@ -3339,9 +3223,9 @@ def create_live_table(
     total_runs: int = 1,
 ) -> Table:
     """Create a live-updating table showing benchmark progress with running statistics."""
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
+    table = Table(box=box.ROUNDED, show_header=True, header_style=Colors.HIGHLIGHT)
 
-    table.add_column("Benchmark", style="cyan", no_wrap=True)
+    table.add_column("Benchmark", style=Colors.INFO, no_wrap=True)
     table.add_column("ARTS E2E", justify="right")
     table.add_column("OMP E2E", justify="right")
     table.add_column("A.Startup", justify="right")
@@ -3367,14 +3251,14 @@ def create_live_table(
 
             # ARTS E2E: skip → compile failure → runtime failure → robust median
             if r.build_arts.status == Status.SKIP:
-                run_arts = "[dim]- Skip[/]"
+                run_arts = f"[{Colors.DEBUG}]- Skip[/{Colors.DEBUG}]"
             elif r.build_arts.status != Status.PASS:
-                run_arts = "[red]\u2717 Compile[/]"
+                run_arts = f"[{Colors.ERROR}]{Symbols.FAIL} Compile[/{Colors.ERROR}]"
             else:
                 arts_e2e = robust[KEY_ARTS_E2E_SEC]
                 if arts_e2e is not None:
                     run_arts, arts_marked = _format_with_filter_marker(
-                        f"[green]\u2713[/] {arts_e2e:.2f}s",
+                        f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {arts_e2e:.2f}s",
                         robust[KEY_ARTS_FILTERED_COUNT],
                         robust[KEY_ARTS_RAW_COUNT],
                     )
@@ -3383,23 +3267,23 @@ def create_live_table(
                 elif r.run_arts.status == Status.PASS:
                     arts_kernel, arts_kernel_str = format_kernel_time(r.run_arts)
                     if arts_kernel is not None:
-                        run_arts = f"[green]\u2713[/] {arts_kernel_str}*"
+                        run_arts = f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {arts_kernel_str}*"
                     else:
-                        run_arts = f"[green]\u2713[/] {r.run_arts.duration_sec:.2f}s*"
+                        run_arts = f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {r.run_arts.duration_sec:.2f}s*"
                     has_fallback = True
                 else:
-                    run_arts = "[red]\u2717 Runtime[/]"
+                    run_arts = f"[{Colors.ERROR}]{Symbols.FAIL} Runtime[/{Colors.ERROR}]"
 
             # OMP E2E: skip → compile failure → runtime failure → robust median
             if r.build_omp.status == Status.SKIP:
-                run_omp = "[dim]- Skip[/]"
+                run_omp = f"[{Colors.DEBUG}]- Skip[/{Colors.DEBUG}]"
             elif r.build_omp.status != Status.PASS:
-                run_omp = "[red]\u2717 Compile[/]"
+                run_omp = f"[{Colors.ERROR}]{Symbols.FAIL} Compile[/{Colors.ERROR}]"
             else:
                 omp_e2e = robust[KEY_OMP_E2E_SEC]
                 if omp_e2e is not None:
                     run_omp, omp_marked = _format_with_filter_marker(
-                        f"[green]\u2713[/] {omp_e2e:.2f}s",
+                        f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {omp_e2e:.2f}s",
                         robust[KEY_OMP_FILTERED_COUNT],
                         robust["omp_raw_count"],
                     )
@@ -3408,30 +3292,30 @@ def create_live_table(
                 elif r.run_omp.status == Status.PASS:
                     omp_kernel, omp_kernel_str = format_kernel_time(r.run_omp)
                     if omp_kernel is not None:
-                        run_omp = f"[green]\u2713[/] {omp_kernel_str}*"
+                        run_omp = f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {omp_kernel_str}*"
                     else:
-                        run_omp = f"[green]\u2713[/] {r.run_omp.duration_sec:.2f}s*"
+                        run_omp = f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {r.run_omp.duration_sec:.2f}s*"
                     has_fallback = True
                 else:
-                    run_omp = "[red]\u2717 Runtime[/]"
+                    run_omp = f"[{Colors.ERROR}]{Symbols.FAIL} Runtime[/{Colors.ERROR}]"
 
             # Correctness (based on latest run)
             if r.verification.correct:
-                correct = "[green]\u2713 YES[/]"
+                correct = f"[{Colors.SUCCESS}]{Symbols.PASS} YES[/{Colors.SUCCESS}]"
             elif r.run_arts.status != Status.PASS or r.run_omp.status != Status.PASS:
-                correct = "[dim]- N/A[/]"
+                correct = f"[{Colors.DEBUG}]- N/A[/{Colors.DEBUG}]"
             else:
-                correct = "[red]\u2717 NO[/]"
+                correct = f"[{Colors.ERROR}]{Symbols.FAIL} NO[/{Colors.ERROR}]"
 
             # Speedup (median on startup-filtered paired runs)
             speedup_median = robust[KEY_SPEEDUP]
             if speedup_median:
                 if speedup_median >= 1.0:
-                    speedup = f"[green]{speedup_median:.2f}x[/]"
+                    speedup = f"[{Colors.SUCCESS}]{speedup_median:.2f}x[/{Colors.SUCCESS}]"
                 elif speedup_median >= 0.8:
-                    speedup = f"[yellow]{speedup_median:.2f}x[/]"
+                    speedup = f"[{Colors.WARNING}]{speedup_median:.2f}x[/{Colors.WARNING}]"
                 else:
-                    speedup = f"[red]{speedup_median:.2f}x[/]"
+                    speedup = f"[{Colors.ERROR}]{speedup_median:.2f}x[/{Colors.ERROR}]"
                 speedup, spd_marked = _format_with_filter_marker(
                     speedup,
                     robust["paired_filtered_count"],
@@ -3443,11 +3327,11 @@ def create_live_table(
                     speedup += "*"
                     has_fallback = True
             else:
-                speedup = "[dim]-[/]"
+                speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
 
             # Section times (both ARTS and OMP, latest run)
             def _fmt_sec(val: "Optional[float]") -> str:
-                return f"{val:.2f}s" if val is not None else "[dim]-[/]"
+                return f"{val:.2f}s" if val is not None else f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
 
             startup_arts = _fmt_sec(r.timing.arts_startup_sec)
             startup_omp = _fmt_sec(r.timing.omp_startup_sec)
@@ -3470,36 +3354,36 @@ def create_live_table(
         elif bench == in_progress:
             # Currently running - show phase-specific indicator
             if current_phase == Phase.BUILD_ARTS:
-                run_arts = "[yellow]\u23f3 Building...[/]"
-                run_omp = "[dim]-[/]"
-                correct = "[dim]-[/]"
-                speedup = "[dim]-[/]"
+                run_arts = f"[{Colors.WARNING}]{Symbols.RUNNING} Building...[/{Colors.WARNING}]"
+                run_omp = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                correct = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
             elif current_phase == Phase.BUILD_OMP:
                 # ARTS build done or skipped
                 if current_partial and "build_arts" in current_partial:
                     ba = current_partial["build_arts"]
                     if ba.status == Status.SKIP:
-                        run_arts = "[dim]- Skip[/]"
+                        run_arts = f"[{Colors.DEBUG}]- Skip[/{Colors.DEBUG}]"
                     elif ba.status == Status.PASS:
-                        run_arts = "[dim]-[/]"
+                        run_arts = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
                     else:
-                        run_arts = "[red]\u2717 Compile[/]"
+                        run_arts = f"[{Colors.ERROR}]{Symbols.FAIL} Compile[/{Colors.ERROR}]"
                 else:
-                    run_arts = "[dim]-[/]"
-                run_omp = "[yellow]\u23f3 Building...[/]"
-                correct = "[dim]-[/]"
-                speedup = "[dim]-[/]"
+                    run_arts = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                run_omp = f"[{Colors.WARNING}]{Symbols.RUNNING} Building...[/{Colors.WARNING}]"
+                correct = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
             elif current_phase == Phase.RUN_ARTS:
-                run_arts = "[yellow]\u23f3 Running...[/]"
-                run_omp = "[dim]-[/]"
-                correct = "[dim]-[/]"
-                speedup = "[dim]-[/]"
+                run_arts = f"[{Colors.WARNING}]{Symbols.RUNNING} Running...[/{Colors.WARNING}]"
+                run_omp = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                correct = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
             elif current_phase == Phase.RUN_OMP:
                 # ARTS run completed, show e2e time if available in partial results
                 if current_partial and "run_arts" in current_partial:
                     run_arts_result = current_partial["run_arts"]
                     if run_arts_result.status == Status.SKIP:
-                        run_arts = "[dim]- Skip[/]"
+                        run_arts = f"[{Colors.DEBUG}]- Skip[/{Colors.DEBUG}]"
                     elif run_arts_result.status == Status.PASS:
                         arts_e2e, arts_e2e_str = format_e2e_time(run_arts_result)
                         if arts_e2e is not None:
@@ -3512,36 +3396,36 @@ def create_live_table(
                             else:
                                 run_arts = f"{status_symbol(run_arts_result.status)} {run_arts_result.duration_sec:.2f}s*"
                     else:
-                        run_arts = "[red]\u2717 Runtime[/]"
+                        run_arts = f"[{Colors.ERROR}]{Symbols.FAIL} Runtime[/{Colors.ERROR}]"
                 else:
-                    run_arts = "[green]\u2713[/]"
-                run_omp = "[yellow]\u23f3 Running...[/]"
-                correct = "[dim]-[/]"
-                speedup = "[dim]-[/]"
+                    run_arts = f"[{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}]"
+                run_omp = f"[{Colors.WARNING}]{Symbols.RUNNING} Running...[/{Colors.WARNING}]"
+                correct = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
             else:
-                run_arts = "[yellow]\u23f3...[/]"
-                run_omp = "[dim]-[/]"
-                correct = "[dim]-[/]"
-                speedup = "[dim]-[/]"
+                run_arts = f"[{Colors.WARNING}]{Symbols.RUNNING}...[/{Colors.WARNING}]"
+                run_omp = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                correct = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
+                speedup = f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]"
             table.add_row(
-                f"[bold]{bench}[/]",
+                f"[{Colors.HIGHLIGHT}]{bench}[/{Colors.HIGHLIGHT}]",
                 run_arts,
                 run_omp,
-                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
-                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
                 correct,
                 speedup,
             )
         else:
             # Pending - show placeholder
             table.add_row(
-                f"[dim]{bench}[/]",
-                "[dim]-[/]",
-                "[dim]-[/]",
-                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
-                "[dim]-[/]", "[dim]-[/]", "[dim]-[/]", "[dim]-[/]",
-                "[dim]-[/]",
-                "[dim]-[/]",
+                f"[{Colors.DEBUG}]{bench}[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]", f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
+                f"[{Colors.DEBUG}]-[/{Colors.DEBUG}]",
             )
 
     caption_notes: List[str] = []
@@ -3550,7 +3434,7 @@ def create_live_table(
     if has_filtered:
         caption_notes.append("\u2020 = startup outliers filtered (median-of-N)")
     if caption_notes:
-        table.caption = "[dim]" + " | ".join(caption_notes) + "[/]"
+        table.caption = f"[{Colors.DEBUG}]" + " | ".join(caption_notes) + f"[/{Colors.DEBUG}]"
 
     return table
 
@@ -3569,10 +3453,10 @@ def create_live_summary(
     pending = total - len(results)
 
     text = Text()
-    text.append(f"\u2713 {passed} passed  ", style="green")
-    text.append(f"\u2717 {failed} failed  ", style="red")
-    text.append(f"\u25cb {pending} pending  ", style="dim")
-    text.append(f"\u23f1 {elapsed:.1f}s", style="dim")
+    text.append(f"{Symbols.PASS} {passed} passed  ", style=Colors.SUCCESS)
+    text.append(f"{Symbols.FAIL} {failed} failed  ", style=Colors.ERROR)
+    text.append(f"{Symbols.SKIP} {pending} pending  ", style=Colors.DEBUG)
+    text.append(f"{Symbols.TIMEOUT} {elapsed:.1f}s", style=Colors.DEBUG)
     return text
 
 
@@ -3591,8 +3475,8 @@ def create_live_display(
     # Add running status panel if benchmark in progress
     if in_progress:
         phase_text = current_phase.value.replace("_", " ").title() if current_phase else "Starting"
-        status_text = f"[bold cyan]\u25b6 Running:[/] [white]{in_progress}[/] [dim]({phase_text})[/]"
-        status_panel = Panel(status_text, box=box.ROUNDED, style="blue", padding=(0, 1))
+        status_text = f"[{Colors.HEADER}]{Symbols.RUNNING} Running:[/{Colors.HEADER}] [{Colors.HIGHLIGHT}]{in_progress}[/{Colors.HIGHLIGHT}] [{Colors.DEBUG}]({phase_text})[/{Colors.DEBUG}]"
+        status_panel = Panel(status_text, box=box.ROUNDED, style=Colors.STEP, padding=(0, 1))
         components.append(status_panel)
 
     table = create_live_table(
@@ -3724,7 +3608,7 @@ def export_json(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     carts_dir = get_carts_dir()
-    benchmarks_dir = get_benchmarks_dir()
+    benchmarks_dir = BENCHMARKS_DIR
 
     # Collect comprehensive reproducibility metadata
     repro_metadata = get_reproducibility_metadata(carts_dir, benchmarks_dir)
@@ -3990,11 +3874,11 @@ def list_benchmarks(
             suites[suite_name].append(bench)
 
         console.print(
-            f"\n[bold]Available CARTS Benchmarks[/] ({len(benchmarks)} total)\n")
+            f"\n[{Colors.HIGHLIGHT}]Available CARTS Benchmarks[/{Colors.HIGHLIGHT}] ({len(benchmarks)} total)\n")
 
         for suite_name in sorted(suites.keys()):
             if suite_name:
-                console.print(f"[cyan]{suite_name}:[/]")
+                console.print(f"[{Colors.INFO}]{suite_name}:[/{Colors.INFO}]")
             for bench in sorted(suites[suite_name]):
                 console.print(f"  {bench}")
             console.print()
@@ -4096,7 +3980,7 @@ def _make_experiment_step(
     unknown = sorted(set(normalized.keys()) - KNOWN_STEP_KEYS)
     if unknown:
         console.print(
-            f"[yellow]Warning:[/] Unknown step keys: {', '.join(unknown)}"
+            f"[{Colors.WARNING}]Warning:[/{Colors.WARNING}] Unknown step keys: {', '.join(unknown)}"
         )
 
     step = ExperimentStep(
@@ -4250,7 +4134,7 @@ def _load_experiment(
         unknown_top = sorted(set(payload.keys()) - known_top_keys)
         if unknown_top:
             console.print(
-                f"[yellow]Warning:[/] Unknown experiment keys: {', '.join(unknown_top)}"
+                f"[{Colors.WARNING}]Warning:[/{Colors.WARNING}] Unknown experiment keys: {', '.join(unknown_top)}"
             )
         raw_steps = payload.get("steps")
         defaults = {
@@ -4477,7 +4361,7 @@ def _run_step(
                     threads_label = threads_value if threads_value is not None else "cfg"
                     nodes_label = nodes_value if nodes_value is not None else "cfg"
                     console.print(
-                        f"[bold]Sweep config {config_idx}/{total_configs}:[/] "
+                        f"[{Colors.HIGHLIGHT}]Sweep config {config_idx}/{total_configs}:[/{Colors.HIGHLIGHT}] "
                         f"threads={threads_label}, nodes={nodes_label}"
                     )
 
@@ -4790,7 +4674,7 @@ def run(
 
     # Resolve results_dir — default to carts-benchmarks/results/
     if results_dir is None:
-        results_dir = get_benchmarks_dir() / "results"
+        results_dir = BENCHMARKS_DIR / "results"
     results_dir = Path(results_dir).resolve()
 
     # Create ArtifactManager — every run gets a self-contained timestamped directory
@@ -4823,7 +4707,7 @@ def run(
         if invalid:
             invalid_list = ", ".join(invalid)
             print_error(f"Unknown benchmark(s): {invalid_list}")
-            console.print("[dim]Use `carts benchmarks list` to see valid names.[/]")
+            console.print(f"[{Colors.DEBUG}]Use `carts benchmarks list` to see valid names.[/{Colors.DEBUG}]")
             raise typer.Exit(2)
         bench_list = requested_benchmarks
     else:
@@ -4836,7 +4720,7 @@ def run(
                       if not any(ex in b for ex in exclude)]
         excluded = before - len(bench_list)
         if excluded:
-            console.print(f"[dim]  ({excluded} benchmarks excluded via --exclude)[/]")
+            console.print(f"[{Colors.DEBUG}]  ({excluded} benchmarks excluded via --exclude)[/{Colors.DEBUG}]")
 
     if not bench_list:
         print_warning("No benchmarks found.")
@@ -4939,7 +4823,7 @@ def run(
                 ),
             )
         except ValueError as e:
-            console.print(f"\n[red]Error:[/] {e}")
+            console.print(f"\n[{Colors.ERROR}]Error:[/{Colors.ERROR}] {e}")
             raise typer.Exit(1)
         return
 
@@ -5000,9 +4884,9 @@ def run(
                     config_source = "default"
 
                 cfg = parse_arts_cfg(effective_config)
-                arts_threads: str = str(int(cfg.get("worker_threads", "1")))
-                arts_nodes: str = str(int(cfg.get("node_count", "1")))
-                arts_launcher = cfg.get("launcher", "ssh")
+                arts_threads: str = str(int(cfg.get(KEY_WORKER_THREADS, "1")))
+                arts_nodes: str = str(int(cfg.get(KEY_NODE_COUNT, "1")))
+                arts_launcher = cfg.get(KEY_LAUNCHER, "ssh")
 
                 if display_step.threads_list:
                     arts_threads = _format_sweep_display(display_step.threads_list)
@@ -5049,7 +4933,7 @@ def run(
             ),
         )
     except ValueError as e:
-        console.print(f"\n[red]Error:[/] {e}")
+        console.print(f"\n[{Colors.ERROR}]Error:[/{Colors.ERROR}] {e}")
         raise typer.Exit(1)
 
     outlier_counts = annotate_startup_outliers(results, write_artifacts=True)
@@ -5417,8 +5301,8 @@ def perf_gate(
         f"Policy: {policy_path}\nResults: {resolved_results}",
     )
 
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
-    table.add_column("Benchmark", style="cyan")
+    table = Table(box=box.ROUNDED, show_header=True, header_style=Colors.HIGHLIGHT)
+    table.add_column("Benchmark", style=Colors.INFO)
     table.add_column("Req", justify="center")
     table.add_column("Speedup", justify="right")
     table.add_column("Min", justify="right")
@@ -5439,15 +5323,15 @@ def perf_gate(
         omp_outliers = result["summary"]["omp_outlier_count"]
 
         if result["pass"]:
-            status_text = f"[green]{Symbols.PASS} PASS[/]"
+            status_text = f"[{Colors.SUCCESS}]{Symbols.PASS} PASS[/{Colors.SUCCESS}]"
             notes = ""
         else:
             if result["required"]:
                 required_failures += 1
-                status_text = f"[red]{Symbols.FAIL} FAIL[/]"
+                status_text = f"[{Colors.ERROR}]{Symbols.FAIL} FAIL[/{Colors.ERROR}]"
             else:
                 advisory_failures += 1
-                status_text = f"[yellow]! advisory[/]"
+                status_text = f"[{Colors.WARNING}]{Symbols.WARNING} advisory[/{Colors.WARNING}]"
             notes = "; ".join(result["reasons"])
 
         table.add_row(
@@ -5512,7 +5396,7 @@ def build(
         if invalid:
             invalid_list = ", ".join(invalid)
             print_error(f"Unknown benchmark(s): {invalid_list}")
-            console.print("[dim]Use `carts benchmarks list` to see valid names.[/]")
+            console.print(f"[{Colors.DEBUG}]Use `carts benchmarks list` to see valid names.[/{Colors.DEBUG}]")
             raise typer.Exit(2)
         bench_list = requested_benchmarks
     else:
@@ -5547,7 +5431,7 @@ def build(
         for bench in bench_list:
             for variant in variants:
                 progress.update(
-                    task, description=f"[cyan]{bench}[/] ({variant})")
+                    task, description=f"[{Colors.INFO}]{bench}[/{Colors.INFO}] ({variant})")
                 build_output_dir = (
                     runner.benchmarks_dir
                     / "build"
@@ -5596,7 +5480,7 @@ def clean(
                 invalid_list = ", ".join(invalid)
                 print_error(f"Unknown benchmark(s): {invalid_list}")
                 console.print(
-                    "[dim]Use `carts benchmarks list` to see valid names.[/]")
+                    f"[{Colors.DEBUG}]Use `carts benchmarks list` to see valid names.[/{Colors.DEBUG}]")
                 raise typer.Exit(2)
             bench_list = requested_benchmarks
         else:
@@ -5747,7 +5631,7 @@ def _execute_slurm_batch(
     # Get threads from explicit config or default config.
     if threads is None:
         thread_source_cfg = explicit_arts_config or DEFAULT_ARTS_CONFIG.resolve()
-        threads = get_arts_cfg_int(thread_source_cfg, "worker_threads") or 8
+        threads = get_arts_cfg_int(thread_source_cfg, KEY_WORKER_THREADS) or 8
 
     nodes_display = format_node_counts_display(node_counts)
 
@@ -5785,7 +5669,7 @@ def _execute_slurm_batch(
         if invalid:
             invalid_list = ", ".join(invalid)
             print_error(f"Unknown benchmark(s): {invalid_list}")
-            console.print("[dim]Use `carts benchmarks list` to see valid names.[/]")
+            console.print(f"[{Colors.DEBUG}]Use `carts benchmarks list` to see valid names.[/{Colors.DEBUG}]")
             raise typer.Exit(2)
         bench_list = requested_benchmarks
     else:
@@ -5849,7 +5733,7 @@ def _execute_slurm_batch(
         resolve_effective_arts_config=_resolve_effective_arts_config,
         parse_time_limit_seconds=parse_slurm_time_limit_seconds,
         get_carts_dir=get_carts_dir,
-        get_benchmarks_dir=get_benchmarks_dir,
+        get_benchmarks_dir=lambda: BENCHMARKS_DIR,
         step_name_to_token=_STEP_RESOLVER.step_name_to_token,
     )
     SlurmBatchExecutor(runner, request, deps).execute()

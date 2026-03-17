@@ -33,17 +33,22 @@ CFLAGS ?=
 ARTS_BINARY := $(EXAMPLE_NAME)_arts
 OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp
 OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
+ARTS_CFLAGS_STAMP := $(BUILD_DIR)/.arts_cflags
 
-# Auto-detect arts.cfg
-CARTS_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
-ARTS_CFG ?= $(firstword $(wildcard arts.cfg) $(wildcard $(CARTS_ROOT)/external/carts-benchmarks/configs/local.cfg))
-ARTS_CFG_ARG = $(if $(strip $(ARTS_CFG)),--arts-config $(ARTS_CFG),)
-ARTS_RUNTIME_ENV = $(if $(strip $(ARTS_CFG)),ARTS_CONFIG=$(ARTS_CFG),)
+# ARTS runtime configuration (defaults to local.cfg, overridden by runner per compilation).
+BENCHMARKS_ROOT ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+ARTS_CFG ?= $(BENCHMARKS_ROOT)/configs/local.cfg
+ARTS_CFG_ARG := --arts-config $(ARTS_CFG)
+ARTS_RUNTIME_ENV := ARTS_CONFIG=$(ARTS_CFG)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
 # Extra carts compile flags (e.g., --partition-fallback=fine)
 COMPILE_ARGS ?=
+
+# Fingerprint for ARTS builds: CFLAGS + arts.cfg content + COMPILE_ARGS.
+ARTS_CFG_FINGERPRINT := $(shell cat $(ARTS_CFG) 2>/dev/null)
+ARTS_BUILD_FINGERPRINT := CFLAGS=$(EXECUTE_FLAGS)|COMPILE_ARGS=$(COMPILE_ARGS)|CFG=$(ARTS_CFG_FINGERPRINT)
 
 # OpenMP compile flags (split between cgeist and clang steps)
 OMP_CGEIST_FLAGS := -O3 -S --emit-llvm -fopenmp -std=c17 -D_POSIX_C_SOURCE=199309L $(INCLUDES) $(CFLAGS)
@@ -52,8 +57,22 @@ OMP_LL := $(BUILD_DIR)/$(EXAMPLE_NAME)-omp.ll
 
 .PHONY: all openmp clean
 
+# Track ARTS build flags to avoid stale binaries when size/CFLAGS/arts.cfg change.
+# FORCE ensures this rule always runs to compare current flags with cached flags.
+$(ARTS_CFLAGS_STAMP): FORCE | $(BUILD_DIR)
+	@echo '$(ARTS_BUILD_FINGERPRINT)' > $@.tmp
+	@{ \
+	  if [ ! -f "$@" ] || ! cmp -s "$@.tmp" "$@"; then \
+	    mv "$@.tmp" "$@"; \
+	  else \
+	    rm -f "$@.tmp"; \
+	  fi; \
+	}
+
 # Build ARTS executable (carts compile -O3 does everything in one step)
-all: | $(BUILD_DIR) $(LOG_DIR)
+# Depends on the stamp file so a change in CFLAGS, COMPILE_ARGS, or arts.cfg
+# triggers a rebuild. The stamp only updates when fingerprint changes.
+all: $(ARTS_CFLAGS_STAMP) | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
 	@$(CARTS) compile $(SRC) -O3 $(ARTS_CFG_ARG) $(COMPILE_ARGS) \
 		-- $(LDFLAGS) $(EXECUTE_FLAGS) \
@@ -109,7 +128,7 @@ run-omp: $(OMP_BINARY)
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 clean:
-	rm -rf $(BUILD_DIR) $(LOG_DIR) $(ARTS_BINARY) *.mlir *.ll .carts-metadata.json *_metadata.mlir
+	rm -rf $(BUILD_DIR) $(LOG_DIR) $(ARTS_BINARY) *.mlir *.ll .carts-metadata.json *_metadata.mlir arts.cfg
 
 ################################################################################
 # Size targets - use SMALL_CFLAGS/MEDIUM_CFLAGS/LARGE_CFLAGS/EXTRALARGE_CFLAGS
