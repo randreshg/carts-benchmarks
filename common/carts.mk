@@ -55,9 +55,12 @@ OMP_LL := $(BUILD_DIR)/$(EXAMPLE_NAME)-omp.ll
 # Build ARTS executable (carts compile -O3 does everything in one step)
 all: | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
-	@$(CARTS) compile $(SRC) -O3 $(LDFLAGS) \
-		$(ARTS_CFG_ARG) $(EXECUTE_FLAGS) $(COMPILE_ARGS) \
+	@$(CARTS) compile $(SRC) -O3 $(ARTS_CFG_ARG) $(COMPILE_ARGS) \
+		-- $(LDFLAGS) $(EXECUTE_FLAGS) \
 		> $(LOG_DIR)/build.log 2>&1 || (cat $(LOG_DIR)/build.log >&2; exit 1)
+	@if [ -f "$(EXAMPLE_NAME)_arts" ] && [ "$(EXAMPLE_NAME)_arts" != "$(ARTS_BINARY)" ]; then \
+		mv "$(EXAMPLE_NAME)_arts" "$(ARTS_BINARY)"; \
+	fi
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 
 # Track OpenMP build flags to avoid stale binaries when size/CFLAGS change
