@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import typer
 
-from sniff import (
+from dekk import (
     Colors, Symbols,
     console as _shared_console,
     print_header, print_step, print_success, print_error,

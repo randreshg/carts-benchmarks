@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
-from sniff import (
+from dekk import (
     Colors,
     console,
     print_info,

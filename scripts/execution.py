@@ -15,7 +15,7 @@ from common import PERF_CACHE_EVENTS
 from models import BenchmarkConfig, Status
 
 from rich.console import Console
-from sniff import Colors
+from dekk import Colors
 from scripts.arts_config import KEY_COUNTER_FOLDER
 
 

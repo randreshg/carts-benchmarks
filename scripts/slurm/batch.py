@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from sniff import (
+from dekk import (
     Colors,
     console as _shared_console,
     print_header, print_step, print_success, print_error,
