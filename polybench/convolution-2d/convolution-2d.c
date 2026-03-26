@@ -89,6 +89,13 @@ int main(int argc, char **argv) {
 
   /* Initialize array(s). */
   init_array(ni, nj, A);
+  // The kernel updates only the interior of B; zero the boundary so checksum
+  // verification is deterministic across ARTS and the OpenMP reference build.
+  for (int i = 0; i < ni; i++) {
+    for (int j = 0; j < nj; j++) {
+      B[i][j] = 0.0;
+    }
+  }
   CARTS_STARTUP_TIMER_STOP();
 
   /* Run kernel. */
