@@ -27,7 +27,7 @@ Softmax:     f(x_i) = exp(x_i - max(x)) / Σ exp(x_j - max(x))
 | **SMALL** | SIZE=65536 | Small problem size (64K elements) |
 | **MEDIUM** | SIZE=1048576 | Medium problem size - default (1M elements) |
 | **STANDARD** | SIZE=1048576 | Standard problem size (same as medium) |
-| **LARGE** | SIZE=16777216 | Large problem size (16M elements) |
+| **LARGE** | SIZE=16777216, NREPS=50 | Large problem size (16M elements, tuned for full thread sweeps) |
 
 ## Building and Running
 
