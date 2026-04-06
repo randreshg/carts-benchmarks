@@ -271,6 +271,14 @@ class ConfigExecutionExecutor:
         hooks: ExecutionHooks,
     ) -> RunResult:
         hooks.emit_phase(Phase.RUN_ARTS)
+        if build_arts.status == Status.SKIP:
+            return RunResult(
+                status=Status.SKIP,
+                duration_sec=0.0,
+                exit_code=-1,
+                stdout="",
+                stderr=build_arts.output or "Skipped",
+            )
         if build_arts.status != Status.PASS or not build_arts.executable:
             return RunResult(
                 status=Status.SKIP,
@@ -303,6 +311,14 @@ class ConfigExecutionExecutor:
         hooks: ExecutionHooks,
     ) -> RunResult:
         hooks.emit_phase(Phase.RUN_OMP)
+        if build_omp.status == Status.SKIP:
+            return RunResult(
+                status=Status.SKIP,
+                duration_sec=0.0,
+                exit_code=-1,
+                stdout="",
+                stderr=build_omp.output or "Skipped",
+            )
         if build_omp.status != Status.PASS or not build_omp.executable:
             return RunResult(
                 status=Status.SKIP,
@@ -434,26 +450,22 @@ class ConfigExecutionExecutor:
     ) -> None:
         if not self.host.trace:
             return
-        arts_combined = (run_arts.stdout or "") + ("\n" + run_arts.stderr if run_arts.stderr else "")
-        omp_combined = (run_omp.stdout or "") + ("\n" + run_omp.stderr if run_omp.stderr else "")
-        arts_output = filter_benchmark_output(arts_combined)
-        omp_output = filter_benchmark_output(omp_combined)
+        def _variant_output(run: RunResult) -> str:
+            if run.status == Status.SKIP:
+                return "(skipped)"
+            combined = (run.stdout or "") + ("\n" + run.stderr if run.stderr else "")
+            filtered = filter_benchmark_output(combined)
+            if filtered:
+                return filtered
+            if combined.strip():
+                return combined.strip()
+            return "(no benchmark output)"
 
         self.host.console.print(f"\n[{Colors.HEADER}]═══ CARTS Output ({benchmark_name}) ═══[/{Colors.HEADER}]")
-        if arts_output:
-            self.host.console.print(arts_output)
-        elif arts_combined.strip():
-            self.host.console.print(arts_combined.strip())
-        else:
-            self.host.console.print(f"[{Colors.DEBUG}](no benchmark output)[/{Colors.DEBUG}]")
+        self.host.console.print(_variant_output(run_arts))
 
         self.host.console.print(f"\n[{Colors.SUCCESS}]═══ OMP Output ({benchmark_name}) ═══[/{Colors.SUCCESS}]")
-        if omp_output:
-            self.host.console.print(omp_output)
-        elif omp_combined.strip():
-            self.host.console.print(omp_combined.strip())
-        else:
-            self.host.console.print(f"[{Colors.DEBUG}](no benchmark output)[/{Colors.DEBUG}]")
+        self.host.console.print(_variant_output(run_omp))
         self.host.console.print()
 
     @staticmethod
