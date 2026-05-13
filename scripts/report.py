@@ -347,13 +347,13 @@ PATH_LIKE_FIELDS = {
 }
 
 COUNTER_FIELD_MAP = {
-    "num_edts_created": "numEdtsCreated",
-    "num_edts_finished": "numEdtsFinished",
-    "num_dbs_created": "numDbsCreated",
-    "memory_footprint_bytes": "memoryFootprint",
-    "remote_bytes_sent": "remoteBytesSent",
-    "remote_bytes_received": "remoteBytesReceived",
-    "edt_running_time_ms": "edtRunningTime",
+    "num_edts_created": ("NUM_EDT_CREATE", "numEdtsCreated"),
+    "num_edts_finished": ("NUM_EDT_FINISH", "numEdtsFinished"),
+    "num_dbs_created": ("NUM_DB_CREATE", "numDbsCreated"),
+    "memory_footprint_bytes": ("BYTES_MEMORY_FOOTPRINT", "memoryFootprint"),
+    "remote_bytes_sent": ("BYTES_REMOTE_SENT", "remoteBytesSent"),
+    "remote_bytes_received": ("BYTES_REMOTE_RECEIVED", "remoteBytesReceived"),
+    "edt_running_time_ms": ("TIME_EDT_EXEC", "edtRunningTime"),
 }
 
 INT_FIELDS = {
@@ -514,6 +514,16 @@ def _counter_value(entry: Any) -> Optional[float]:
     if raw is None:
         raw = entry.get("value")
     return _to_float(raw)
+
+
+def _counter_alias_value(
+    counters: Dict[str, float],
+    aliases: Tuple[str, ...],
+) -> Optional[float]:
+    for alias in aliases:
+        if alias in counters:
+            return counters[alias]
+    return None
 
 
 def _count_valid_node_counter_files(counter_dir: Path) -> Tuple[int, int]:
@@ -1078,8 +1088,8 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
     expected_nodes = int(result.config.arts_nodes) if result.config.arts_nodes else None
     counter_dir = _counter_dir_from_artifacts(result.artifacts)
     counters, counter_meta = _collect_counters(counter_dir, expected_nodes=expected_nodes)
-    for field, counter_key in COUNTER_FIELD_MAP.items():
-        row[field] = counters.get(counter_key)
+    for field, counter_keys in COUNTER_FIELD_MAP.items():
+        row[field] = _counter_alias_value(counters, counter_keys)
     row.update(counter_meta)
     row["has_counters"] = bool(counter_meta.get("counter_source"))
     row["has_perf"] = bool(result.run_arts.perf_metrics or arts_perf_path)
@@ -1288,8 +1298,8 @@ def _flatten_result_serialized(
         expected_nodes = int(nodes_value)
 
     counters, counter_meta = _collect_counters(counter_dir, expected_nodes=expected_nodes)
-    for field, counter_key in COUNTER_FIELD_MAP.items():
-        row[field] = counters.get(counter_key)
+    for field, counter_keys in COUNTER_FIELD_MAP.items():
+        row[field] = _counter_alias_value(counters, counter_keys)
     row.update(counter_meta)
     row["has_counters"] = bool(counter_meta.get("counter_source"))
     row["has_perf"] = bool(row.get("perf_enabled")) or bool(perf)

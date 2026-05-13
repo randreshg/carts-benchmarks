@@ -4065,8 +4065,13 @@ def _rebuild_arts(
         print_error(f"Invalid ARTS debug level: {debug} (expected 0..3)")
         raise typer.Exit(1)
 
-    cmd = [
-        "carts", "build", "--arts",
+    if shutil.which("dekk"):
+        cmd = ["dekk", "carts", "build"]
+    else:
+        cmd = ["carts", "build"]
+
+    cmd += [
+        "--arts",
         f"--profile={profile}",
         f"--debug={debug}",
     ]

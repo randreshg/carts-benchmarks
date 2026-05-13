@@ -374,8 +374,13 @@ class SlurmBatchExecutor:
         if not profile.exists():
             raise ValueError(f"Profile not found: {profile}")
         print_warning(f"Rebuilding ARTS with profile: {profile}")
+        if shutil.which("dekk"):
+            cmd = ["dekk", "carts", "build"]
+        else:
+            cmd = ["carts", "build"]
+        cmd += ["--arts", f"--profile={profile}"]
         result = subprocess.run(
-            ["carts", "build", "--arts", f"--profile={profile}"],
+            cmd,
             capture_output=True,
             text=True,
         )
