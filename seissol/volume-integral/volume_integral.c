@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 
 #ifndef N_ELEMENTS
 #define N_ELEMENTS 64

@@ -11,7 +11,7 @@
 
 #include <math.h>
 #include <stdlib.h>
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 
 #ifndef SIZE
 #define SIZE 100

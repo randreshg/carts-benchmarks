@@ -1058,8 +1058,9 @@ class BenchmarkRunner:
         # Map size parameter to make target
         # Build command using make
         # Use granular targets ({size}-arts, {size}-openmp) defined in common/carts.mk
-        # CRITICAL: Provide explicit path to carts executable (not in PATH during non-interactive shells)
-        carts_exe = self.carts_dir / "tools" / "carts"
+        # Use the Dekk-managed project entrypoint so non-interactive shells do
+        # not depend on a legacy repo-local wrapper being on PATH.
+        carts_cmd = "dekk carts"
         arts_exe_default, omp_exe_default = self.get_executable_paths(bench_path)
         output_root = build_output_dir.resolve() if build_output_dir else bench_path
         # Keep build outputs flat under the selected output root.
@@ -1090,7 +1091,7 @@ class BenchmarkRunner:
             cmd = [
                 "make",
                 f"{size}-openmp",
-                f"CARTS={carts_exe}",
+                f"CARTS={carts_cmd}",
                 f"BUILD_DIR={build_dir_override}",
                 f"LOG_DIR={logs_dir_override}",
                 f"OMP_BINARY={omp_output_path}",
@@ -1103,7 +1104,7 @@ class BenchmarkRunner:
             cmd = [
                 "make",
                 f"{size}-arts",
-                f"CARTS={carts_exe}",
+                f"CARTS={carts_cmd}",
                 f"BUILD_DIR={build_dir_override}",
                 f"LOG_DIR={logs_dir_override}",
                 f"ARTS_BINARY={arts_output_path}",

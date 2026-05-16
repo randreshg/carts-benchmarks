@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 #include "correlation.h"
 
 static void print_array(int m, int n, DATA_TYPE **corr, const char *name) {

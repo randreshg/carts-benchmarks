@@ -23,7 +23,7 @@
 
 #include <math.h>
 #include <stdlib.h>
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 
 // Problem size configuration
 #ifndef BATCH_SIZE

@@ -22,7 +22,7 @@ endif
 
 # Defaults
 SRC ?= $(EXAMPLE_NAME).c
-CARTS ?= carts
+CARTS ?= dekk carts
 BUILD_DIR ?= build
 LOG_DIR ?= logs
 INCLUDES ?=
@@ -34,6 +34,8 @@ ARTS_BINARY := $(EXAMPLE_NAME)_arts
 OMP_BINARY := $(BUILD_DIR)/$(EXAMPLE_NAME)_omp
 OMP_CFLAGS_STAMP := $(BUILD_DIR)/.omp_cflags
 ARTS_CFLAGS_STAMP := $(BUILD_DIR)/.arts_cflags
+SRC_ABS := $(abspath $(SRC))
+ARTS_BINARY_ABS := $(abspath $(ARTS_BINARY))
 
 # ARTS runtime configuration (defaults to local.cfg, overridden by runner per compilation).
 BENCHMARKS_ROOT ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
@@ -42,7 +44,8 @@ ARTS_CFG_ARG := --arts-config $(ARTS_CFG)
 ARTS_RUNTIME_ENV := ARTS_CONFIG=$(ARTS_CFG)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
-EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
+normalize_path_flag = $(if $(filter -I%,$(1)),$(if $(filter -I/%,$(1)),$(1),-I$(abspath $(patsubst -I%,%,$(1)))),$(if $(filter -L%,$(1)),$(if $(filter -L/%,$(1)),$(1),-L$(abspath $(patsubst -L%,%,$(1)))),$(1)))
+EXECUTE_FLAGS := $(foreach flag,$(INCLUDES) $(CFLAGS),$(call normalize_path_flag,$(flag)))
 # Extra carts compile flags (e.g., --distributed-db)
 COMPILE_ARGS ?=
 
@@ -74,12 +77,9 @@ $(ARTS_CFLAGS_STAMP): FORCE | $(BUILD_DIR)
 # triggers a rebuild. The stamp only updates when fingerprint changes.
 all: $(ARTS_CFLAGS_STAMP) | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building ARTS executable"
-	@$(CARTS) compile $(SRC) -O3 $(ARTS_CFG_ARG) $(COMPILE_ARGS) \
+	@$(CARTS) compile $(SRC_ABS) -O3 -o $(ARTS_BINARY_ABS) $(ARTS_CFG_ARG) $(COMPILE_ARGS) \
 		-- $(LDFLAGS) $(EXECUTE_FLAGS) \
 		> $(LOG_DIR)/build.log 2>&1 || (cat $(LOG_DIR)/build.log >&2; exit 1)
-	@if [ -f "$(EXAMPLE_NAME)_arts" ] && [ "$(EXAMPLE_NAME)_arts" != "$(ARTS_BINARY)" ]; then \
-		mv "$(EXAMPLE_NAME)_arts" "$(ARTS_BINARY)"; \
-	fi
 	@echo "[$(EXAMPLE_NAME)] Built: $(ARTS_BINARY)"
 
 # Track OpenMP build flags to avoid stale binaries when size/CFLAGS change
@@ -101,7 +101,7 @@ FORCE:
 # Build OpenMP reference executable (2-step: cgeist → clang)
 $(OMP_BINARY): $(SRC) $(OMP_CFLAGS_STAMP) | $(BUILD_DIR) $(LOG_DIR)
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP reference -> $@"
-	@$(CARTS) cgeist $(SRC) $(OMP_CGEIST_FLAGS) -o $(OMP_LL) \
+	@$(CARTS) cgeist $(SRC_ABS) $(OMP_CGEIST_FLAGS) -o $(OMP_LL) \
 		2>&1 | tee $(LOG_DIR)/openmp.log; exit $${PIPESTATUS[0]}
 	@$(CARTS) clang $(OMP_LL) $(OMP_LINK_FLAGS) -o $@ \
 		2>&1 | tee -a $(LOG_DIR)/openmp.log; exit $${PIPESTATUS[0]}
@@ -119,7 +119,7 @@ $(LOG_DIR):
 # Run ARTS executable
 run-arts: all
 	@echo "[$(EXAMPLE_NAME)] Running ARTS..."
-	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
+	$(ARTS_RUNTIME_ENV) $(ARTS_BINARY_ABS)
 
 # Run OpenMP executable with OMP_WAIT_POLICY=ACTIVE for fair comparison
 # (ACTIVE makes idle OMP threads spin-wait, matching ARTS worker behavior)

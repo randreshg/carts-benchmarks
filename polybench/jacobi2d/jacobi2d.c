@@ -1,6 +1,6 @@
 /* PolyBench-like 2D Jacobi */
 
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 #include <omp.h>
 #include <stdlib.h>
 

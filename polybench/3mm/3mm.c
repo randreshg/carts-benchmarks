@@ -18,7 +18,7 @@
 /* Include benchmark-specific header. */
 /* Default data type is double, default size is 4000. */
 #include "3mm.h"
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 
 /* Array initialization. */
 static void init_array(int ni, int nj, int nk, int nl, int nm, DATA_TYPE **A,

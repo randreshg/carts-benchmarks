@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <math.h>
-#include "arts/utils/benchmarks/CartsBenchmarks.h"
+#include "carts/utils/benchmarks/CartsBenchmarks.h"
 
 #ifndef SCALE
 #define SCALE 20  /* 2^SCALE vertices */
