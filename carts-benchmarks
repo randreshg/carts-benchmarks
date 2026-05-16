@@ -2,18 +2,12 @@
 ################################################################################
 # carts-benchmarks - CARTS Benchmark Runner
 #
-# Uses the shared CARTS Python environment from tools/.
+# Uses the Dekk-managed CARTS project command.
 ################################################################################
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CARTS_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CARTS_BIN="${CARTS_ROOT}/tools/carts"
-
-if [[ ! -x "$CARTS_BIN" ]]; then
-    echo "Error: carts wrapper not found at $CARTS_BIN" >&2
-    exit 1
-fi
-
-exec "$CARTS_BIN" benchmarks "$@"
+cd "$CARTS_ROOT"
+exec dekk carts benchmarks "$@"

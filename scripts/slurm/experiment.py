@@ -23,8 +23,7 @@ from dekk import (
     print_success,
     print_warning,
 )
-from scripts import format_summary_line
-from carts_styles import print_footer
+from scripts import format_summary_line, print_footer
 from scripts.arts_config import KEY_COUNTER_FOLDER
 
 from artifacts import ArtifactManager

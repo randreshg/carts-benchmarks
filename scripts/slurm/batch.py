@@ -47,7 +47,6 @@ from dekk import (
     print_header, print_step, print_success, print_error,
     print_warning, print_info,
 )
-from carts_styles import print_footer
 from scripts.arts_config import (
     KEY_COUNTER_FOLDER,
     KEY_LAUNCHER,
