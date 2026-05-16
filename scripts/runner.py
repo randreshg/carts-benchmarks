@@ -44,8 +44,8 @@ from dekk import (
     print_header, print_step, print_success, print_error,
     print_warning, print_info, print_debug as _print_debug,
 )
-from scripts import format_passed, format_failed, format_skipped
-from scripts.arts_config import (
+from formatting import format_failed, format_passed, format_skipped
+from arts_config import (
     parse_arts_cfg,
     EMBEDDED_KEYS,
     KEY_COUNTER_FOLDER,

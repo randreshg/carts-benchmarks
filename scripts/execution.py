@@ -16,7 +16,7 @@ from models import BenchmarkConfig, Status
 
 from rich.console import Console
 from dekk import Colors
-from scripts.arts_config import KEY_COUNTER_FOLDER
+from arts_config import KEY_COUNTER_FOLDER
 
 
 @dataclass(frozen=True)

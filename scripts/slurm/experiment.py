@@ -23,8 +23,8 @@ from dekk import (
     print_success,
     print_warning,
 )
-from scripts import format_summary_line, print_footer
-from scripts.arts_config import KEY_COUNTER_FOLDER
+from arts_config import KEY_COUNTER_FOLDER
+from formatting import format_summary_line, print_footer
 
 from artifacts import ArtifactManager
 from common import (

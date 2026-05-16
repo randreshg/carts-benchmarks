@@ -47,7 +47,7 @@ from dekk import (
     print_header, print_step, print_success, print_error,
     print_warning, print_info,
 )
-from scripts.arts_config import (
+from arts_config import (
     KEY_COUNTER_FOLDER,
     KEY_LAUNCHER,
     KEY_MASTER_NODE,

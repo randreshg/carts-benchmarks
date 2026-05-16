@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol, Tuple
 
 from dekk import Colors
-from scripts.arts_config import KEY_COUNTER_FOLDER
+from arts_config import KEY_COUNTER_FOLDER
 from common import VARIANT_ARTS, VARIANT_OPENMP, filter_benchmark_output
 from execution import BenchmarkExecutionContext, BenchmarkRunFiles
 from models import (
