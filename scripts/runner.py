@@ -4616,7 +4616,7 @@ def run(
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
     compile_args: Optional[str] = typer.Option(
-        None, "--compile-args", help="Extra carts compile args (e.g., '--partition-fallback=fine')"),
+        None, "--compile-args", help="Extra carts compile args (e.g., '--distributed-db')"),
     debug_level: int = typer.Option(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=verbose console output"),
     profile: Optional[Path] = typer.Option(

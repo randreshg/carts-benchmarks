@@ -43,7 +43,7 @@ ARTS_RUNTIME_ENV := ARTS_CONFIG=$(ARTS_CFG)
 
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 EXECUTE_FLAGS := $(INCLUDES) $(CFLAGS)
-# Extra carts compile flags (e.g., --partition-fallback=fine)
+# Extra carts compile flags (e.g., --distributed-db)
 COMPILE_ARGS ?=
 
 # Fingerprint for ARTS builds: CFLAGS + arts.cfg content + COMPILE_ARGS.
