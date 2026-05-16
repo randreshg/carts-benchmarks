@@ -56,39 +56,30 @@ from models import Status, VerificationResult
 from verification import verify_against_omp, verify_against_reference
 
 
-def read_slurm_output(output_dir: Path, job_id: str) -> Tuple[str, str]:
+def read_slurm_output(output_dir: Path) -> Tuple[str, str]:
     """Read SLURM stdout and stderr files.
-
-    Looks for slurm.out/slurm.err first (matching sbatch template), then
-    falls back to slurm-{job_id}.out/slurm-{job_id}.err for backward compat.
 
     Args:
         output_dir: Directory containing SLURM output files
-        job_id: SLURM job ID
 
     Returns:
         Tuple of (stdout, stderr) contents
     """
-    stdout_candidates = [output_dir / SLURM_OUT_FILENAME, output_dir / f"slurm-{job_id}.out"]
-    stderr_candidates = [output_dir / SLURM_ERR_FILENAME, output_dir / f"slurm-{job_id}.err"]
-
     stdout = ""
-    for candidate in stdout_candidates:
-        if candidate.exists():
-            try:
-                stdout = candidate.read_text()
-            except Exception:
-                pass
-            break
+    stdout_path = output_dir / SLURM_OUT_FILENAME
+    if stdout_path.exists():
+        try:
+            stdout = stdout_path.read_text()
+        except Exception:
+            pass
 
     stderr = ""
-    for candidate in stderr_candidates:
-        if candidate.exists():
-            try:
-                stderr = candidate.read_text()
-            except Exception:
-                pass
-            break
+    stderr_path = output_dir / SLURM_ERR_FILENAME
+    if stderr_path.exists():
+        try:
+            stderr = stderr_path.read_text()
+        except Exception:
+            pass
 
     return stdout, stderr
 
@@ -238,7 +229,7 @@ def generate_result(
     reference_omp_threads = reference_payload.get("omp_threads")
 
     # Read SLURM output for parsing
-    stdout, stderr = read_slurm_output(output_dir, slurm_job_id)
+    stdout, stderr = read_slurm_output(output_dir)
 
     # Split stdout into ARTS and OpenMP sections
     # Format: [ARTS] ... [OpenMP] ...

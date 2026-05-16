@@ -4981,7 +4981,6 @@ def run(
         report_path = generate_report(
             results,
             am.experiment_dir,
-            quiet=quiet,
             steps=report_steps,
         )
     except Exception as e:

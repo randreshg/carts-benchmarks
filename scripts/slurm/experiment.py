@@ -754,7 +754,6 @@ class SlurmBatchExecutor:
             report_path = generate_report_from_rows(
                 merged_results,
                 experiment_dir,
-                quiet=True,
                 steps=self.request.report_steps,
             )
         except Exception as exc:
