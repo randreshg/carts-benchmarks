@@ -147,6 +147,51 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertIn("--cpus-per-task=6 --cpu-bind=none", content)
             self.assertNotIn('python3 "', content)
 
+    def test_generate_sbatch_script_can_skip_openmp_for_arts_only_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            executable_omp = root / "gemm_omp"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (
+                job_result_script,
+                arts_cfg,
+                executable_arts,
+                executable_omp,
+                python_executable,
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=1,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=executable_omp,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="small",
+                threads=4,
+                timeout_seconds=60,
+                run_openmp=False,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("# OpenMP skipped (executable not specified)", content)
+            self.assertNotIn("[OpenMP] Running benchmark", content)
+
     def test_generate_arts_config_for_node_sets_protocol_from_rdma_flag_and_unpins_multinode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

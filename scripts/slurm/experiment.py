@@ -92,6 +92,7 @@ class SlurmBatchRequest:
     step_name: Optional[str]
     report_steps: Optional[List[ExperimentStep]]
     command_str: str
+    variant: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -578,11 +579,12 @@ class SlurmBatchExecutor:
         src_arts, src_omp = self.host.get_executable_paths(bench_path)
         results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
         reference_checksum: Optional[ReferenceChecksum] = None
+        include_openmp = self.request.variant != VARIANT_ARTS
 
         needs_multinode_reference = any(
             node_count > 1 and bench not in multinode_disabled
             for node_count in self.request.node_counts
-        )
+        ) and include_openmp
         if needs_multinode_reference:
             reference_timeout = self.deps.parse_time_limit_seconds(
                 self.request.time_limit
@@ -620,7 +622,11 @@ class SlurmBatchExecutor:
             build_node_dir.mkdir(parents=True, exist_ok=True)
 
             dst_arts = build_node_dir / src_arts.name
-            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
+            dst_omp = (
+                build_node_dir / src_omp.name
+                if include_openmp and node_count == 1
+                else None
+            )
             build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
             expected_protocol = protocol_for_rdma(self.request.rdma)
             cached_protocol = (
@@ -639,7 +645,7 @@ class SlurmBatchExecutor:
                         f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
                         f"[{Colors.INFO}]SKIP (exists)[/{Colors.INFO}]"
                     )
-                if node_count == 1 and dst_omp and not dst_omp.exists():
+                if include_openmp and node_count == 1 and dst_omp and not dst_omp.exists():
                     self.host.build_benchmark(
                         bench,
                         self.request.size,
@@ -707,7 +713,7 @@ class SlurmBatchExecutor:
                 continue
 
             dst_omp = None
-            if node_count == 1:
+            if include_openmp and node_count == 1:
                 build_omp = self.host.build_benchmark(
                     bench,
                     self.request.size,
@@ -775,11 +781,12 @@ class SlurmBatchExecutor:
             )
             src_arts, src_omp = self.host.get_executable_paths(bench_path)
             results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
+            include_openmp = self.request.variant != VARIANT_ARTS
 
             needs_multinode_reference = any(
                 node_count > 1 and bench not in multinode_disabled
                 for node_count in self.request.node_counts
-            )
+            ) and include_openmp
             if needs_multinode_reference:
                 reference_timeout = self.deps.parse_time_limit_seconds(
                     self.request.time_limit
@@ -817,7 +824,11 @@ class SlurmBatchExecutor:
                 build_node_dir.mkdir(parents=True, exist_ok=True)
 
                 dst_arts = build_node_dir / src_arts.name
-                dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
+                dst_omp = (
+                    build_node_dir / src_omp.name
+                    if include_openmp and node_count == 1
+                    else None
+                )
                 build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
                 expected_protocol = protocol_for_rdma(self.request.rdma)
                 cached_protocol = (
@@ -836,7 +847,7 @@ class SlurmBatchExecutor:
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
                             f"[{Colors.INFO}]SKIP (exists)[/{Colors.INFO}]"
                         )
-                    if node_count == 1 and dst_omp and not dst_omp.exists():
+                    if include_openmp and node_count == 1 and dst_omp and not dst_omp.exists():
                         self.host.build_benchmark(
                             bench,
                             self.request.size,
@@ -904,7 +915,7 @@ class SlurmBatchExecutor:
                     continue
 
                 dst_omp = None
-                if node_count == 1:
+                if include_openmp and node_count == 1:
                     build_omp = self.host.build_benchmark(
                         bench,
                         self.request.size,
@@ -961,6 +972,7 @@ class SlurmBatchExecutor:
         slurm_job_result_script = Path(__file__).parent / "job_result.py"
         job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
         step_token = self.deps.step_name_to_token(self.request.step_name or "default")
+        run_openmp = self.request.variant != VARIANT_ARTS
         if seen_run_dirs is None:
             seen_run_dirs = set()
         if seen_script_paths is None:
@@ -1038,7 +1050,7 @@ class SlurmBatchExecutor:
                     partition=self.request.partition,
                     account=self.request.account,
                     executable_arts=arts_exe,
-                    executable_omp=omp_exe,
+                    executable_omp=omp_exe if run_openmp else None,
                     arts_config_path=build_arts_cfg,
                     python_executable=Path(sys.executable).resolve(),
                     run_dir=run_dir,
@@ -1052,6 +1064,7 @@ class SlurmBatchExecutor:
                     exclude_nodes=self.request.exclude_nodes,
                     nodelist=self.request.nodelist,
                     job_label=step_token,
+                    run_openmp=run_openmp,
                 )
                 script_path = (
                     scripts_dir

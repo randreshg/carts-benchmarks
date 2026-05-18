@@ -56,6 +56,7 @@ class SlurmJobConfig:
     nodelist: Optional[str] = None
     job_label: Optional[str] = None
     arts_runtime_lib_dir: Optional[Path] = None
+    run_openmp: bool = True
 
 
 @dataclass

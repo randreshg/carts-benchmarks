@@ -454,7 +454,7 @@ def generate_sbatch_script(
         perf_dir_section = '# Perf profiling disabled'
 
     # Build OpenMP section (only for single-node)
-    if config.node_count == 1 and executable_omp_abs:
+    if config.run_openmp and config.node_count == 1 and executable_omp_abs:
         if config.perf and perf_dir:
             events = ",".join(PERF_CACHE_EVENTS)
             interval_ms = int(config.perf_interval * 1000)

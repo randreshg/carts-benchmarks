@@ -84,6 +84,7 @@ class SlurmStepExecutionRequest:
     quiet: bool
     artifact_manager: ArtifactManager
     max_jobs: int
+    variant: Optional[str] = None  # None=both, "arts", "openmp"
 
 
 class StepRebuildCallback(Protocol):

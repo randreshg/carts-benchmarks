@@ -80,12 +80,14 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
                 step_name=None,
                 report_steps=None,
                 rdma=True,
+                variant="arts",
             )
 
         self.assertIsNotNone(_CapturingExecutor.last_request)
         self.assertEqual(_CapturingExecutor.last_request.max_jobs, 8)
         self.assertEqual(_CapturingExecutor.last_request.nodelist, "b05u[01,07]")
         self.assertTrue(_CapturingExecutor.last_request.rdma)
+        self.assertEqual(_CapturingExecutor.last_request.variant, "arts")
 
 
 if __name__ == "__main__":

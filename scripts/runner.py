@@ -4521,6 +4521,7 @@ def _run_step_slurm(
     max_jobs: int = 0,
     report_steps: Optional[List[ExperimentStep]] = None,
     rdma: bool = False,
+    variant: Optional[str] = None,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
     if not node_counts:
@@ -4560,6 +4561,7 @@ def _run_step_slurm(
             step_name=step_name,
             report_steps=report_steps,
             rdma=rdma,
+            variant=variant,
         )
 
 
@@ -4657,6 +4659,7 @@ def _run_slurm_resolved_step(
         max_jobs=request.max_jobs,
         report_steps=report_steps,
         rdma=step_config.rdma,
+        variant=request.variant,
     )
 
 
@@ -4953,6 +4956,7 @@ def run(
                     quiet=quiet,
                     artifact_manager=am,
                     max_jobs=max_jobs,
+                    variant=variant,
                 ),
             )
         except ValueError as e:
@@ -5722,6 +5726,7 @@ def _execute_slurm_batch(
     step_name: Optional[str] = None,
     report_steps: Optional[List[ExperimentStep]] = None,
     rdma: bool = False,
+    variant: Optional[str] = None,
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -5869,6 +5874,7 @@ def _execute_slurm_batch(
         step_name=step_name,
         report_steps=report_steps,
         rdma=rdma,
+        variant=variant,
         command_str="carts benchmarks " + " ".join(sys.argv[1:]),
     )
     deps = SlurmExecutorDependencies(
