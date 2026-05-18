@@ -4140,8 +4140,6 @@ def _rebuild_arts(
     rdma: bool = False,
 ) -> None:
     """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
-    if rdma and debug == 0:
-        debug = 1
     if not profile.exists():
         print_error(f"Profile not found: {profile}")
         raise typer.Exit(1)

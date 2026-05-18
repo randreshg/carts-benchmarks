@@ -227,6 +227,7 @@ export counter_folder="$COUNTER_DIR"
 
 {runtime_library_section}
 {rdma_environment_section}
+{cpu_preflight_section}
 
 ARTS_EXIT=125
 ARTS_DURATION=0
@@ -312,9 +313,70 @@ def _sanitize_job_token(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
 
 
+def _env_nonnegative_int(name: str) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}")
+    return value
+
+
+def _slurm_thread_budget_mode() -> str:
+    raw = os.environ.get("CARTS_SLURM_THREAD_BUDGET", "worker").strip().lower()
+    aliases = {
+        "worker": "worker",
+        "workers": "worker",
+        "worker_threads": "worker",
+        "total": "total",
+        "runtime": "total",
+        "fit": "total",
+        "fit-cpus": "total",
+    }
+    if raw not in aliases:
+        raise ValueError(
+            "CARTS_SLURM_THREAD_BUDGET must be 'worker' or 'total', "
+            f"got {raw!r}"
+        )
+    return aliases[raw]
+
+
+def _env_network_threads() -> Tuple[Optional[int], Optional[int]]:
+    combined = _env_nonnegative_int("CARTS_SLURM_NETWORK_THREADS")
+    sender_threads = _env_nonnegative_int("CARTS_SLURM_SENDER_THREADS")
+    receiver_threads = _env_nonnegative_int("CARTS_SLURM_RECEIVER_THREADS")
+    if combined is not None:
+        if sender_threads is None:
+            sender_threads = combined
+        if receiver_threads is None:
+            receiver_threads = combined
+    return sender_threads, receiver_threads
+
+
+def _slurm_cpu_headroom() -> int:
+    return _env_nonnegative_int("CARTS_SLURM_CPU_HEADROOM") or 0
+
+
 def _default_network_threads(node_count: int, *, rdma: bool) -> Tuple[int, int]:
     if node_count <= 1:
         return 0, 0
+
+    sender_override, receiver_override = _env_network_threads()
+    if sender_override is not None or receiver_override is not None:
+        default_sender = 1
+        default_receiver = 1
+        sender_threads = (
+            sender_override if sender_override is not None else default_sender
+        )
+        receiver_threads = (
+            receiver_override if receiver_override is not None else default_receiver
+        )
+        return sender_threads, receiver_threads
+
     if not rdma:
         return 1, 1
 
@@ -327,6 +389,33 @@ def _default_network_threads(node_count: int, *, rdma: bool) -> Tuple[int, int]:
     floor = 2 if node_count >= 8 else 1
     network_threads = min(node_count - 1, 2, max(floor, (node_count + 15) // 16))
     return network_threads, network_threads
+
+
+def _worker_threads_for_budget(
+    requested_threads: int,
+    sender_threads: int,
+    receiver_threads: int,
+) -> int:
+    if _slurm_thread_budget_mode() != "total":
+        return requested_threads
+    network_threads = sender_threads + receiver_threads
+    if requested_threads <= network_threads:
+        raise ValueError(
+            "CARTS_SLURM_THREAD_BUDGET=total requires --threads to exceed "
+            f"sender+receiver threads ({requested_threads} <= {network_threads})"
+        )
+    return requested_threads - network_threads
+
+
+def _worker_threads_from_config(config: SlurmJobConfig) -> int:
+    if config.arts_config_path is None:
+        return max(1, config.threads)
+    values = parse_arts_cfg(config.arts_config_path)
+    try:
+        worker_threads = int(values.get(KEY_WORKER_THREADS, str(config.threads)))
+    except ValueError:
+        worker_threads = config.threads
+    return max(1, worker_threads)
 
 
 def _network_threads_from_config(config: SlurmJobConfig) -> Tuple[int, int]:
@@ -342,6 +431,61 @@ def _network_threads_from_config(config: SlurmJobConfig) -> Tuple[int, int]:
     except ValueError:
         receiver_threads = 1
     return max(0, sender_threads), max(0, receiver_threads)
+
+
+def _count_cpus_script() -> str:
+    return r"""count_cpulist() {
+    local list="$1"
+    local total=0
+    local part=""
+    local first=""
+    local last=""
+    IFS=',' read -ra ranges <<< "$list"
+    for part in "${ranges[@]}"; do
+        if [[ "$part" == *-* ]]; then
+            first="${part%-*}"
+            last="${part#*-}"
+            total=$((total + last - first + 1))
+        elif [[ -n "$part" ]]; then
+            total=$((total + 1))
+        fi
+    done
+    echo "$total"
+}"""
+
+
+def _slurm_cpu_preflight_section(
+    *,
+    srun_prefix: str,
+    runtime_thread_count: int,
+    worker_threads: int,
+    sender_threads: int,
+    receiver_threads: int,
+) -> str:
+    if os.environ.get("CARTS_SLURM_CPU_PREFLIGHT", "1").strip() == "0":
+        return '# SLURM CPU visibility preflight disabled by CARTS_SLURM_CPU_PREFLIGHT=0'
+
+    count_script = _count_cpus_script()
+    return f"""echo ""
+echo "[SLURM] CPU visibility preflight..."
+echo "[SLURM] Runtime threads: worker={worker_threads} sender={sender_threads} receiver={receiver_threads} total={runtime_thread_count}"
+PREFLIGHT_EXIT=0
+timeout --signal=TERM --kill-after=10s 60s {srun_prefix} bash -lc '{count_script}
+allowed=$(awk "/Cpus_allowed_list/ {{print \\$2}}" /proc/self/status 2>/dev/null || true)
+visible=$(count_cpulist "${{allowed:-}}")
+nproc_value=$(nproc 2>/dev/null || echo unknown)
+echo "[SLURM preflight] rank=${{SLURM_PROCID:-?}} host=$(hostname) cpus_per_task=${{SLURM_CPUS_PER_TASK:-unknown}} nproc=${{nproc_value}} allowed=${{allowed:-unknown}} visible=${{visible:-0}} required={runtime_thread_count}"
+if [ "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-0}}" != "0" ] && [ "${{visible:-0}}" -lt {runtime_thread_count} ]; then
+    echo "[SLURM preflight] ERROR visible CPU count ${{visible:-0}} is below required runtime threads {runtime_thread_count}" >&2
+    exit 66
+fi'
+PREFLIGHT_EXIT=$?
+if [ $PREFLIGHT_EXIT -ne 0 ]; then
+    echo "[SLURM] CPU visibility preflight failed with exit code $PREFLIGHT_EXIT" >&2
+    if [ "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-0}}" != "0" ]; then
+        exit $PREFLIGHT_EXIT
+    fi
+fi"""
 
 
 def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
@@ -491,8 +635,10 @@ def generate_sbatch_script(
     job_prefix = "__".join(prefix_parts) if prefix_parts else "job"
     max_prefix_len = max(1, 64 - len(job_suffix))
     job_name = f"{job_prefix[:max_prefix_len]}{job_suffix}"
+    worker_threads = _worker_threads_from_config(config)
     sender_threads, receiver_threads = _network_threads_from_config(config)
-    cpus_per_task = config.threads + sender_threads + receiver_threads
+    runtime_thread_count = worker_threads + sender_threads + receiver_threads
+    cpus_per_task = runtime_thread_count + _slurm_cpu_headroom()
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
     arts_only_arg = '    --arts-only \\\n' if not config.run_openmp else ''
@@ -502,6 +648,13 @@ def generate_sbatch_script(
         f"srun --exclusive -N{config.node_count} --ntasks={config.node_count} "
         f"--ntasks-per-node=1 --cpus-per-task={cpus_per_task} "
         "--cpu-bind=none --kill-on-bad-exit=1"
+    )
+    cpu_preflight_section = _slurm_cpu_preflight_section(
+        srun_prefix=srun_prefix,
+        runtime_thread_count=runtime_thread_count,
+        worker_threads=worker_threads,
+        sender_threads=sender_threads,
+        receiver_threads=receiver_threads,
     )
     if config.gdb:
         srun_command = (
@@ -540,6 +693,7 @@ def generate_sbatch_script(
         perf_dir_section=perf_dir_section,
         runtime_library_section=runtime_library_section,
         rdma_environment_section=rdma_environment_section,
+        cpu_preflight_section=cpu_preflight_section,
         result_json=result_json,
         executable_arts=executable_arts_abs,
         srun_command=srun_command,
@@ -593,7 +747,6 @@ def generate_arts_config_for_node(
 
     content = _set_cfg_key(content, KEY_COUNTER_FOLDER, str(counter_dir_placeholder))
     content = _set_cfg_key(content, KEY_NODE_COUNT, str(node_count))
-    content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
     content = _set_cfg_key(content, KEY_LAUNCHER, "slurm")
     content = _set_cfg_key(content, KEY_PROTOCOL, protocol_for_rdma(rdma))
     content = _set_cfg_key(content, KEY_COUNTER_CAPTURE_INTERVAL, "10")
@@ -601,10 +754,15 @@ def generate_arts_config_for_node(
         sender_threads, receiver_threads = _default_network_threads(
             node_count, rdma=rdma,
         )
+        worker_threads = _worker_threads_for_budget(
+            threads, sender_threads, receiver_threads,
+        )
+        content = _set_cfg_key(content, KEY_WORKER_THREADS, str(worker_threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, str(sender_threads))
         content = _set_cfg_key(content, KEY_RECEIVER_THREADS, str(receiver_threads))
         content = _set_cfg_key(content, KEY_PIN, "0")
     else:
+        content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, "0")
         content = _set_cfg_key(content, KEY_RECEIVER_THREADS, "0")
 

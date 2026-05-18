@@ -280,6 +280,53 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertEqual(rdma_32_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_64_values["counter_capture_interval"], "10")
 
+    def test_generate_arts_config_can_override_network_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"CARTS_SLURM_NETWORK_THREADS": "1"},
+        ):
+            root = Path(tmp)
+            template = root / "arts.cfg"
+            template.write_text("[ARTS]\nworker_threads=4\n")
+
+            rdma_cfg = generate_arts_config_for_node(
+                template,
+                root / "rdma-64-build",
+                node_count=64,
+                threads=64,
+                rdma=True,
+            )
+
+            values = parse_arts_cfg(rdma_cfg)
+            self.assertEqual(values["worker_threads"], "64")
+            self.assertEqual(values["sender_threads"], "1")
+            self.assertEqual(values["receiver_threads"], "1")
+
+    def test_generate_arts_config_can_treat_threads_as_total_runtime_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "CARTS_SLURM_THREAD_BUDGET": "total",
+                "CARTS_SLURM_NETWORK_THREADS": "2",
+            },
+        ):
+            root = Path(tmp)
+            template = root / "arts.cfg"
+            template.write_text("[ARTS]\nworker_threads=4\n")
+
+            rdma_cfg = generate_arts_config_for_node(
+                template,
+                root / "rdma-64-build",
+                node_count=64,
+                threads=64,
+                rdma=True,
+            )
+
+            values = parse_arts_cfg(rdma_cfg)
+            self.assertEqual(values["worker_threads"], "60")
+            self.assertEqual(values["sender_threads"], "2")
+            self.assertEqual(values["receiver_threads"], "2")
+
     def test_generate_sbatch_script_runs_one_unbound_task_per_node(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -320,6 +367,8 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertIn("#SBATCH --nodes=4", content)
             self.assertIn("#SBATCH --ntasks-per-node=1", content)
             self.assertIn("#SBATCH --cpus-per-task=8", content)
+            self.assertIn("[SLURM] CPU visibility preflight", content)
+            self.assertIn("required=8", content)
             self.assertIn(
                 "srun --exclusive -N4 --ntasks=4 --ntasks-per-node=1 "
                 "--cpus-per-task=8 --cpu-bind=none --kill-on-bad-exit=1",
@@ -359,6 +408,96 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 content,
             )
             self.assertNotIn("--ntasks-per-node=4", content)
+
+    def test_generate_sbatch_script_uses_worker_threads_from_arts_cfg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (job_result_script, executable_arts, python_executable):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+            arts_cfg.write_text(
+                f"[ARTS]\n{KEY_PROTOCOL}={PROTOCOL_RDMA}\n"
+                "worker_threads=60\nsender_threads=2\nreceiver_threads=2\n"
+            )
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=64,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=None,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="large",
+                threads=64,
+                timeout_seconds=90,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("#SBATCH --cpus-per-task=64", content)
+            self.assertIn(
+                "[SLURM] Runtime threads: worker=60 sender=2 receiver=2 total=64",
+                content,
+            )
+            self.assertIn("--cpus-per-task=64 --cpu-bind=none", content)
+
+    def test_generate_sbatch_script_can_request_cpu_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"CARTS_SLURM_CPU_HEADROOM": "4"},
+        ):
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (job_result_script, executable_arts, python_executable):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+            arts_cfg.write_text(
+                f"[ARTS]\n{KEY_PROTOCOL}={PROTOCOL_RDMA}\n"
+                "worker_threads=64\nsender_threads=2\nreceiver_threads=2\n"
+            )
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=64,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=None,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="large",
+                threads=64,
+                timeout_seconds=90,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("#SBATCH --cpus-per-task=72", content)
+            self.assertIn("required=68", content)
+            self.assertIn("--cpus-per-task=72 --cpu-bind=none", content)
 
     def test_generate_sbatch_script_preloads_runtime_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
