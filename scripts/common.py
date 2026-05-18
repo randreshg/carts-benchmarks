@@ -160,13 +160,15 @@ STARTUP_OUTLIER_DIAGNOSTICS_FILENAME = "startup_outlier_diagnostics.json"
 # Checksum and Timing Patterns
 # ============================================================================
 
+NUMERIC_VALUE_PATTERN = r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?"
+
 CHECKSUM_PATTERNS = [
-    r"checksum[:\s]*=?\s*([0-9.eE+-]+)",
-    r"result[:\s]*=?\s*([0-9.eE+-]+)",
-    r"sum[:\s]*=?\s*([0-9.eE+-]+)",
-    r"total[:\s]*=?\s*([0-9.eE+-]+)",
-    r"RMS error[:\s]*\(?\s*([0-9.eE+-]+)",
-    r"^([0-9.eE+-]+)\s*$",
+    rf"checksum[:\s]*=?\s*({NUMERIC_VALUE_PATTERN})",
+    rf"result[:\s]*=?\s*({NUMERIC_VALUE_PATTERN})",
+    rf"sum[:\s]*=?\s*({NUMERIC_VALUE_PATTERN})",
+    rf"total[:\s]*=?\s*({NUMERIC_VALUE_PATTERN})",
+    rf"RMS error[:\s]*\(?\s*({NUMERIC_VALUE_PATTERN})",
+    rf"^({NUMERIC_VALUE_PATTERN})\s*$",
 ]
 
 KERNEL_TIME_PATTERN = r"^\s*kernel\.([^:]+):\s*([0-9.eE+-]+)s?\s*$"
@@ -201,7 +203,7 @@ def parse_checksum(output: str) -> Optional[str]:
     # Fallback: last non-empty line that looks numeric
     for line in reversed(output.strip().splitlines()):
         line = line.strip()
-        if re.match(r"^-?[0-9.]+(?:[eE][+-]?[0-9]+)?$", line):
+        if re.match(rf"^{NUMERIC_VALUE_PATTERN}$", line):
             return line
 
     return None

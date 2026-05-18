@@ -54,7 +54,7 @@ ARTS_CFG_FINGERPRINT := $(shell cat $(ARTS_CFG) 2>/dev/null)
 ARTS_BUILD_FINGERPRINT := CFLAGS=$(EXECUTE_FLAGS)|COMPILE_ARGS=$(COMPILE_ARGS)|CFG=$(ARTS_CFG_FINGERPRINT)
 
 # OpenMP compile flags (split between cgeist and clang steps)
-OMP_CGEIST_FLAGS := -O3 -S --emit-llvm -fopenmp -std=c17 -D_POSIX_C_SOURCE=199309L $(INCLUDES) $(CFLAGS)
+OMP_CGEIST_FLAGS := -O3 -S --emit-llvm -fopenmp -std=c17 -D_POSIX_C_SOURCE=199309L $(EXECUTE_FLAGS)
 OMP_LINK_FLAGS := -O3 $(LDFLAGS) -lm -lcartsbenchmarks
 OMP_LL := $(BUILD_DIR)/$(EXAMPLE_NAME)-omp.ll
 

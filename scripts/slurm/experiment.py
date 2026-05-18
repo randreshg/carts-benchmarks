@@ -23,7 +23,14 @@ from dekk import (
     print_success,
     print_warning,
 )
-from arts_config import KEY_COUNTER_FOLDER
+from arts_config import (
+    KEY_COUNTER_FOLDER,
+    KEY_PROTOCOL,
+    PROTOCOL_RDMA,
+    PROTOCOL_TCP,
+    get_cfg_str,
+    protocol_for_rdma,
+)
 from formatting import format_summary_line, print_footer
 
 from artifacts import ArtifactManager
@@ -41,6 +48,16 @@ from models import BenchmarkConfig, ExperimentStep, ReferenceChecksum, Status
 from report import generate_report_from_rows
 
 from . import batch as slurm_batch
+from .models import (
+    SLURM_STATE_DRY_RUN,
+    SLURM_STATE_PENDING,
+    SlurmJobStatus,
+    SubmissionFailure,
+)
+
+ARTS_RUNTIME_SNAPSHOT_DIR = Path("runtime") / "arts" / "lib"
+ARTS_RUNTIME_SNAPSHOT_MARKER = "runtime_snapshot.json"
+BuildArtifacts = Tuple[Path, Optional[Path], Path, Optional[Path]]
 
 
 @dataclass(frozen=True)
@@ -69,6 +86,8 @@ class SlurmBatchRequest:
     perf: bool
     perf_interval: float
     exclude_nodes: Optional[str]
+    nodelist: Optional[str]
+    rdma: bool
     artifact_manager: Optional[ArtifactManager]
     step_name: Optional[str]
     report_steps: Optional[List[ExperimentStep]]
@@ -113,6 +132,17 @@ class SlurmExecutionHost(Protocol):
         omp_threads: int,
         timeout: int,
     ) -> ReferenceChecksum: ...
+
+
+def compute_prebuild_worker_count(
+    host_cpus: Optional[int],
+    requested_threads: int,
+    benchmark_count: int,
+) -> int:
+    """Choose a build worker count that avoids oversubscribing OpenMP references."""
+    cpus = host_cpus or 1
+    threads = max(1, requested_threads)
+    return min(max(1, cpus // threads), benchmark_count)
 
 
 def load_existing_job_statuses(
@@ -294,6 +324,147 @@ def count_total_slurm_jobs(
     return total_jobs
 
 
+def _installed_arts_runtime_protocol(carts_dir: Path) -> Optional[str]:
+    """Return the installed ARTS runtime protocol from CMakeCache when known."""
+    cache = carts_dir / "external" / "arts" / "build" / "CMakeCache.txt"
+    if not cache.is_file():
+        return None
+
+    for line in cache.read_text(errors="ignore").splitlines():
+        if not line.startswith("ARTS_USE_RDMA:"):
+            continue
+        value = line.split("=", 1)[-1].strip().upper()
+        if value in {"ON", "TRUE", "1", "YES"}:
+            return PROTOCOL_RDMA
+        if value in {"OFF", "FALSE", "0", "NO"}:
+            return PROTOCOL_TCP
+    return None
+
+
+def _installed_arts_runtime_lib_dir(carts_dir: Path) -> Optional[Path]:
+    """Find the installed ARTS shared library directory."""
+    install_dir = carts_dir / ".install" / "arts"
+    for candidate in (install_dir / "lib", install_dir / "lib64"):
+        if any(candidate.glob("libarts.so*")):
+            return candidate
+    return None
+
+
+def _snapshot_marker_path(runtime_lib_dir: Path) -> Path:
+    return runtime_lib_dir.parent / ARTS_RUNTIME_SNAPSHOT_MARKER
+
+
+def _read_snapshot_marker(runtime_lib_dir: Path) -> Optional[Dict[str, Any]]:
+    marker_path = _snapshot_marker_path(runtime_lib_dir)
+    if not marker_path.is_file():
+        return None
+    try:
+        marker = json.loads(marker_path.read_text())
+    except Exception:
+        return None
+    return marker if isinstance(marker, dict) else None
+
+
+def _snapshot_has_expected_arts_runtime(
+    runtime_lib_dir: Path,
+    expected_protocol: str,
+) -> bool:
+    """Return True when an artifact runtime snapshot is complete and suitable."""
+    if not (
+        (runtime_lib_dir / "libarts.so.2").exists()
+        or (runtime_lib_dir / "libarts.so").exists()
+    ):
+        return False
+
+    marker = _read_snapshot_marker(runtime_lib_dir)
+    if marker is None:
+        return False
+    if marker.get("expected_protocol") != expected_protocol:
+        return False
+    protocol = marker.get("installed_protocol")
+    if protocol in {PROTOCOL_RDMA, PROTOCOL_TCP} and protocol != expected_protocol:
+        return False
+    return True
+
+
+def _copy_arts_runtime_snapshot(
+    *,
+    carts_dir: Path,
+    build_node_dir: Path,
+    expected_protocol: str,
+    source_runtime_lib_dir: Optional[Path] = None,
+) -> Path:
+    """Copy a validated ARTS shared runtime into a benchmark artifact dir."""
+    runtime_lib_dir = build_node_dir / ARTS_RUNTIME_SNAPSHOT_DIR
+    if _snapshot_has_expected_arts_runtime(runtime_lib_dir, expected_protocol):
+        return runtime_lib_dir
+
+    source_marker: Optional[Dict[str, Any]] = None
+    if source_runtime_lib_dir is None:
+        installed_protocol = _installed_arts_runtime_protocol(carts_dir)
+        if installed_protocol is not None and installed_protocol != expected_protocol:
+            raise RuntimeError(
+                "Installed ARTS runtime protocol is "
+                f"{installed_protocol}, but this benchmark artifact expects "
+                f"{expected_protocol}. Rebuild ARTS for {expected_protocol} before "
+                "generating Slurm artifacts."
+            )
+
+        source_lib_dir = _installed_arts_runtime_lib_dir(carts_dir)
+        if source_lib_dir is None:
+            raise RuntimeError(
+                f"Installed ARTS shared libraries not found under {carts_dir / '.install' / 'arts'}"
+            )
+    else:
+        source_lib_dir = source_runtime_lib_dir
+        source_marker = _read_snapshot_marker(source_lib_dir)
+        if source_marker is None:
+            raise RuntimeError(f"ARTS runtime snapshot marker not found for {source_lib_dir}")
+        source_expected = source_marker.get("expected_protocol")
+        source_installed = source_marker.get("installed_protocol")
+        source_protocol = (
+            source_expected
+            if source_expected in {PROTOCOL_RDMA, PROTOCOL_TCP}
+            else source_installed
+        )
+        if source_protocol in {PROTOCOL_RDMA, PROTOCOL_TCP} and source_protocol != expected_protocol:
+            raise RuntimeError(
+                "Cached ARTS runtime snapshot protocol is "
+                f"{source_protocol}, but this benchmark artifact expects {expected_protocol}."
+            )
+        installed_protocol = (
+            str(source_installed)
+            if source_installed in {PROTOCOL_RDMA, PROTOCOL_TCP}
+            else expected_protocol
+        )
+
+    source_libs = sorted(source_lib_dir.glob("libarts.so*"))
+    if not source_libs:
+        raise RuntimeError(f"No libarts.so* files found in {source_lib_dir}")
+
+    runtime_lib_dir.mkdir(parents=True, exist_ok=True)
+    for existing in runtime_lib_dir.glob("libarts.so*"):
+        existing.unlink()
+    for source in source_libs:
+        destination = runtime_lib_dir / source.name
+        if source.is_symlink():
+            os.symlink(os.readlink(source), destination)
+        elif source.is_file():
+            shutil.copy2(source, destination)
+
+    marker = {
+        "source_dir": str(source_lib_dir.resolve()),
+        "created": datetime.now().isoformat(),
+        "expected_protocol": expected_protocol,
+        "installed_protocol": installed_protocol,
+        "libraries": [path.name for path in source_libs],
+    }
+    if source_marker is not None:
+        marker["source_snapshot"] = str(source_lib_dir.resolve())
+    _snapshot_marker_path(runtime_lib_dir).write_text(json.dumps(marker, indent=2))
+    return runtime_lib_dir
+
+
 def merge_result_rows(
     existing_results: Sequence[Dict[str, Any]],
     submission_failure_results: Sequence[Dict[str, Any]],
@@ -338,21 +509,19 @@ class SlurmBatchExecutor:
 
         print_info(f"Experiment directory: {experiment_dir}")
         self._rebuild_profile_if_needed()
-
-        build_results, reference_checksums = self._build_benchmarks(am)
-        job_configs = self._generate_job_scripts(
-            am=am,
-            scripts_dir=scripts_dir,
-            build_results=build_results,
-            reference_checksums=reference_checksums,
+        expected_protocol = protocol_for_rdma(self.request.rdma)
+        runtime_snapshot_lib_dir = _copy_arts_runtime_snapshot(
+            carts_dir=self.deps.get_carts_dir(),
+            build_node_dir=experiment_dir,
+            expected_protocol=expected_protocol,
         )
 
-        self._submit_and_collect(
+        self._build_submit_and_collect_streaming(
             am=am,
+            scripts_dir=scripts_dir,
             experiment_dir=experiment_dir,
-            job_configs=job_configs,
-            total_duration=time.time() - slurm_start_time,
             slurm_start_time=slurm_start_time,
+            runtime_snapshot_lib_dir=runtime_snapshot_lib_dir,
         )
 
     def _prepare_artifact_manager(self) -> ArtifactManager:
@@ -378,6 +547,8 @@ class SlurmBatchExecutor:
         else:
             cmd = ["carts", "build"]
         cmd += ["--arts", f"--profile={profile}"]
+        if self.request.rdma:
+            cmd.append("--rdma")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -387,17 +558,206 @@ class SlurmBatchExecutor:
             raise ValueError(f"ARTS rebuild failed:\n{result.stderr}")
         print_success("ARTS rebuild complete")
 
+    def _build_one_bench(
+        self,
+        *,
+        am: ArtifactManager,
+        bench: str,
+        multinode_disabled: set[str],
+        print_lock: threading.Lock,
+        runtime_snapshot_lib_dir: Path,
+    ) -> Tuple[
+        List[Tuple[Tuple[str, int], BuildArtifacts]],
+        Optional[ReferenceChecksum],
+    ]:
+        bench_path = self.host.benchmarks_dir / bench
+        effective_base_config = self.deps.resolve_effective_arts_config(
+            bench_path,
+            self.request.explicit_arts_config,
+        )
+        src_arts, src_omp = self.host.get_executable_paths(bench_path)
+        results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
+        reference_checksum: Optional[ReferenceChecksum] = None
+
+        needs_multinode_reference = any(
+            node_count > 1 and bench not in multinode_disabled
+            for node_count in self.request.node_counts
+        )
+        if needs_multinode_reference:
+            reference_timeout = self.deps.parse_time_limit_seconds(
+                self.request.time_limit
+            )
+            reference_timeout = min(reference_timeout, self.request.timeout)
+            reference = self.host.ensure_omp_reference(
+                bench,
+                self.request.size,
+                self.request.cflags or "",
+                self.request.threads,
+                timeout=reference_timeout,
+            )
+            if reference.status != Status.PASS or reference.checksum is None:
+                raise RuntimeError(
+                    f"Failed to establish OpenMP reference for {bench}: {reference.note}"
+                )
+            with print_lock:
+                console.print(
+                    f"  {bench} multinode reference checksum... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}] "
+                    f"[{Colors.DEBUG}]({reference.checksum}, {self.request.threads} OMP threads)[/{Colors.DEBUG}]"
+                )
+            reference_checksum = reference
+
+        for node_count in self.request.node_counts:
+            if node_count > 1 and bench in multinode_disabled:
+                continue
+
+            bench_config = BenchmarkConfig(
+                arts_threads=self.request.threads,
+                arts_nodes=node_count,
+                omp_threads=self.request.threads,
+                launcher="slurm",
+            )
+            build_node_dir = am.get_artifacts_dir(bench, bench_config)
+            build_node_dir.mkdir(parents=True, exist_ok=True)
+
+            dst_arts = build_node_dir / src_arts.name
+            dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
+            build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
+            expected_protocol = protocol_for_rdma(self.request.rdma)
+            cached_protocol = (
+                get_cfg_str(build_arts_cfg, KEY_PROTOCOL)
+                if build_arts_cfg.exists()
+                else None
+            )
+
+            if (
+                dst_arts.exists()
+                and build_arts_cfg.exists()
+                and cached_protocol == expected_protocol
+            ):
+                with print_lock:
+                    console.print(
+                        f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
+                        f"[{Colors.INFO}]SKIP (exists)[/{Colors.INFO}]"
+                    )
+                if node_count == 1 and dst_omp and not dst_omp.exists():
+                    self.host.build_benchmark(
+                        bench,
+                        self.request.size,
+                        variant=VARIANT_OPENMP,
+                        cflags=self.request.cflags or "",
+                        build_output_dir=build_node_dir,
+                    )
+                runtime_lib_dir = _copy_arts_runtime_snapshot(
+                    carts_dir=self.deps.get_carts_dir(),
+                    build_node_dir=build_node_dir,
+                    expected_protocol=expected_protocol,
+                    source_runtime_lib_dir=runtime_snapshot_lib_dir,
+                )
+                results.append(
+                    (
+                        (bench, node_count),
+                        (
+                            dst_arts,
+                            dst_omp if dst_omp and dst_omp.exists() else None,
+                            build_arts_cfg,
+                            runtime_lib_dir,
+                        ),
+                    )
+                )
+                continue
+
+            if self.request.no_build:
+                with print_lock:
+                    console.print(
+                        f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
+                        f"[{Colors.ERROR}]MISSING (--no-build)[/{Colors.ERROR}]"
+                    )
+                continue
+
+            build_arts_cfg = slurm_batch.generate_arts_config_for_node(
+                effective_base_config,
+                build_node_dir,
+                node_count,
+                self.request.threads,
+                rdma=self.request.rdma,
+            )
+            build_arts = self.host.build_benchmark(
+                bench,
+                self.request.size,
+                variant=VARIANT_ARTS,
+                arts_config=build_arts_cfg,
+                cflags=self.request.cflags or "",
+                compile_args=self.request.compile_args,
+                build_output_dir=build_node_dir,
+            )
+            if build_arts.status != Status.PASS:
+                with print_lock:
+                    console.print(
+                        f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.ERROR}]FAILED[/{Colors.ERROR}]"
+                    )
+                    if self.request.verbose:
+                        console.print(f"    {build_arts.output[:200]}...")
+                continue
+            if not dst_arts.exists():
+                with print_lock:
+                    console.print(
+                        f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
+                        f"[{Colors.ERROR}]FAILED (missing ARTS executable in artifacts dir)[/{Colors.ERROR}]"
+                    )
+                continue
+
+            dst_omp = None
+            if node_count == 1:
+                build_omp = self.host.build_benchmark(
+                    bench,
+                    self.request.size,
+                    variant=VARIANT_OPENMP,
+                    cflags=self.request.cflags or "",
+                    build_output_dir=build_node_dir,
+                )
+                cached_omp = build_node_dir / src_omp.name
+                if build_omp.status == Status.PASS and cached_omp.exists():
+                    dst_omp = cached_omp
+
+            with print_lock:
+                console.print(
+                    f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
+                )
+            runtime_lib_dir = _copy_arts_runtime_snapshot(
+                carts_dir=self.deps.get_carts_dir(),
+                build_node_dir=build_node_dir,
+                expected_protocol=expected_protocol,
+                source_runtime_lib_dir=runtime_snapshot_lib_dir,
+            )
+            results.append(
+                (
+                    (bench, node_count),
+                    (dst_arts, dst_omp, build_arts_cfg, runtime_lib_dir),
+                )
+            )
+
+        return results, reference_checksum
+
     def _build_benchmarks(
         self,
         am: ArtifactManager,
+        runtime_snapshot_lib_dir: Path,
     ) -> Tuple[
-        Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]],
+        Dict[Tuple[str, int], BuildArtifacts],
         Dict[str, ReferenceChecksum],
     ]:
-        num_workers = min(os.cpu_count() or 1, len(self.request.bench_list))
+        # Multinode setup runs an OpenMP reference with self.request.threads for
+        # each benchmark. Running many 64-thread references concurrently
+        # oversubscribes the login/build host and turns the benchmark timeout
+        # into a scheduler artifact, so cap the prebuild pool accordingly.
+        num_workers = compute_prebuild_worker_count(
+            os.cpu_count(),
+            self.request.threads,
+            len(self.request.bench_list),
+        )
         print_step(f"Building benchmarks per node count ({num_workers} workers)", 1, 5)
 
-        build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]] = {}
+        build_results: Dict[Tuple[str, int], BuildArtifacts] = {}
         reference_checksums: Dict[str, ReferenceChecksum] = {}
         print_lock = threading.Lock()
         multinode_disabled = find_multinode_disabled_benchmarks(
@@ -407,14 +767,14 @@ class SlurmBatchExecutor:
 
         def build_one_bench(
             bench: str,
-        ) -> List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]]:
+        ) -> List[Tuple[Tuple[str, int], BuildArtifacts]]:
             bench_path = self.host.benchmarks_dir / bench
             effective_base_config = self.deps.resolve_effective_arts_config(
                 bench_path,
                 self.request.explicit_arts_config,
             )
             src_arts, src_omp = self.host.get_executable_paths(bench_path)
-            results: List[Tuple[Tuple[str, int], Tuple[Path, Optional[Path], Path]]] = []
+            results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
 
             needs_multinode_reference = any(
                 node_count > 1 and bench not in multinode_disabled
@@ -459,8 +819,18 @@ class SlurmBatchExecutor:
                 dst_arts = build_node_dir / src_arts.name
                 dst_omp = build_node_dir / src_omp.name if node_count == 1 else None
                 build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
+                expected_protocol = protocol_for_rdma(self.request.rdma)
+                cached_protocol = (
+                    get_cfg_str(build_arts_cfg, KEY_PROTOCOL)
+                    if build_arts_cfg.exists()
+                    else None
+                )
 
-                if dst_arts.exists() and build_arts_cfg.exists():
+                if (
+                    dst_arts.exists()
+                    and build_arts_cfg.exists()
+                    and cached_protocol == expected_protocol
+                ):
                     with print_lock:
                         console.print(
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
@@ -474,6 +844,12 @@ class SlurmBatchExecutor:
                             cflags=self.request.cflags or "",
                             build_output_dir=build_node_dir,
                         )
+                    runtime_lib_dir = _copy_arts_runtime_snapshot(
+                        carts_dir=self.deps.get_carts_dir(),
+                        build_node_dir=build_node_dir,
+                        expected_protocol=expected_protocol,
+                        source_runtime_lib_dir=runtime_snapshot_lib_dir,
+                    )
                     results.append(
                         (
                             (bench, node_count),
@@ -481,6 +857,7 @@ class SlurmBatchExecutor:
                                 dst_arts,
                                 dst_omp if dst_omp and dst_omp.exists() else None,
                                 build_arts_cfg,
+                                runtime_lib_dir,
                             ),
                         )
                     )
@@ -499,6 +876,7 @@ class SlurmBatchExecutor:
                     build_node_dir,
                     node_count,
                     self.request.threads,
+                    rdma=self.request.rdma,
                 )
                 build_arts = self.host.build_benchmark(
                     bench,
@@ -542,7 +920,18 @@ class SlurmBatchExecutor:
                     console.print(
                         f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
                     )
-                results.append(((bench, node_count), (dst_arts, dst_omp, build_arts_cfg)))
+                runtime_lib_dir = _copy_arts_runtime_snapshot(
+                    carts_dir=self.deps.get_carts_dir(),
+                    build_node_dir=build_node_dir,
+                    expected_protocol=expected_protocol,
+                    source_runtime_lib_dir=runtime_snapshot_lib_dir,
+                )
+                results.append(
+                    (
+                        (bench, node_count),
+                        (dst_arts, dst_omp, build_arts_cfg, runtime_lib_dir),
+                    )
+                )
             return results
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -561,17 +950,28 @@ class SlurmBatchExecutor:
         *,
         am: ArtifactManager,
         scripts_dir: Path,
-        build_results: Dict[Tuple[str, int], Tuple[Path, Optional[Path], Path]],
+        build_results: Dict[Tuple[str, int], BuildArtifacts],
         reference_checksums: Dict[str, ReferenceChecksum],
+        seen_run_dirs: Optional[set[Path]] = None,
+        seen_script_paths: Optional[set[Path]] = None,
+        emit_header: bool = True,
     ) -> List[Tuple[slurm_batch.SlurmJobConfig, Path]]:
-        print_step("Generating job scripts", 2, 5)
+        if emit_header:
+            print_step("Generating job scripts", 2, 5)
         slurm_job_result_script = Path(__file__).parent / "job_result.py"
         job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
         step_token = self.deps.step_name_to_token(self.request.step_name or "default")
-        seen_run_dirs: set[Path] = set()
-        seen_script_paths: set[Path] = set()
+        if seen_run_dirs is None:
+            seen_run_dirs = set()
+        if seen_script_paths is None:
+            seen_script_paths = set()
 
-        for (bench, node_count), (arts_exe, omp_exe, build_arts_cfg) in build_results.items():
+        for (bench, node_count), (
+            arts_exe,
+            omp_exe,
+            build_arts_cfg,
+            runtime_lib_dir,
+        ) in build_results.items():
             safe_name = bench.replace("/", "_")
             for run_num in range(1, self.request.runs + 1):
                 bench_config = BenchmarkConfig(
@@ -605,6 +1005,7 @@ class SlurmBatchExecutor:
                     perf_interval=self.request.perf_interval if self.request.perf else None,
                     timeout=self.request.timeout,
                     time_limit=self.request.time_limit,
+                    arts_runtime_lib_dir=runtime_lib_dir,
                     reference_checksum=(
                         reference_checksums.get(bench).checksum
                         if node_count > 1 and bench in reference_checksums
@@ -644,10 +1045,12 @@ class SlurmBatchExecutor:
                     size=self.request.size,
                     threads=self.request.threads,
                     timeout_seconds=self.request.timeout,
+                    arts_runtime_lib_dir=runtime_lib_dir,
                     gdb=self.request.gdb,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval,
                     exclude_nodes=self.request.exclude_nodes,
+                    nodelist=self.request.nodelist,
                     job_label=step_token,
                 )
                 script_path = (
@@ -668,8 +1071,201 @@ class SlurmBatchExecutor:
                 )
                 job_configs.append((config, script_path))
 
-        print_info(f"Generated {len(job_configs)} job scripts")
+        if emit_header:
+            print_info(f"Generated {len(job_configs)} job scripts")
         return job_configs
+
+    @staticmethod
+    def _active_streaming_jobs(job_statuses: Dict[str, SlurmJobStatus]) -> int:
+        return sum(
+            1
+            for status in job_statuses.values()
+            if not slurm_batch._is_effectively_terminal(status)
+        )
+
+    @staticmethod
+    def _poll_streaming_jobs(job_statuses: Dict[str, SlurmJobStatus]) -> None:
+        if not job_statuses:
+            return
+        states = slurm_batch.poll_jobs(job_statuses)
+        for job_id, state in states.items():
+            if job_id in job_statuses:
+                job_statuses[job_id].state = state
+
+    def _build_submit_and_collect_streaming(
+        self,
+        *,
+        am: ArtifactManager,
+        scripts_dir: Path,
+        experiment_dir: Path,
+        slurm_start_time: float,
+        runtime_snapshot_lib_dir: Path,
+    ) -> None:
+        num_workers = compute_prebuild_worker_count(
+            os.cpu_count(),
+            self.request.threads,
+            len(self.request.bench_list),
+        )
+        print_step(
+            f"Building and submitting jobs as ready ({num_workers} build workers)",
+            1,
+            3,
+        )
+
+        multinode_disabled = find_multinode_disabled_benchmarks(
+            self.host,
+            self.request.bench_list,
+        )
+        total_jobs = count_total_slurm_jobs(
+            self.request.bench_list,
+            self.request.node_counts,
+            self.request.runs,
+            multinode_disabled,
+        )
+
+        manifest_file = experiment_dir / JOB_MANIFEST_JSON_FILENAME
+        existing_job_statuses = load_existing_job_statuses(manifest_file)
+        current_job_statuses: Dict[str, SlurmJobStatus] = {}
+        submission_failures: List[SubmissionFailure] = []
+        reference_checksums: Dict[str, ReferenceChecksum] = {}
+        seen_run_dirs: set[Path] = set()
+        seen_script_paths: set[Path] = set()
+        print_lock = threading.Lock()
+
+        def metadata() -> Dict[str, Any]:
+            payload = self._build_metadata(
+                experiment_dir=experiment_dir,
+                job_count=len(existing_job_statuses) + total_jobs,
+                submitted_jobs=len(existing_job_statuses) + len(current_job_statuses),
+                failed_submissions=len(submission_failures),
+            )
+            payload["current_step"] = self.request.step_name or "default"
+            payload["current_step_requested_jobs"] = total_jobs
+            payload["current_step_submitted_jobs"] = len(current_job_statuses)
+            if existing_job_statuses:
+                payload["previous_step_jobs"] = len(existing_job_statuses)
+            return payload
+
+        def write_manifest_snapshot() -> None:
+            all_job_statuses = dict(existing_job_statuses)
+            all_job_statuses.update(current_job_statuses)
+            slurm_batch.write_job_manifest(experiment_dir, all_job_statuses, metadata())
+
+        def wait_for_submission_slot() -> None:
+            if self.request.dry_run or self.request.max_jobs <= 0:
+                return
+            while (
+                self._active_streaming_jobs(current_job_statuses) >= self.request.max_jobs
+            ):
+                self._poll_streaming_jobs(current_job_statuses)
+                write_manifest_snapshot()
+                time.sleep(1)
+
+        def submit_ready_jobs(
+            job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]],
+        ) -> None:
+            for config, script_path in job_configs:
+                wait_for_submission_slot()
+                try:
+                    if self.request.dry_run:
+                        job_id = (
+                            f"DRY_{len(current_job_statuses) + 1}_"
+                            f"{script_path.stem}"
+                        )
+                        state = SLURM_STATE_DRY_RUN
+                    else:
+                        job_id = slurm_batch.submit_job(script_path)
+                        state = SLURM_STATE_PENDING
+                    current_job_statuses[job_id] = SlurmJobStatus(
+                        job_id=job_id,
+                        benchmark_name=config.benchmark_name,
+                        run_number=config.run_number,
+                        node_count=config.node_count,
+                        state=state,
+                        run_dir=config.run_dir,
+                    )
+                    write_manifest_snapshot()
+                except subprocess.CalledProcessError as exc:
+                    print_warning(
+                        f"Failed to submit {config.benchmark_name} run "
+                        f"{config.run_number}: {exc.stderr}"
+                    )
+                    submission_failures.append(
+                        SubmissionFailure(
+                            benchmark_name=config.benchmark_name,
+                            run_number=config.run_number,
+                            node_count=config.node_count,
+                            run_dir=config.run_dir,
+                            script_path=script_path,
+                            error=(exc.stderr or exc.stdout or str(exc)).strip(),
+                        )
+                    )
+                    write_manifest_snapshot()
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._build_one_bench,
+                    am=am,
+                    bench=bench,
+                    multinode_disabled=multinode_disabled,
+                    print_lock=print_lock,
+                    runtime_snapshot_lib_dir=runtime_snapshot_lib_dir,
+                ): bench
+                for bench in self.request.bench_list
+            }
+            for future in as_completed(futures):
+                bench = futures[future]
+                build_records, reference = future.result()
+                if reference is not None:
+                    reference_checksums[bench] = reference
+                build_results = {key: value for key, value in build_records}
+                job_configs = self._generate_job_scripts(
+                    am=am,
+                    scripts_dir=scripts_dir,
+                    build_results=build_results,
+                    reference_checksums=reference_checksums,
+                    seen_run_dirs=seen_run_dirs,
+                    seen_script_paths=seen_script_paths,
+                    emit_header=False,
+                )
+                submit_ready_jobs(job_configs)
+                self._poll_streaming_jobs(current_job_statuses)
+
+        print_info(
+            f"Streaming submission produced {len(current_job_statuses)} job(s); "
+            f"{len(submission_failures)} submission failure(s)"
+        )
+        write_manifest_snapshot()
+        print_info(f"Job manifest: {manifest_file}")
+
+        if self.request.dry_run:
+            print_warning("Dry run complete. Scripts generated but not submitted.")
+            print_info(
+                f"To submit manually, run sbatch on scripts in: {experiment_dir / 'scripts'}"
+            )
+            return
+
+        if current_job_statuses:
+            print_step("Monitoring jobs", 2, 3)
+            current_job_statuses = slurm_batch.wait_for_jobs_completion(
+                current_job_statuses,
+                console,
+                poll_interval=10,
+            )
+            write_manifest_snapshot()
+        else:
+            print_warning("Monitoring skipped: no jobs were submitted successfully.")
+
+        print_step("Collecting results", 3, 3)
+        self._collect_and_write_results(
+            am=am,
+            experiment_dir=experiment_dir,
+            job_statuses=current_job_statuses,
+            submission_failures=submission_failures,
+            metadata=metadata(),
+            slurm_start_time=slurm_start_time,
+        )
 
     def _submit_and_collect(
         self,
@@ -792,6 +1388,82 @@ class SlurmBatchExecutor:
         if failed_submissions > 0:
             raise ValueError(
                 f"SLURM submission failed for {failed_submissions}/{len(job_configs)} jobs. "
+                "Report artifacts were still generated."
+            )
+
+    def _collect_and_write_results(
+        self,
+        *,
+        am: ArtifactManager,
+        experiment_dir: Path,
+        job_statuses: Dict[str, SlurmJobStatus],
+        submission_failures: List[SubmissionFailure],
+        metadata: Dict[str, Any],
+        slurm_start_time: float,
+    ) -> None:
+        current_results: List[Dict[str, Any]] = []
+        if job_statuses:
+            current_results = slurm_batch.collect_results(job_statuses, experiment_dir)
+
+        submission_failure_results = slurm_batch.build_submission_failure_results(
+            submission_failures
+        )
+        existing_results = self._load_existing_results(am)
+        merged_results = merge_result_rows(
+            existing_results,
+            submission_failure_results,
+            current_results,
+        )
+
+        results_path = slurm_batch.write_aggregated_results(
+            experiment_dir,
+            merged_results,
+            metadata,
+        )
+        report_path: Optional[Path] = None
+        try:
+            report_path = generate_report_from_rows(
+                merged_results,
+                experiment_dir,
+                steps=self.request.report_steps,
+            )
+        except Exception as exc:
+            print_warning(f"Failed to generate report.xlsx: {exc}")
+
+        repro = get_reproducibility_metadata(
+            self.deps.get_carts_dir(),
+            self.deps.get_benchmarks_dir(),
+        )
+        slurm_manifest = slurm_batch.write_slurm_manifest(
+            experiment_dir,
+            merged_results,
+            metadata,
+            self.request.command_str,
+            time.time() - slurm_start_time,
+            repro,
+        )
+
+        successful = sum(1 for row in merged_results if row.get("status") == STATUS_PASS)
+        failed = sum(
+            1
+            for row in merged_results
+            if row.get("status") in FAIL_STATUSES
+        )
+        summary_content = (
+            f"{format_summary_line(successful, failed, len(merged_results) - successful - failed)}\n\n"
+            f"Total jobs: {len(merged_results)}\n"
+            f"Results: {results_path}\n"
+            f"Manifest: {slurm_manifest}"
+        )
+        if report_path:
+            summary_content += f"\nReport: {report_path}"
+        style = Colors.SUCCESS if failed == 0 else Colors.ERROR
+        print_footer(f"Experiment Complete — {summary_content}", style=style)
+
+        failed_submissions = len(submission_failures)
+        if failed_submissions > 0:
+            raise ValueError(
+                f"SLURM submission failed for {failed_submissions} jobs. "
                 "Report artifacts were still generated."
             )
 

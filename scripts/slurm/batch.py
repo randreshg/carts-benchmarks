@@ -53,7 +53,15 @@ from arts_config import (
     KEY_MASTER_NODE,
     KEY_NODE_COUNT,
     KEY_NODES,
+    KEY_PIN,
+    KEY_PROTOCOL,
+    KEY_RECEIVER_THREADS,
+    KEY_SENDER_THREADS,
+    KEY_COUNTER_CAPTURE_INTERVAL,
     KEY_WORKER_THREADS,
+    PROTOCOL_RDMA,
+    parse_arts_cfg,
+    protocol_for_rdma,
     upsert_cfg_value as _set_cfg_key,
     comment_cfg_key as _comment_cfg_key,
 )
@@ -188,12 +196,13 @@ SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --nodes={node_count}
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task={threads}
+#SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --exclusive
 #SBATCH --time={time_limit}
 {partition_line}
 {account_line}
 {exclude_line}
+{nodelist_line}
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
 
@@ -216,6 +225,9 @@ mkdir -p "$COUNTER_DIR"
 sed -e "s|^counter_folder=.*|counter_folder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
 export counter_folder="$COUNTER_DIR"
 
+{runtime_library_section}
+{rdma_environment_section}
+
 ARTS_EXIT=125
 ARTS_DURATION=0
 OMP_EXIT=-1
@@ -228,6 +240,7 @@ echo "Run: {run_number}"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
 echo "Node Count: $SLURM_NNODES"
+echo "CPUs/Task: ${{SLURM_CPUS_PER_TASK:-unknown}}"
 echo "Counter Dir: $COUNTER_DIR"
 echo "Timeout: {timeout_seconds}s"
 echo "Start: $(date -Iseconds)"
@@ -299,6 +312,88 @@ def _sanitize_job_token(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
 
 
+def _default_network_threads(node_count: int, *, rdma: bool) -> Tuple[int, int]:
+    if node_count <= 1:
+        return 0, 0
+    if not rdma:
+        return 1, 1
+
+    # RoCE/RDMA needs dedicated progress capacity, but one thread per peer makes
+    # startup fanout much noisier than the runtime can use. Keep a small floor
+    # for 8+ node diagnostics and cap at two per direction; higher sender
+    # fanout produced large abandoned-connect spikes at 64 nodes.
+    # The sbatch CPU request adds these threads on top of the requested worker
+    # count, so --threads remains the worker-thread contract.
+    floor = 2 if node_count >= 8 else 1
+    network_threads = min(node_count - 1, 2, max(floor, (node_count + 15) // 16))
+    return network_threads, network_threads
+
+
+def _network_threads_from_config(config: SlurmJobConfig) -> Tuple[int, int]:
+    if config.node_count <= 1 or config.arts_config_path is None:
+        return 0, 0
+    values = parse_arts_cfg(config.arts_config_path)
+    try:
+        sender_threads = int(values.get(KEY_SENDER_THREADS, "1"))
+    except ValueError:
+        sender_threads = 1
+    try:
+        receiver_threads = int(values.get(KEY_RECEIVER_THREADS, "1"))
+    except ValueError:
+        receiver_threads = 1
+    return max(0, sender_threads), max(0, receiver_threads)
+
+
+def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
+    """Return sbatch setup and per-task env prefix for a runtime snapshot."""
+    if config.arts_runtime_lib_dir is None:
+        return (
+            '# ARTS runtime library snapshot disabled',
+            "",
+        )
+
+    lib_dir = config.arts_runtime_lib_dir.resolve()
+    section = f"""ARTS_RUNTIME_LIB_DIR="{lib_dir}"
+ARTS_RUNTIME_PRELOAD="$ARTS_RUNTIME_LIB_DIR/libarts.so.2"
+if [ ! -e "$ARTS_RUNTIME_PRELOAD" ]; then
+    ARTS_RUNTIME_PRELOAD="$ARTS_RUNTIME_LIB_DIR/libarts.so"
+fi
+if [ ! -e "$ARTS_RUNTIME_PRELOAD" ]; then
+    echo "Missing ARTS runtime snapshot: $ARTS_RUNTIME_LIB_DIR" >&2
+    exit 126
+fi
+export ARTS_RUNTIME_LIB_DIR
+export ARTS_RUNTIME_PRELOAD
+export LD_LIBRARY_PATH="$ARTS_RUNTIME_LIB_DIR${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+echo "ARTS Runtime Lib Dir: $ARTS_RUNTIME_LIB_DIR"
+echo "ARTS Runtime Preload: $ARTS_RUNTIME_PRELOAD"
+"""
+    env_prefix = (
+        'env LD_PRELOAD="${ARTS_RUNTIME_PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}" '
+        'LD_LIBRARY_PATH="${ARTS_RUNTIME_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" '
+    )
+    return section.rstrip(), env_prefix
+
+
+def _rdma_environment_section(config: SlurmJobConfig) -> str:
+    if config.arts_config_path is None:
+        return ""
+    protocol = parse_arts_cfg(config.arts_config_path).get(KEY_PROTOCOL)
+    if protocol != PROTOCOL_RDMA:
+        return ""
+    return """export ARTS_RDMA_CONNECT_HELPER="${ARTS_RDMA_CONNECT_HELPER:-1}"
+export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"
+export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-1}"
+export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"
+export ARTS_RDMA_RECEIVE_RPOLL="${ARTS_RDMA_RECEIVE_RPOLL:-0}"
+export ARTS_LAZY_ACCEPT_DRAIN_LIMIT="${ARTS_LAZY_ACCEPT_DRAIN_LIMIT:-128}"
+export ARTS_LAZY_ACCEPT_IDLE_INTERVAL_US="${ARTS_LAZY_ACCEPT_IDLE_INTERVAL_US:-1000}"
+export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-1048576}"
+export ARTS_RDMA_SEND_MAX_ITERS="${ARTS_RDMA_SEND_MAX_ITERS:-256}"
+export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-16}"
+"""
+
+
 def generate_sbatch_script(
     config: SlurmJobConfig,
     script_path: Path,
@@ -329,6 +424,7 @@ def generate_sbatch_script(
     partition_line = f"#SBATCH --partition={config.partition}" if config.partition else ""
     account_line = f"#SBATCH --account={config.account}" if config.account else ""
     exclude_line = f"#SBATCH --exclude={config.exclude_nodes}" if config.exclude_nodes else ""
+    nodelist_line = f"#SBATCH --nodelist={config.nodelist}" if config.nodelist else ""
 
     # CRITICAL: Use absolute paths - jobs may run from different working directories
     run_dir = config.run_dir.resolve()
@@ -389,12 +485,21 @@ def generate_sbatch_script(
     job_prefix = "__".join(prefix_parts) if prefix_parts else "job"
     max_prefix_len = max(1, 64 - len(job_suffix))
     job_name = f"{job_prefix[:max_prefix_len]}{job_suffix}"
+    sender_threads, receiver_threads = _network_threads_from_config(config)
+    cpus_per_task = config.threads + sender_threads + receiver_threads
+    runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
+    rdma_environment_section = _rdma_environment_section(config)
 
     # Build srun command: gdb, perf, or plain (mutually exclusive)
+    srun_prefix = (
+        f"srun --exclusive -N{config.node_count} --ntasks={config.node_count} "
+        f"--ntasks-per-node=1 --cpus-per-task={cpus_per_task} "
+        "--cpu-bind=none --kill-on-bad-exit=1"
+    )
     if config.gdb:
         srun_command = (
-            f'srun --exclusive --cpus-per-task={config.threads} --kill-on-bad-exit=1 bash -c '
-            f"'gdb --batch -ex run -ex \"thread apply all bt\" -ex quit --args {executable_arts_abs}'"
+            f"{srun_prefix} bash -c "
+            f"'{runtime_env_prefix}gdb --batch -ex run -ex \"thread apply all bt\" -ex quit --args {executable_arts_abs}'"
         )
     elif config.perf and perf_dir:
         events = ",".join(PERF_CACHE_EVENTS)
@@ -402,24 +507,23 @@ def generate_sbatch_script(
         # Single quotes: run_dir/perf is baked as absolute path at generation time,
         # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
         srun_command = (
-            f"srun --exclusive --cpus-per-task={config.threads} --kill-on-bad-exit=1 bash -c "
-            f"'perf stat -e {events} -I {interval_ms} -x , "
+            f"{srun_prefix} bash -c "
+            f"'{runtime_env_prefix}perf stat -e {events} -I {interval_ms} -x , "
             f"-o {run_dir}/perf/arts_node_${{SLURM_PROCID}}.csv "
             f"-- {executable_arts_abs}'"
         )
     else:
-        srun_command = (
-            f"srun --exclusive --cpus-per-task={config.threads} "
-            f"--kill-on-bad-exit=1 {executable_arts_abs}"
-        )
+        srun_command = f"{srun_prefix} {runtime_env_prefix}{executable_arts_abs}"
 
     script_content = SBATCH_TEMPLATE.format(
         job_name=job_name,
         node_count=config.node_count,
+        cpus_per_task=cpus_per_task,
         time_limit=config.time_limit,
         partition_line=partition_line,
         account_line=account_line,
         exclude_line=exclude_line,
+        nodelist_line=nodelist_line,
         run_dir=run_dir,
         benchmark_name=config.benchmark_name,
         run_number=config.run_number,
@@ -427,6 +531,8 @@ def generate_sbatch_script(
         arts_config_path=arts_config_abs,
         runtime_arts_cfg=runtime_arts_cfg,
         perf_dir_section=perf_dir_section,
+        runtime_library_section=runtime_library_section,
+        rdma_environment_section=rdma_environment_section,
         result_json=result_json,
         executable_arts=executable_arts_abs,
         srun_command=srun_command,
@@ -454,6 +560,8 @@ def generate_arts_config_for_node(
     build_node_dir: Path,
     node_count: int,
     threads: int,
+    *,
+    rdma: bool = False,
 ) -> Path:
     """Generate a node-specific arts.cfg for compilation (goes in build/ directory).
 
@@ -479,6 +587,18 @@ def generate_arts_config_for_node(
     content = _set_cfg_key(content, KEY_NODE_COUNT, str(node_count))
     content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
     content = _set_cfg_key(content, KEY_LAUNCHER, "slurm")
+    content = _set_cfg_key(content, KEY_PROTOCOL, protocol_for_rdma(rdma))
+    content = _set_cfg_key(content, KEY_COUNTER_CAPTURE_INTERVAL, "10")
+    if node_count > 1:
+        sender_threads, receiver_threads = _default_network_threads(
+            node_count, rdma=rdma,
+        )
+        content = _set_cfg_key(content, KEY_SENDER_THREADS, str(sender_threads))
+        content = _set_cfg_key(content, KEY_RECEIVER_THREADS, str(receiver_threads))
+        content = _set_cfg_key(content, KEY_PIN, "0")
+    else:
+        content = _set_cfg_key(content, KEY_SENDER_THREADS, "0")
+        content = _set_cfg_key(content, KEY_RECEIVER_THREADS, "0")
 
     # Clear nodes and master_node - SLURM launcher ignores these.
     # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)
@@ -976,16 +1096,16 @@ def _build_job_state_table(
         state_counts[status.state] = state_counts.get(status.state, 0) + 1
 
     state_colors = {
-        SLURM_STATE_PENDING: Colors.SKIP,
-        SLURM_STATE_RUNNING: Colors.RUNNING,
-        SLURM_STATE_COMPLETED: Colors.PASS,
+        SLURM_STATE_PENDING: Colors.DEBUG,
+        SLURM_STATE_RUNNING: Colors.WARNING,
+        SLURM_STATE_COMPLETED: Colors.SUCCESS,
         SLURM_STATE_FAILED: Colors.ERROR,
         SLURM_STATE_TIMEOUT: Colors.ERROR,
-        SLURM_STATE_CANCELLED: Colors.SKIP,
-        SLURM_STATE_UNKNOWN: Colors.DIM,
+        SLURM_STATE_CANCELLED: Colors.DEBUG,
+        SLURM_STATE_UNKNOWN: Colors.DEBUG,
     }
     for state, count in sorted(state_counts.items()):
-        color = state_colors.get(state, Colors.DIM)
+        color = state_colors.get(state, Colors.DEBUG)
         table.add_row(f"[{color}]{state}[/{color}]", str(count))
 
     if (

@@ -72,6 +72,7 @@ class ArtifactManager:
         {base_results_dir}/{timestamp}/
           manifest.json
           results.json
+          {phase}/              # explicit experiment steps only
           {benchmark_name}/
             {threads}t_{nodes}n/
               artifacts/          # build outputs (shared across runs)
@@ -221,6 +222,7 @@ class ArtifactManager:
         timeout: Optional[int] = None,
         time_limit: Optional[str] = None,
         runtime_arts_overrides: Optional[Dict[str, str]] = None,
+        arts_runtime_lib_dir: Optional[Path] = None,
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
@@ -295,6 +297,8 @@ class ArtifactManager:
             run_config["env_overrides"] = env_overrides
         if arts_cfg_path:
             run_config["arts_cfg_source"] = str(arts_cfg_path)
+        if arts_runtime_lib_dir is not None:
+            run_config["arts_runtime_lib_dir"] = str(arts_runtime_lib_dir)
         if (
             reference_checksum is not None
             or reference_source is not None
@@ -326,16 +330,24 @@ class ArtifactManager:
     ):
         """Track a completed run for the manifest."""
         config_label = f"{config.arts_threads}t_{config.arts_nodes}n"
+        rel_config_dir = Path(benchmark_name) / config_label
+        manifest_config_label = config_label
+        if self._phase_label:
+            rel_config_dir = Path(self._phase_label) / rel_config_dir
+            manifest_config_label = f"{self._phase_label}/{config_label}"
+
         if benchmark_name not in self._manifest_benchmarks:
             self._manifest_benchmarks[benchmark_name] = {"configs": {}}
         configs = self._manifest_benchmarks[benchmark_name]["configs"]
-        if config_label not in configs:
-            configs[config_label] = {
-                "artifacts": str(Path(benchmark_name) / config_label / "artifacts"),
+        if manifest_config_label not in configs:
+            configs[manifest_config_label] = {
+                "phase": self._phase_label,
+                "config": config_label,
+                "artifacts": str(rel_config_dir / "artifacts"),
                 "runs": {},
             }
-        configs[config_label]["runs"][str(run_number)] = {
-            "path": str(Path(benchmark_name) / config_label / f"run_{run_number}"),
+        configs[manifest_config_label]["runs"][str(run_number)] = {
+            "path": str(rel_config_dir / f"run_{run_number}"),
             "has_counters": has_counters,
             "has_perf": has_perf,
         }

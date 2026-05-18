@@ -287,10 +287,13 @@ class ConfigExecutionExecutor:
                 stdout="",
                 stderr="Build failed",
             )
+        arts_env = dict(self.plan.env_overrides)
+        if execution.effective_arts_cfg:
+            arts_env["ARTS_CONFIG"] = str(Path(execution.effective_arts_cfg).resolve())
         return self.host.run_benchmark(
             build_arts.executable,
             self.plan.timeout,
-            env=dict(self.plan.env_overrides),
+            env=arts_env,
             launcher=execution.desired_launcher,
             node_count=execution.desired_nodes,
             threads=execution.desired_threads,
@@ -419,6 +422,16 @@ class ConfigExecutionExecutor:
             if artifact_paths.get("arts_config")
             else execution.effective_arts_cfg
         )
+        saved_env_overrides = (
+            self.plan.persisted_env_overrides
+            if self.plan.persisted_env_overrides is not None
+            else self.plan.env_overrides
+        )
+        saved_env_overrides = dict(saved_env_overrides)
+        if execution.effective_arts_cfg:
+            saved_env_overrides["ARTS_CONFIG"] = str(
+                Path(execution.effective_arts_cfg).resolve()
+            )
         am.save_run_config(
             execution.name,
             execution.config,
@@ -429,11 +442,7 @@ class ConfigExecutionExecutor:
                 if counter_path is not None
                 else None
             ),
-            env_overrides=(
-                self.plan.persisted_env_overrides
-                if self.plan.persisted_env_overrides is not None
-                else self.plan.env_overrides
-            ),
+            env_overrides=saved_env_overrides,
             size=execution.size,
             cflags=execution.effective_cflags or None,
             compile_args=self.plan.compile_args or None,

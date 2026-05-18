@@ -1,0 +1,93 @@
+{
+  "name": "scale-single-node-large",
+  "description": "Strong single-node thread scaling at large for the benchmarks that pass the 90-second 1-thread screen.",
+  "steps": [
+    {
+      "name": "thread-sweep",
+      "benchmarks": [
+        "kastors-jacobi/jacobi-for",
+        "kastors-jacobi/poisson-for",
+        "ml-kernels/activations",
+        "ml-kernels/batchnorm",
+        "ml-kernels/layernorm",
+        "ml-kernels/pooling",
+        "polybench/2mm",
+        "polybench/3mm",
+        "polybench/convolution-2d",
+        "polybench/correlation",
+        "polybench/gemm",
+        "polybench/jacobi2d",
+        "polybench/seidel-2d",
+        "specfem3d/stress",
+        "specfem3d/velocity",
+        "stream",
+        "sw4lite/rhs4sg-base",
+        "sw4lite/vel4sg-base"
+      ],
+      "size": "large",
+      "threads": "1,2,4,8,16,32,64",
+      "nodes": "1",
+      "runs": 1,
+      "perf": false,
+      "timeout": 90
+    },
+    {
+      "name": "thread-edt-64",
+      "benchmarks": [
+        "kastors-jacobi/jacobi-for",
+        "kastors-jacobi/poisson-for",
+        "ml-kernels/activations",
+        "ml-kernels/batchnorm",
+        "ml-kernels/layernorm",
+        "ml-kernels/pooling",
+        "polybench/2mm",
+        "polybench/3mm",
+        "polybench/convolution-2d",
+        "polybench/correlation",
+        "polybench/gemm",
+        "polybench/jacobi2d",
+        "polybench/seidel-2d",
+        "specfem3d/stress",
+        "specfem3d/velocity",
+        "stream",
+        "sw4lite/rhs4sg-base",
+        "sw4lite/vel4sg-base"
+      ],
+      "size": "large",
+      "threads": "64",
+      "nodes": "1",
+      "runs": 1,
+      "profile": "profile-thread-edt.cfg",
+      "timeout": 90
+    },
+    {
+      "name": "perf-64",
+      "benchmarks": [
+        "kastors-jacobi/jacobi-for",
+        "kastors-jacobi/poisson-for",
+        "ml-kernels/activations",
+        "ml-kernels/batchnorm",
+        "ml-kernels/layernorm",
+        "ml-kernels/pooling",
+        "polybench/2mm",
+        "polybench/3mm",
+        "polybench/convolution-2d",
+        "polybench/correlation",
+        "polybench/gemm",
+        "polybench/jacobi2d",
+        "polybench/seidel-2d",
+        "specfem3d/stress",
+        "specfem3d/velocity",
+        "stream",
+        "sw4lite/rhs4sg-base",
+        "sw4lite/vel4sg-base"
+      ],
+      "size": "large",
+      "threads": "64",
+      "nodes": "1",
+      "runs": 1,
+      "perf": true,
+      "timeout": 90
+    }
+  ]
+}

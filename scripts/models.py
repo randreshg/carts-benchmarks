@@ -238,6 +238,7 @@ class ExperimentStep:
     description: Optional[str] = None
     benchmarks: Optional[List[str]] = None
     profile: Optional[str] = None
+    rdma: bool = False
     debug: int = 0
     runs: int = 1
     perf: bool = False
@@ -249,6 +250,7 @@ class ExperimentStep:
     cflags: Optional[str] = None
     compile_args: Optional[str] = None
     exclude_nodes: Optional[str] = None
+    nodelist: Optional[str] = None
     arts_config: Optional[str] = None
     launcher: Optional[str] = None
 

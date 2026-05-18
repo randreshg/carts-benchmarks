@@ -256,8 +256,10 @@ class BenchmarkProcessRunner:
             cmd = [
                 "srun",
                 f"-N{request.node_count}",
+                f"--ntasks={request.node_count}",
                 "--ntasks-per-node=1",
                 f"--cpus-per-task={request.threads}",
+                "--cpu-bind=none",
                 request.executable,
             ]
         else:
@@ -402,7 +404,7 @@ class BenchmarkProcessRunner:
     def _status_from_exit_code(exit_code: int) -> Status:
         if exit_code == 0:
             return Status.PASS
-        if exit_code in (139, 134, 136):
+        if exit_code in (139, 134, 136, -11, -6, -8):
             return Status.CRASH
         return Status.FAIL
 

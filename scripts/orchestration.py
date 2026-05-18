@@ -23,11 +23,14 @@ class StepCliDefaults:
     perf_interval: float
     cflags: Optional[str]
     compile_args: Optional[str]
+    debug: int
     exclude_nodes: Optional[str]
+    nodelist: Optional[str]
     arts_config: Optional[Path]
     launcher: Optional[str]
     explicit_step_mode: bool
     size_from_cli: bool
+    rdma: bool
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class ResolvedStepConfig:
     name: str
     bench_list: List[str]
     profile_path: Path
+    rdma: bool
     debug: int
     should_rebuild_arts: bool
     threads_list: Optional[List[int]]
@@ -49,6 +53,7 @@ class ResolvedStepConfig:
     cflags: Optional[str]
     compile_args: Optional[str]
     exclude_nodes: Optional[str]
+    nodelist: Optional[str]
     arts_config: Optional[Path]
     launcher: Optional[str]
 
@@ -145,9 +150,12 @@ class StepResolver:
         cflags: Optional[str],
         compile_args: Optional[str],
         exclude_nodes: Optional[str],
+        nodelist: Optional[str],
         arts_config: Optional[Path],
         profile: Optional[Path],
         launcher: Optional[str],
+        debug: int,
+        rdma: bool,
     ) -> Tuple[List[ExperimentStep], bool]:
         """Load explicit steps or synthesize the default implicit step."""
         explicit_step_mode = bool(experiment or step_args)
@@ -168,9 +176,12 @@ class StepResolver:
                     cflags=cflags,
                     compile_args=compile_args,
                     exclude_nodes=exclude_nodes,
+                    nodelist=nodelist,
                     arts_config=arts_config,
                     profile=profile,
                     launcher=launcher,
+                    debug=debug,
+                    rdma=rdma,
                 )
             ]
         return steps, explicit_step_mode
@@ -254,10 +265,26 @@ class StepResolver:
             if step_def.profile
             else self.profiles_dir / "profile-none.cfg"
         )
+        step_debug = (
+            step_def.debug
+            if self._uses_step_override(
+                step_def, "_has_debug", defaults.explicit_step_mode
+            )
+            else defaults.debug
+        )
         should_rebuild_arts = (
             step_def.profile is not None
-            or step_def.debug > 0
+            or step_debug > 0
+            or step_def.rdma
         )
+        step_rdma = (
+            step_def.rdma
+            if self._uses_step_override(
+                step_def, "_has_rdma", defaults.explicit_step_mode
+            )
+            else defaults.rdma
+        )
+        should_rebuild_arts = should_rebuild_arts or step_rdma
 
         step_threads_spec = (
             step_def.threads
@@ -334,6 +361,13 @@ class StepResolver:
             )
             else defaults.exclude_nodes
         )
+        step_nodelist = (
+            step_def.nodelist
+            if self._uses_step_override(
+                step_def, "_has_nodelist", defaults.explicit_step_mode
+            )
+            else defaults.nodelist
+        )
         step_arts_config = defaults.arts_config
         if (
             self._uses_step_override(
@@ -362,7 +396,8 @@ class StepResolver:
             name=step_name,
             bench_list=step_bench_list,
             profile_path=profile_path,
-            debug=step_def.debug,
+            rdma=step_rdma,
+            debug=step_debug,
             should_rebuild_arts=should_rebuild_arts,
             threads_list=threads_list,
             node_counts=node_counts,
@@ -374,6 +409,7 @@ class StepResolver:
             cflags=step_cflags,
             compile_args=step_compile_args,
             exclude_nodes=step_exclude_nodes,
+            nodelist=step_nodelist,
             arts_config=step_arts_config,
             launcher=step_launcher,
         )
@@ -480,15 +516,19 @@ class StepResolver:
         cflags: Optional[str],
         compile_args: Optional[str],
         exclude_nodes: Optional[str],
+        nodelist: Optional[str],
         arts_config: Optional[Path],
         profile: Optional[Path],
         launcher: Optional[str],
+        debug: int,
+        rdma: bool,
     ) -> ExperimentStep:
         step = ExperimentStep(
             name="default",
             description=None,
             profile=str(profile.resolve()) if profile else None,
-            debug=0,
+            rdma=rdma,
+            debug=debug,
             runs=runs,
             perf=perf,
             perf_interval=perf_interval,
@@ -499,6 +539,7 @@ class StepResolver:
             cflags=cflags,
             compile_args=compile_args,
             exclude_nodes=exclude_nodes,
+            nodelist=nodelist,
             arts_config=str(arts_config.resolve()) if arts_config else None,
             launcher=launcher,
         )
@@ -513,8 +554,11 @@ class StepResolver:
             "_has_cflags": cflags is not None,
             "_has_compile_args": compile_args is not None,
             "_has_exclude_nodes": exclude_nodes is not None,
+            "_has_nodelist": nodelist is not None,
             "_has_arts_config": arts_config is not None,
             "_has_profile": profile is not None,
+            "_has_debug": True,
+            "_has_rdma": True,
             "_has_benchmarks": False,
             "_has_launcher": launcher is not None,
         }

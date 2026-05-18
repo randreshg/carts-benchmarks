@@ -75,9 +75,12 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             cflags="-DTEST=1",
             compile_args="--distributed-db",
             exclude_nodes="j001",
+            nodelist="b05u[01,07]",
             arts_config=arts_cfg,
             profile=None,
             launcher="slurm",
+            debug=2,
+            rdma=True,
         )
 
         self.assertFalse(explicit)
@@ -93,11 +96,14 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             perf_interval=0.5,
             cflags="-DTEST=1",
             compile_args="--distributed-db",
+            debug=2,
             exclude_nodes="j001",
+            nodelist="b05u[01,07]",
             arts_config=arts_cfg,
             launcher="slurm",
             explicit_step_mode=explicit,
             size_from_cli=True,
+            rdma=True,
         )
 
         resolved = self.resolver.resolve_step_config(
@@ -111,8 +117,12 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
         self.assertEqual(resolved.threads_list, [4, 8])
         self.assertEqual(resolved.node_counts, [2])
         self.assertEqual(resolved.compile_args, "--distributed-db")
+        self.assertEqual(resolved.nodelist, "b05u[01,07]")
         self.assertEqual(resolved.launcher, "slurm")
         self.assertEqual(resolved.arts_config, arts_cfg.resolve())
+        self.assertEqual(resolved.debug, 2)
+        self.assertTrue(resolved.rdma)
+        self.assertTrue(resolved.should_rebuild_arts)
 
     def test_local_execution_orchestrator_sets_phase_and_result_phase(self) -> None:
         artifact_manager = _FakeArtifactManager()
@@ -143,11 +153,14 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             perf_interval=0.1,
             cflags=None,
             compile_args=None,
+            debug=0,
             exclude_nodes=None,
+            nodelist=None,
             arts_config=None,
             launcher=None,
             explicit_step_mode=True,
             size_from_cli=False,
+            rdma=False,
         )
 
         results = orchestrator.execute_local_steps(
@@ -202,11 +215,14 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             perf_interval=0.1,
             cflags=None,
             compile_args=None,
+            debug=0,
             exclude_nodes=None,
+            nodelist=None,
             arts_config=None,
             launcher=None,
             explicit_step_mode=True,
             size_from_cli=False,
+            rdma=False,
         )
 
         orchestrator.execute_slurm_steps(

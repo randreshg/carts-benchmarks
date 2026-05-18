@@ -53,7 +53,9 @@ class SlurmJobConfig:
     perf: bool = False
     perf_interval: float = 0.1
     exclude_nodes: Optional[str] = None
+    nodelist: Optional[str] = None
     job_label: Optional[str] = None
+    arts_runtime_lib_dir: Optional[Path] = None
 
 
 @dataclass

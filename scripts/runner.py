@@ -49,6 +49,7 @@ from arts_config import (
     parse_arts_cfg,
     EMBEDDED_KEYS,
     KEY_COUNTER_FOLDER,
+    KEY_DEFAULT_PORTS,
     KEY_LAUNCHER,
     KEY_MASTER_NODE,
     KEY_NODE_COUNT,
@@ -57,6 +58,7 @@ from arts_config import (
     get_cfg_int as get_arts_cfg_int,
     get_cfg_str as get_arts_cfg_str,
     get_cfg_nodes as get_arts_cfg_nodes,
+    protocol_for_rdma,
     upsert_cfg_value as _upsert_arts_cfg_value,
     extract_embedded_cfg as _extract_embedded_arts_cfg,
     validate_embedded_cfg as _validate_embedded_arts_cfg,
@@ -221,6 +223,23 @@ def arts_runtime_is_installed(carts_dir: Optional[Path] = None) -> bool:
     public_header = install_dir / "include" / "arts.h"
     has_library = any(path.is_file() for path in lib_dir.glob("libarts*"))
     return cmake_config.is_file() and public_header.is_file() and has_library
+
+
+def arts_runtime_uses_rdma(carts_dir: Optional[Path] = None) -> Optional[bool]:
+    """Return the ARTS build transport from CMakeCache, or None if unknown."""
+    root = carts_dir or get_carts_dir()
+    cache = root / "external" / "arts" / "build" / "CMakeCache.txt"
+    if not cache.is_file():
+        return None
+
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith("ARTS_USE_RDMA:"):
+            value = line.split("=", 1)[-1].strip().upper()
+            if value in {"ON", "TRUE", "1", "YES"}:
+                return True
+            if value in {"OFF", "FALSE", "0", "NO"}:
+                return False
+    return None
 
 
 BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
@@ -521,6 +540,45 @@ def _sanitize_config_token(value: str, fallback: str = "default") -> str:
     return token or fallback
 
 
+def _split_host_port(node: str, default_port: int) -> Tuple[str, int]:
+    """Split an ARTS node token into host and port for local config synthesis."""
+    node = node.strip()
+    if ":" not in node:
+        return (node or "localhost", default_port)
+    host, port_text = node.rsplit(":", 1)
+    try:
+        return (host or "localhost", int(port_text))
+    except ValueError:
+        return (node or "localhost", default_port)
+
+
+def _first_default_port(base_path: Path) -> int:
+    """Read the first configured ARTS default port, or use the local default."""
+    value = get_arts_cfg_str(base_path, KEY_DEFAULT_PORTS)
+    if value:
+        for token in value.split(","):
+            try:
+                return int(token.strip())
+            except ValueError:
+                continue
+    return 50000
+
+
+def _local_launcher_nodes(base_path: Path, node_count: int) -> List[str]:
+    """Return a node list with one localhost endpoint per local ARTS rank."""
+    configured = get_arts_cfg_nodes(base_path)
+    if len(configured) >= node_count:
+        return configured[:node_count]
+
+    default_port = _first_default_port(base_path)
+    host, port = (
+        _split_host_port(configured[0], default_port)
+        if configured
+        else ("localhost", default_port)
+    )
+    return [f"{host}:{port + idx}" for idx in range(node_count)]
+
+
 def generate_arts_config(
     base_path: Path,
     threads: int,
@@ -533,7 +591,8 @@ def generate_arts_config(
 
     The base_path must be a valid config file that serves as a template.
     For SSH launcher templates we preserve and truncate the configured
-    hostnames. For local and Slurm launchers, node_count is sufficient.
+    hostnames. For local launcher templates we synthesize localhost endpoints
+    when the template does not provide enough node entries.
 
     Args:
         base_path: Template config file (required).
@@ -557,7 +616,13 @@ def generate_arts_config(
     # Handle node override.
     if nodes_override is not None:
         content = _upsert_arts_cfg_value(content, KEY_NODE_COUNT, nodes_override)
-        if launcher == "ssh":
+        if launcher == "local":
+            local_nodes = _local_launcher_nodes(base_path, nodes_override)
+            content = _upsert_arts_cfg_value(
+                content, KEY_NODES, ",".join(local_nodes)
+            )
+            content = _upsert_arts_cfg_value(content, KEY_MASTER_NODE, local_nodes[0])
+        elif launcher == "ssh":
             all_nodes = get_arts_cfg_nodes(base_path)
             if nodes_override > len(all_nodes):
                 raise ValueError(
@@ -3922,6 +3987,7 @@ KNOWN_STEP_KEYS = {
     "name",
     "benchmarks",
     "profile",
+    "rdma",
     "debug",
     "runs",
     "perf",
@@ -3933,6 +3999,7 @@ KNOWN_STEP_KEYS = {
     "cflags",
     "compile_args",
     "exclude_nodes",
+    "nodelist",
     "arts_config",
     "launcher",
     "description",
@@ -3993,6 +4060,7 @@ def _make_experiment_step(
         ),
         benchmarks=_parse_step_benchmarks(normalized.get("benchmarks")),
         profile=_resolve_path(normalized.get("profile"), "profile"),
+        rdma=_parse_bool_flag(normalized.get("rdma", False)),
         debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
         perf=_parse_bool_flag(normalized.get("perf", False)),
@@ -4005,6 +4073,7 @@ def _make_experiment_step(
         cflags=str(normalized["cflags"]) if normalized.get("cflags") is not None else None,
         compile_args=str(normalized["compile_args"]) if normalized.get("compile_args") is not None else None,
         exclude_nodes=str(normalized["exclude_nodes"]) if normalized.get("exclude_nodes") is not None else None,
+        nodelist=str(normalized["nodelist"]) if normalized.get("nodelist") is not None else None,
         arts_config=_resolve_path(normalized.get("arts_config"), "arts_config"),
         launcher=str(normalized["launcher"]) if normalized.get("launcher") is not None else None,
     )
@@ -4032,6 +4101,11 @@ def _make_experiment_step(
     )
     setattr(
         step,
+        "_has_nodelist",
+        "nodelist" in normalized and normalized.get("nodelist") is not None,
+    )
+    setattr(
+        step,
         "_has_arts_config",
         "arts_config" in normalized and normalized.get("arts_config") is not None,
     )
@@ -4040,6 +4114,12 @@ def _make_experiment_step(
         "_has_profile",
         "profile" in normalized and normalized.get("profile") is not None,
     )
+    setattr(
+        step,
+        "_has_debug",
+        "debug" in normalized and normalized.get("debug") is not None,
+    )
+    setattr(step, "_has_rdma", "rdma" in normalized and normalized.get("rdma") is not None)
     setattr(
         step,
         "_has_benchmarks",
@@ -4057,8 +4137,11 @@ def _rebuild_arts(
     console: Console,
     debug: int = 0,
     profile: Path = PROFILES_DIR / "profile-none.cfg",
+    rdma: bool = False,
 ) -> None:
     """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
+    if rdma and debug == 0:
+        debug = 1
     if not profile.exists():
         print_error(f"Profile not found: {profile}")
         raise typer.Exit(1)
@@ -4076,11 +4159,15 @@ def _rebuild_arts(
         f"--profile={profile}",
         f"--debug={debug}",
     ]
+    if rdma:
+        cmd.append("--rdma")
 
     details: List[str] = []
     if debug > 0:
         details.append(f"debug={debug}")
     details.append(f"profile={profile}")
+    if rdma:
+        details.append("rdma=on")
 
     detail_text = ", ".join(details)
     print_warning(f"Rebuilding ARTS ({detail_text})")
@@ -4193,6 +4280,7 @@ def _serialize_experiment_steps(
                 "nodes": step.nodes,
                 "runs": step.runs,
                 "compile_args": step.compile_args,
+                "rdma": step.rdma,
                 "debug": step.debug,
                 "perf": step.perf,
                 "perf_interval": step.perf_interval if step.perf else None,
@@ -4425,12 +4513,14 @@ def _run_step_slurm(
     cflags: Optional[str],
     compile_args: Optional[str],
     exclude_nodes: Optional[str],
+    nodelist: Optional[str],
     perf: bool,
     perf_interval: float,
     artifact_manager: Optional[ArtifactManager] = None,
     step_name: Optional[str] = None,
     max_jobs: int = 0,
     report_steps: Optional[List[ExperimentStep]] = None,
+    rdma: bool = False,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
     if not node_counts:
@@ -4463,25 +4553,48 @@ def _run_step_slurm(
             perf=perf,
             perf_interval=perf_interval,
             exclude_nodes=exclude_nodes,
+            nodelist=nodelist,
             exclude=None,
             max_jobs=max_jobs,
             artifact_manager=artifact_manager,
             step_name=step_name,
             report_steps=report_steps,
+            rdma=rdma,
         )
 
 
 def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
     """Rebuild ARTS when a resolved step requests instrumentation changes."""
     runtime_missing = not arts_runtime_is_installed()
-    if not step_config.should_rebuild_arts and not runtime_missing:
+    runtime_rdma = arts_runtime_uses_rdma()
+    transport_unknown = runtime_rdma is None
+    transport_mismatch = (
+        not runtime_missing
+        and runtime_rdma is not None
+        and runtime_rdma != step_config.rdma
+    )
+    if (
+        not step_config.should_rebuild_arts
+        and not runtime_missing
+        and not transport_unknown
+        and not transport_mismatch
+    ):
         return
     if runtime_missing:
         print_warning("ARTS runtime is not installed; forcing rebuild before benchmark step")
+    elif transport_unknown:
+        print_warning("ARTS runtime transport is unknown; forcing rebuild before benchmark step")
+    elif transport_mismatch:
+        current = protocol_for_rdma(runtime_rdma)
+        requested = protocol_for_rdma(step_config.rdma)
+        print_warning(
+            f"ARTS runtime transport is {current}; rebuilding for requested {requested}"
+        )
     _rebuild_arts(
         console,
         debug=step_config.debug,
         profile=step_config.profile_path,
+        rdma=step_config.rdma,
     )
 
 
@@ -4536,12 +4649,14 @@ def _run_slurm_resolved_step(
         cflags=step_config.cflags,
         compile_args=step_config.compile_args,
         exclude_nodes=step_config.exclude_nodes,
+        nodelist=step_config.nodelist,
         perf=step_config.perf,
         perf_interval=step_config.perf_interval,
         artifact_manager=request.artifact_manager,
         step_name=step_config.name,
         max_jobs=request.max_jobs,
         report_steps=report_steps,
+        rdma=step_config.rdma,
     )
 
 
@@ -4623,6 +4738,9 @@ def run(
     profile: Optional[Path] = typer.Option(
         None, "--profile",
         help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
+    rdma: bool = typer.Option(
+        False, "--rdma",
+        help="Rebuild/use ARTS with RDMA RSockets transport for all steps."),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     perf: bool = typer.Option(
@@ -4647,6 +4765,9 @@ def run(
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
+    nodelist: Optional[str] = typer.Option(
+        None, "--nodelist",
+        help="SLURM nodes to request/restrict allocation to (e.g. b05u[01,07,13,19,25,31,37,43])"),
     openmp: bool = typer.Option(
         False, "--openmp", help="Run OpenMP only (skip ARTS build and run)"),
     arts: bool = typer.Option(
@@ -4751,9 +4872,12 @@ def run(
             cflags=cflags,
             compile_args=compile_args,
             exclude_nodes=exclude_nodes,
+            nodelist=nodelist,
             arts_config=arts_config,
             profile=profile,
             launcher=launcher,
+            debug=debug_level,
+            rdma=rdma,
         )
     except ValueError as e:
         print_error(str(e))
@@ -4801,11 +4925,14 @@ def run(
         perf_interval=perf_interval,
         cflags=cflags,
         compile_args=compile_args,
+        debug=debug_level,
         exclude_nodes=exclude_nodes,
+        nodelist=nodelist,
         arts_config=arts_config,
         launcher=launcher,
         explicit_step_mode=explicit_step_mode,
         size_from_cli=size_from_cli,
+        rdma=rdma,
     )
 
     if slurm:
@@ -4857,6 +4984,8 @@ def run(
             config_items.append(f"debug={debug_level}")
         if profile:
             config_items.append(f"profile={profile.name}")
+        if rdma:
+            config_items.append("rdma=on")
         if perf:
             config_items.append("perf=on")
         if experiment:
@@ -5500,15 +5629,15 @@ def clean(
     cleaned = 0
     for bench in bench_list:
         if runner.clean_benchmark(bench):
-            console.print(f"  [{Colors.PASS}]{Symbols.PASS}[/{Colors.PASS}] {bench}")
+            console.print(f"  [{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] {bench}")
             cleaned += 1
         else:
-            console.print(f"  [{Colors.DIM}]{Symbols.SKIP}[/{Colors.DIM}] {bench} (nothing to clean)")
+            console.print(f"  [{Colors.DEBUG}]{Symbols.SKIP}[/{Colors.DEBUG}] {bench} (nothing to clean)")
 
     # Clean shared artifacts
     shared_removed = runner.clean_shared_artifacts()
     if shared_removed:
-        console.print(f"  [{Colors.PASS}]{Symbols.PASS}[/{Colors.PASS}] Shared artifacts ({shared_removed} items)")
+        console.print(f"  [{Colors.SUCCESS}]{Symbols.PASS}[/{Colors.SUCCESS}] Shared artifacts ({shared_removed} items)")
 
     print_success(f"Cleaned {cleaned} benchmarks!")
 
@@ -5578,6 +5707,9 @@ def _execute_slurm_batch(
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
+    nodelist: Optional[str] = typer.Option(
+        None, "--nodelist",
+        help="SLURM nodes to request/restrict allocation to (e.g. b05u[01,07,13,19,25,31,37,43])"),
     exclude: Optional[List[str]] = typer.Option(
         None, "--exclude", "-e",
         help="Benchmarks to exclude (substring match, repeatable)"),
@@ -5589,6 +5721,7 @@ def _execute_slurm_batch(
     artifact_manager: Optional[ArtifactManager] = None,
     step_name: Optional[str] = None,
     report_steps: Optional[List[ExperimentStep]] = None,
+    rdma: bool = False,
 ):
     """Submit benchmarks as SLURM batch jobs.
 
@@ -5657,6 +5790,8 @@ def _execute_slurm_batch(
         subtitle_parts.append(f"Perf: enabled (interval={perf_interval}s)")
     if exclude_nodes:
         subtitle_parts.append(f"Excluding SLURM nodes: {exclude_nodes}")
+    if nodelist:
+        subtitle_parts.append(f"SLURM nodelist: {nodelist}")
     if exclude:
         subtitle_parts.append(f"Excluding benchmarks: {', '.join(exclude)}")
     print_header("SLURM Batch Submission", "\n".join(subtitle_parts))
@@ -5729,9 +5864,11 @@ def _execute_slurm_batch(
         perf=perf,
         perf_interval=perf_interval,
         exclude_nodes=exclude_nodes,
+        nodelist=nodelist,
         artifact_manager=artifact_manager,
         step_name=step_name,
         report_steps=report_steps,
+        rdma=rdma,
         command_str="carts benchmarks " + " ".join(sys.argv[1:]),
     )
     deps = SlurmExecutorDependencies(

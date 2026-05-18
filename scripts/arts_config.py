@@ -66,6 +66,18 @@ KEY_COUNTER_CAPTURE_INTERVAL = "counter_capture_interval"
 
 # Protocol
 KEY_PROTOCOL = "protocol"
+PROTOCOL_TCP = "tcp"
+PROTOCOL_RDMA = "rdma"
+PROTOCOL_ROCE = "roce"
+PROTOCOL_AUTO = "auto"
+SUPPORTED_PROTOCOLS = frozenset(
+    (PROTOCOL_TCP, PROTOCOL_RDMA, PROTOCOL_ROCE, PROTOCOL_AUTO)
+)
+
+
+def protocol_for_rdma(enabled: bool) -> str:
+    """Return the benchmark runtime protocol for an RDMA toggle."""
+    return PROTOCOL_RDMA if enabled else PROTOCOL_TCP
 
 EMBEDDED_KEYS: List[str] = [
     KEY_WORKER_THREADS,
@@ -74,6 +86,8 @@ EMBEDDED_KEYS: List[str] = [
     KEY_NODE_COUNT,
     KEY_LAUNCHER,
     KEY_PROTOCOL,
+    KEY_PORT_COUNT,
+    KEY_PIN,
     KEY_DEFAULT_PORTS,
 ]
 

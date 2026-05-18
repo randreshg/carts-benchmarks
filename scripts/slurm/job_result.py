@@ -141,6 +141,10 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
         "counter_timeout_warnings": len(re.findall(r"Could not read counter file", stderr)),
         "remote_send_hard_timeout_count": len(re.findall(r"Remote send hard-timeout", stderr)),
         "connection_refused_count": len(re.findall(r"Connection refused", stderr)),
+        "rdma_abandoned_connect_count": len(
+            re.findall(r"abandoned blocking rconnect|rconnect did not return", stderr)
+        ),
+        "crash_count": len(re.findall(r"\[ARTS\] Crashed:", stderr)),
     }
 
     warning_reasons: List[str] = []
@@ -161,6 +165,13 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
         warning_reasons.append(
             f"connection_refused_count={slurm_stderr_summary['connection_refused_count']}"
         )
+    if slurm_stderr_summary["rdma_abandoned_connect_count"] > 0:
+        warning_reasons.append(
+            "rdma_abandoned_connect_count="
+            f"{slurm_stderr_summary['rdma_abandoned_connect_count']}"
+        )
+    if slurm_stderr_summary["crash_count"] > 0:
+        warning_reasons.append(f"crash_count={slurm_stderr_summary['crash_count']}")
 
     summary: Dict[str, Any] = {
         "slurm_stdout": {

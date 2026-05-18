@@ -1,0 +1,50 @@
+{
+  "name": "scale-multinode-1-to-64",
+  "description": "Multinode 1->64 nodes at 64 threads, large size, baseline + distributed-db, with ARTS overhead counters at representative points.",
+  "steps": [
+    {
+      "name": "node-sweep-baseline",
+      "size": "large",
+      "threads": "64",
+      "nodes": "1,2,4,8,16,32,64",
+      "runs": 1,
+      "rdma": true,
+      "perf": false,
+      "timeout": 90
+    },
+    {
+      "name": "node-sweep-distributed-db",
+      "size": "large",
+      "threads": "64",
+      "nodes": "1,2,4,8,16,32,64",
+      "runs": 1,
+      "rdma": true,
+      "perf": false,
+      "compile_args": "--distributed-db",
+      "timeout": 90
+    },
+    {
+      "name": "overhead-counters-baseline-mid-high",
+      "size": "large",
+      "threads": "64",
+      "nodes": "8,32,64",
+      "runs": 1,
+      "rdma": true,
+      "perf": false,
+      "profile": "profile-overhead.cfg",
+      "timeout": 90
+    },
+    {
+      "name": "overhead-counters-ddb-mid-high",
+      "size": "large",
+      "threads": "64",
+      "nodes": "8,32,64",
+      "runs": 1,
+      "rdma": true,
+      "perf": false,
+      "profile": "profile-overhead.cfg",
+      "compile_args": "--distributed-db",
+      "timeout": 90
+    }
+  ]
+}

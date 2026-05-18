@@ -132,6 +132,12 @@ def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, 
     artifacts = result.setdefault("artifacts", {})
     artifacts.setdefault("arts_config", str(arts_cfg_path))
     artifacts.setdefault("build_dir", str(arts_cfg_path.parent))
+    arts_runtime_lib_dir = run_config.get("arts_runtime_lib_dir")
+    if arts_runtime_lib_dir:
+        artifacts.setdefault(
+            "arts_runtime_lib_dir",
+            str(Path(str(arts_runtime_lib_dir)).resolve()),
+        )
 
     benchmark_name = str(run_config.get("benchmark") or "")
     example_name = benchmark_name.split("/")[-1] if benchmark_name else ""
@@ -203,6 +209,10 @@ def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
         summary["connection_refused_count"] = len(
             re.findall(r"Connection refused", text)
         )
+        summary["rdma_abandoned_connect_count"] = len(
+            re.findall(r"abandoned blocking rconnect|rconnect did not return", text)
+        )
+        summary["crash_count"] = len(re.findall(r"\[ARTS\] Crashed:", text))
     return summary
 
 
@@ -232,6 +242,10 @@ def _runtime_warning_reasons(diagnostics: Any) -> List[str]:
             slurm_err.get("remote_send_hard_timeout_count") or 0
         ),
         "connection_refused_count": int(slurm_err.get("connection_refused_count") or 0),
+        "rdma_abandoned_connect_count": int(
+            slurm_err.get("rdma_abandoned_connect_count") or 0
+        ),
+        "crash_count": int(slurm_err.get("crash_count") or 0),
     }
     for key, value in warning_counts.items():
         if value > 0:

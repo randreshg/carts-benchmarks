@@ -73,15 +73,19 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
                 perf=False,
                 perf_interval=0.1,
                 exclude_nodes=None,
+                nodelist="b05u[01,07]",
                 exclude=None,
                 max_jobs=8,
                 artifact_manager=None,
                 step_name=None,
                 report_steps=None,
+                rdma=True,
             )
 
         self.assertIsNotNone(_CapturingExecutor.last_request)
         self.assertEqual(_CapturingExecutor.last_request.max_jobs, 8)
+        self.assertEqual(_CapturingExecutor.last_request.nodelist, "b05u[01,07]")
+        self.assertTrue(_CapturingExecutor.last_request.rdma)
 
 
 if __name__ == "__main__":
