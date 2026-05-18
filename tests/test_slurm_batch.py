@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -15,12 +16,30 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from arts_config import KEY_PROTOCOL, PROTOCOL_RDMA, PROTOCOL_TCP, parse_arts_cfg  # noqa: E402
+from arts_config import (  # noqa: E402
+    KEY_MIN_ITERATIONS_PER_WORKER,
+    KEY_PROTOCOL,
+    PROTOCOL_RDMA,
+    PROTOCOL_TCP,
+    parse_arts_cfg,
+)
 from slurm.batch import generate_arts_config_for_node, generate_sbatch_script, poll_jobs  # noqa: E402
 from slurm.models import SlurmJobConfig, SlurmJobStatus  # noqa: E402
 
 
 class SlurmBatchPollingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        clean_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("CARTS_SLURM_")
+        }
+        self._env_patcher = patch.dict("os.environ", clean_env, clear=True)
+        self._env_patcher.start()
+
+    def tearDown(self) -> None:
+        self._env_patcher.stop()
+
     def test_poll_jobs_strips_squeue_fields(self) -> None:
         job_statuses = {
             "101": SlurmJobStatus(
@@ -279,6 +298,56 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertEqual(rdma_8_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_32_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_64_values["counter_capture_interval"], "10")
+            self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, tcp_values)
+            self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_values)
+            self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_8_values)
+            self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_32_values)
+            self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_64_values)
+
+    def test_generate_arts_config_can_override_min_iterations_per_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"CARTS_SLURM_MIN_ITERATIONS_PER_WORKER": "32"},
+        ):
+            root = Path(tmp)
+            template = root / "arts.cfg"
+            template.write_text("[ARTS]\nworker_threads=4\n")
+
+            rdma_cfg = generate_arts_config_for_node(
+                template,
+                root / "rdma-64-build",
+                node_count=64,
+                threads=64,
+                rdma=True,
+            )
+
+            values = parse_arts_cfg(rdma_cfg)
+            self.assertEqual(values[KEY_MIN_ITERATIONS_PER_WORKER], "32")
+
+    def test_generate_arts_config_can_clear_min_iterations_per_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"CARTS_SLURM_MIN_ITERATIONS_PER_WORKER": "0"},
+        ):
+            root = Path(tmp)
+            template = root / "arts.cfg"
+            template.write_text("[ARTS]\nworker_threads=4\nmin_iterations_per_worker=32\n")
+
+            rdma_cfg = generate_arts_config_for_node(
+                template,
+                root / "rdma-64-build",
+                node_count=64,
+                threads=64,
+                rdma=True,
+            )
+
+            values = parse_arts_cfg(rdma_cfg)
+            self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, values)
+            self.assertIn(
+                "# min_iterations_per_worker= (disabled by "
+                "CARTS_SLURM_MIN_ITERATIONS_PER_WORKER=0)",
+                rdma_cfg.read_text(),
+            )
 
     def test_generate_arts_config_can_override_network_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
@@ -374,6 +443,8 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 "--cpus-per-task=8 --cpu-bind=none --kill-on-bad-exit=1",
                 content,
             )
+            self.assertNotIn("known_hosts", content)
+            self.assertNotIn("launcher=ssh", content)
             self.assertNotIn("ARTS RDMA Env: CONNECT_HELPER=", content)
             self.assertIn(
                 'export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"',
@@ -385,6 +456,10 @@ class SlurmBatchPollingTest(unittest.TestCase):
             )
             self.assertIn(
                 'export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-3000}"',
                 content,
             )
             self.assertIn(
@@ -496,8 +571,56 @@ class SlurmBatchPollingTest(unittest.TestCase):
 
             content = script_path.read_text()
             self.assertIn("#SBATCH --cpus-per-task=72", content)
-            self.assertIn("required=68", content)
+            self.assertIn("required=68 runtime_required=68 requested=72", content)
             self.assertIn("--cpus-per-task=72 --cpu-bind=none", content)
+
+    def test_generate_sbatch_script_can_strictly_require_cpu_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "CARTS_SLURM_CPU_HEADROOM": "4",
+                "CARTS_SLURM_STRICT_CPU_HEADROOM": "1",
+            },
+        ):
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (job_result_script, executable_arts, python_executable):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+            arts_cfg.write_text(
+                f"[ARTS]\n{KEY_PROTOCOL}={PROTOCOL_RDMA}\n"
+                "worker_threads=64\nsender_threads=2\nreceiver_threads=2\n"
+            )
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=64,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=None,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="large",
+                threads=64,
+                timeout_seconds=90,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("#SBATCH --cpus-per-task=72", content)
+            self.assertIn("required=72 runtime_required=68 requested=72", content)
+            self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
 
     def test_generate_sbatch_script_preloads_runtime_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

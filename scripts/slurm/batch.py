@@ -51,6 +51,7 @@ from arts_config import (
     KEY_COUNTER_FOLDER,
     KEY_LAUNCHER,
     KEY_MASTER_NODE,
+    KEY_MIN_ITERATIONS_PER_WORKER,
     KEY_NODE_COUNT,
     KEY_NODES,
     KEY_PIN,
@@ -326,6 +327,20 @@ def _env_nonnegative_int(name: str) -> Optional[int]:
     return value
 
 
+def _env_bool(name: str, fallback: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return fallback
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be one of 1/0, true/false, yes/no, or on/off; got {raw!r}"
+    )
+
+
 def _slurm_thread_budget_mode() -> str:
     raw = os.environ.get("CARTS_SLURM_THREAD_BUDGET", "worker").strip().lower()
     aliases = {
@@ -359,6 +374,12 @@ def _env_network_threads() -> Tuple[Optional[int], Optional[int]]:
 
 def _slurm_cpu_headroom() -> int:
     return _env_nonnegative_int("CARTS_SLURM_CPU_HEADROOM") or 0
+
+
+def _slurm_min_iterations_per_worker(
+    node_count: int, *, rdma: bool,
+) -> Optional[int]:
+    return _env_nonnegative_int("CARTS_SLURM_MIN_ITERATIONS_PER_WORKER")
 
 
 def _default_network_threads(node_count: int, *, rdma: bool) -> Tuple[int, int]:
@@ -458,14 +479,18 @@ def _slurm_cpu_preflight_section(
     *,
     srun_prefix: str,
     runtime_thread_count: int,
+    required_cpu_count: int,
+    requested_cpu_count: int,
     worker_threads: int,
     sender_threads: int,
     receiver_threads: int,
+    strict_preflight_default: bool,
 ) -> str:
-    if os.environ.get("CARTS_SLURM_CPU_PREFLIGHT", "1").strip() == "0":
+    if not _env_bool("CARTS_SLURM_CPU_PREFLIGHT", True):
         return '# SLURM CPU visibility preflight disabled by CARTS_SLURM_CPU_PREFLIGHT=0'
 
     count_script = _count_cpus_script()
+    strict_default = "1" if strict_preflight_default else "0"
     return f"""echo ""
 echo "[SLURM] CPU visibility preflight..."
 echo "[SLURM] Runtime threads: worker={worker_threads} sender={sender_threads} receiver={receiver_threads} total={runtime_thread_count}"
@@ -474,15 +499,17 @@ timeout --signal=TERM --kill-after=10s 60s {srun_prefix} bash -lc '{count_script
 allowed=$(awk "/Cpus_allowed_list/ {{print \\$2}}" /proc/self/status 2>/dev/null || true)
 visible=$(count_cpulist "${{allowed:-}}")
 nproc_value=$(nproc 2>/dev/null || echo unknown)
-echo "[SLURM preflight] rank=${{SLURM_PROCID:-?}} host=$(hostname) cpus_per_task=${{SLURM_CPUS_PER_TASK:-unknown}} nproc=${{nproc_value}} allowed=${{allowed:-unknown}} visible=${{visible:-0}} required={runtime_thread_count}"
-if [ "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-0}}" != "0" ] && [ "${{visible:-0}}" -lt {runtime_thread_count} ]; then
-    echo "[SLURM preflight] ERROR visible CPU count ${{visible:-0}} is below required runtime threads {runtime_thread_count}" >&2
+echo "[SLURM preflight] rank=${{SLURM_PROCID:-?}} host=$(hostname) cpus_per_task=${{SLURM_CPUS_PER_TASK:-unknown}} nproc=${{nproc_value}} allowed=${{allowed:-unknown}} visible=${{visible:-0}} required={required_cpu_count} runtime_required={runtime_thread_count} requested={requested_cpu_count}"
+strict_preflight=$(printf "%s" "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-{strict_default}}}" | tr "[:upper:]" "[:lower:]")
+if [ "$strict_preflight" != "0" ] && [ "$strict_preflight" != "false" ] && [ "$strict_preflight" != "no" ] && [ "$strict_preflight" != "off" ] && [ "${{visible:-0}}" -lt {required_cpu_count} ]; then
+    echo "[SLURM preflight] ERROR visible CPU count ${{visible:-0}} is below required CPUs {required_cpu_count}" >&2
     exit 66
 fi'
 PREFLIGHT_EXIT=$?
 if [ $PREFLIGHT_EXIT -ne 0 ]; then
     echo "[SLURM] CPU visibility preflight failed with exit code $PREFLIGHT_EXIT" >&2
-    if [ "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-0}}" != "0" ]; then
+    strict_preflight=$(printf "%s" "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-{strict_default}}}" | tr "[:upper:]" "[:lower:]")
+    if [ "$strict_preflight" != "0" ] && [ "$strict_preflight" != "false" ] && [ "$strict_preflight" != "no" ] && [ "$strict_preflight" != "off" ]; then
         exit $PREFLIGHT_EXIT
     fi
 fi"""
@@ -529,6 +556,7 @@ def _rdma_environment_section(config: SlurmJobConfig) -> str:
 export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"
 export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-1}"
 export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"
+export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-3000}"
 export ARTS_CONNECT_STEADY_BETWEEN_US="${ARTS_CONNECT_STEADY_BETWEEN_US:-1000}"
 export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"
 export ARTS_RDMA_RECEIVE_RPOLL="${ARTS_RDMA_RECEIVE_RPOLL:-0}"
@@ -638,7 +666,14 @@ def generate_sbatch_script(
     worker_threads = _worker_threads_from_config(config)
     sender_threads, receiver_threads = _network_threads_from_config(config)
     runtime_thread_count = worker_threads + sender_threads + receiver_threads
-    cpus_per_task = runtime_thread_count + _slurm_cpu_headroom()
+    cpu_headroom = _slurm_cpu_headroom()
+    cpus_per_task = runtime_thread_count + cpu_headroom
+    strict_headroom = _env_bool("CARTS_SLURM_STRICT_CPU_HEADROOM", False)
+    required_cpu_count = (
+        cpus_per_task
+        if strict_headroom
+        else runtime_thread_count
+    )
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
     arts_only_arg = '    --arts-only \\\n' if not config.run_openmp else ''
@@ -652,9 +687,12 @@ def generate_sbatch_script(
     cpu_preflight_section = _slurm_cpu_preflight_section(
         srun_prefix=srun_prefix,
         runtime_thread_count=runtime_thread_count,
+        required_cpu_count=required_cpu_count,
+        requested_cpu_count=cpus_per_task,
         worker_threads=worker_threads,
         sender_threads=sender_threads,
         receiver_threads=receiver_threads,
+        strict_preflight_default=strict_headroom,
     )
     if config.gdb:
         srun_command = (
@@ -750,6 +788,21 @@ def generate_arts_config_for_node(
     content = _set_cfg_key(content, KEY_LAUNCHER, "slurm")
     content = _set_cfg_key(content, KEY_PROTOCOL, protocol_for_rdma(rdma))
     content = _set_cfg_key(content, KEY_COUNTER_CAPTURE_INTERVAL, "10")
+    min_iterations_per_worker = _slurm_min_iterations_per_worker(
+        node_count, rdma=rdma,
+    )
+    if min_iterations_per_worker is not None and min_iterations_per_worker > 0:
+        content = _set_cfg_key(
+            content,
+            KEY_MIN_ITERATIONS_PER_WORKER,
+            str(min_iterations_per_worker),
+        )
+    elif min_iterations_per_worker == 0:
+        content = _comment_cfg_key(
+            content,
+            KEY_MIN_ITERATIONS_PER_WORKER,
+            "disabled by CARTS_SLURM_MIN_ITERATIONS_PER_WORKER=0",
+        )
     if node_count > 1:
         sender_threads, receiver_threads = _default_network_threads(
             node_count, rdma=rdma,
