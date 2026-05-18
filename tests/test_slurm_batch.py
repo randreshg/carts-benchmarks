@@ -459,7 +459,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 content,
             )
             self.assertIn(
-                'export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"',
+                'export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-4}"',
                 content,
             )
             self.assertIn(
