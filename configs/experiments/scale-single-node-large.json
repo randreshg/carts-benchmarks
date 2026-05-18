@@ -59,35 +59,6 @@
       "runs": 1,
       "profile": "profile-thread-edt.cfg",
       "timeout": 90
-    },
-    {
-      "name": "perf-64",
-      "benchmarks": [
-        "kastors-jacobi/jacobi-for",
-        "kastors-jacobi/poisson-for",
-        "ml-kernels/activations",
-        "ml-kernels/batchnorm",
-        "ml-kernels/layernorm",
-        "ml-kernels/pooling",
-        "polybench/2mm",
-        "polybench/3mm",
-        "polybench/convolution-2d",
-        "polybench/correlation",
-        "polybench/gemm",
-        "polybench/jacobi2d",
-        "polybench/seidel-2d",
-        "specfem3d/stress",
-        "specfem3d/velocity",
-        "stream",
-        "sw4lite/rhs4sg-base",
-        "sw4lite/vel4sg-base"
-      ],
-      "size": "large",
-      "threads": "64",
-      "nodes": "1",
-      "runs": 1,
-      "perf": true,
-      "timeout": 90
     }
   ]
 }

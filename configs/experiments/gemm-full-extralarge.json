@@ -1,6 +1,6 @@
 {
   "name": "gemm-full-extralarge",
-  "description": "GEMM validation: large single-node thread/perf/counter checks, then pure extralarge multinode timing sweep plus targeted instrumented multinode comparison",
+  "description": "GEMM validation: large single-node thread/counter checks, then pure extralarge multinode timing sweep plus targeted instrumented multinode comparison",
   "steps": [
     {
       "name": "thread-sweep",
@@ -11,16 +11,6 @@
       "debug": 0,
       "runs": 5,
       "perf": false
-    },
-    {
-      "name": "perf-single-node",
-      "benchmarks": ["polybench/gemm"],
-      "size": "large",
-      "threads": "64",
-      "nodes": "1",
-      "debug": 0,
-      "runs": 5,
-      "perf": true
     },
     {
       "name": "counters-single-node",
@@ -38,7 +28,7 @@
       "benchmarks": ["polybench/gemm"],
       "size": "extralarge",
       "threads": "64",
-      "nodes": "2,4,8,16,32",
+      "nodes": "1,2,4,8,16,32,64",
       "debug": 0,
       "runs": 5,
       "perf": false
@@ -48,7 +38,7 @@
       "benchmarks": ["polybench/gemm"],
       "size": "extralarge",
       "threads": "64",
-      "nodes": "2,4,8,16,32",
+      "nodes": "1,2,4,8,16,32,64",
       "debug": 0,
       "runs": 5,
       "perf": false,
@@ -59,7 +49,7 @@
       "benchmarks": ["polybench/gemm"],
       "size": "extralarge",
       "threads": "64",
-      "nodes": "8,32",
+      "nodes": "8,32,64",
       "debug": 0,
       "runs": 1,
       "perf": false,
@@ -70,7 +60,7 @@
       "benchmarks": ["polybench/gemm"],
       "size": "extralarge",
       "threads": "64",
-      "nodes": "8,32",
+      "nodes": "8,32,64",
       "debug": 0,
       "runs": 1,
       "perf": false,

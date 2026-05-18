@@ -291,6 +291,18 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 'export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"',
                 content,
             )
+            self.assertIn(
+                'export ARTS_LAZY_ACCEPT_DRAIN_LIMIT="${ARTS_LAZY_ACCEPT_DRAIN_LIMIT:-0}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_LISTEN_BACKLOG="${ARTS_LISTEN_BACKLOG:-0}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_TRACE_RDMA_SUMMARY="${ARTS_TRACE_RDMA_SUMMARY:-0}"',
+                content,
+            )
             self.assertNotIn("--ntasks-per-node=4", content)
 
     def test_generate_sbatch_script_preloads_runtime_snapshot(self) -> None:

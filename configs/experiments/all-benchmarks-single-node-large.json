@@ -1,6 +1,6 @@
 {
   "name": "all-benchmarks-single-node-large",
-  "description": "Single-node large-size study for the full benchmark suite. This experiment answers how CARTS compares to OpenMP on one node, whether it scales with thread count, and whether any wins or losses correlate with hardware-counter or thread-level EDT behavior.",
+  "description": "Single-node large-size study for the full benchmark suite. This experiment answers how CARTS compares to OpenMP on one node, whether it scales with thread count, and whether any wins or losses correlate with thread-level EDT behavior.",
   "steps": [
     {
       "name": "thread-sweep",
@@ -11,16 +11,6 @@
       "debug": 0,
       "runs": 5,
       "perf": false
-    },
-    {
-      "name": "perf-single-node",
-      "description": "Single-node hardware-counter study at the full local-thread configuration. Use this to explain ARTS vs OpenMP timing differences through cache-reference and cache-miss behavior.",
-      "size": "large",
-      "threads": "16",
-      "nodes": "1",
-      "debug": 0,
-      "runs": 5,
-      "perf": true
     },
     {
       "name": "thread-edt-single-node",
