@@ -5652,6 +5652,39 @@ def clean(
     print_success(f"Cleaned {cleaned} benchmarks!")
 
 
+@app.command(name="dashboard")
+def dashboard_command(
+    results_dir: Path = typer.Argument(
+        ..., help="Benchmark results directory containing results.json"
+    ),
+    extra_results: Optional[List[Path]] = typer.Option(
+        None,
+        "--extra-results",
+        help="Additional benchmark results directories to merge into the dashboard",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="Dashboard output directory (default: <results-dir>/presentation/carts-panel-dashboard)",
+    ),
+):
+    """Generate a static interactive CARTS scalability dashboard."""
+    from dashboard import generate_dashboard
+
+    try:
+        artifact = generate_dashboard(
+            results_dir,
+            output_dir=output_dir,
+            extra_results=extra_results,
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print_error(str(exc))
+        raise typer.Exit(1)
+
+    print_success(f"Dashboard written to {artifact.index_html}")
+
+
 # ============================================================================
 # SLURM Batch Command
 # ============================================================================
