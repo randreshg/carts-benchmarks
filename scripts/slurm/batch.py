@@ -276,8 +276,7 @@ echo "=========================================="
     --arts-duration $ARTS_DURATION \\
     --omp-exit $OMP_EXIT \\
     --omp-duration $OMP_DURATION \\
-{arts_only_arg}
-    --counter-dir "$COUNTER_DIR" \\
+{arts_only_arg}    --counter-dir "$COUNTER_DIR" \\
     --slurm-job-id "$SLURM_JOB_ID" \\
     --slurm-nodelist "$SLURM_JOB_NODELIST" \\
     --output "{result_json}"
@@ -384,7 +383,8 @@ def _rdma_environment_section(config: SlurmJobConfig) -> str:
         return ""
     return """export ARTS_RDMA_CONNECT_HELPER="${ARTS_RDMA_CONNECT_HELPER:-1}"
 export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"
-export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-0}"
+export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-1}"
+export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"
 export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"
 export ARTS_RDMA_RECEIVE_RPOLL="${ARTS_RDMA_RECEIVE_RPOLL:-0}"
 export ARTS_LAZY_ACCEPT_DRAIN_LIMIT="${ARTS_LAZY_ACCEPT_DRAIN_LIMIT:-0}"
