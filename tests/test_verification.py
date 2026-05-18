@@ -60,6 +60,22 @@ class BenchmarkVerificationTest(unittest.TestCase):
         self.assertFalse(verification.correct)
         self.assertEqual(verification.mode, "stored_omp_reference")
 
+    def test_determine_status_passes_arts_only_without_reference(self) -> None:
+        status, verification = determine_status(
+            arts_exit=0,
+            omp_exit=-1,
+            arts_checksum="123.0",
+            omp_checksum=None,
+            reference_checksum=None,
+            reference_source=None,
+            reference_omp_threads=None,
+            tolerance=0.01,
+            arts_only=True,
+        )
+        self.assertEqual(status, "PASS")
+        self.assertTrue(verification.correct)
+        self.assertEqual(verification.mode, "arts_only")
+
     def test_determine_status_fails_when_direct_checksum_is_missing(self) -> None:
         status, verification = determine_status(
             arts_exit=0,
@@ -126,6 +142,7 @@ Job 47531 on b06u37,b07u01
                 slurm_job_id="47531",
                 slurm_nodelist="b06u37,b07u01",
                 output_dir=run_dir,
+                arts_only=False,
             )
 
         self.assertEqual(result["status"], "PASS")

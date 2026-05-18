@@ -190,6 +190,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
 
             content = script_path.read_text()
             self.assertIn("# OpenMP skipped (executable not specified)", content)
+            self.assertIn("--arts-only", content)
             self.assertNotIn("[OpenMP] Running benchmark", content)
 
     def test_generate_arts_config_for_node_sets_protocol_from_rdma_flag_and_unpins_multinode(self) -> None:

@@ -52,7 +52,7 @@ from common import (
     parse_verification_timings,
     parse_cleanup_timings,
 )
-from models import Status, VerificationResult
+from models import Status, VerificationMode, VerificationResult
 from verification import verify_against_omp, verify_against_reference
 
 
@@ -93,6 +93,7 @@ def determine_status(
     reference_source: Optional[str] = None,
     reference_omp_threads: Optional[int] = None,
     tolerance: float = 0.01,
+    arts_only: bool = False,
 ) -> Tuple[str, VerificationResult]:
     """Determine overall status and verification result.
 
@@ -107,6 +108,25 @@ def determine_status(
         Tuple of (status, verification_result)
     """
     arts_status = Status.PASS if arts_exit == 0 else Status.FAIL
+    if arts_only:
+        if arts_status == Status.PASS:
+            note = (
+                "ARTS-only run completed; checksum recorded"
+                if arts_checksum is not None
+                else "ARTS-only run completed; checksum not found in output"
+            )
+        else:
+            note = "ARTS-only run failed"
+        verification = VerificationResult(
+            correct=arts_status == Status.PASS,
+            arts_checksum=arts_checksum,
+            omp_checksum=None,
+            tolerance_used=tolerance,
+            note=note,
+            mode=VerificationMode.ARTS_ONLY.value,
+        )
+        return (STATUS_PASS if verification.correct else STATUS_FAIL, verification)
+
     if omp_exit == -1:
         verification = verify_against_reference(
             arts_status,
@@ -203,6 +223,7 @@ def generate_result(
     slurm_job_id: str,
     slurm_nodelist: str,
     output_dir: Path,
+    arts_only: bool = False,
 ) -> Dict[str, Any]:
     """Generate a complete result dictionary.
 
@@ -289,6 +310,7 @@ def generate_result(
         reference_omp_threads=(
             int(reference_omp_threads) if reference_omp_threads is not None else None
         ),
+        arts_only=arts_only,
     )
     diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != STATUS_PASS))
 
@@ -365,6 +387,7 @@ def main():
     parser.add_argument("--arts-duration", type=float, required=True, help="ARTS duration")
     parser.add_argument("--omp-exit", type=int, required=True, help="OpenMP exit code (-1 if skipped)")
     parser.add_argument("--omp-duration", type=float, required=True, help="OpenMP duration")
+    parser.add_argument("--arts-only", action="store_true", help="Treat missing OpenMP/reference as intentional")
     parser.add_argument("--counter-dir", type=Path, help="Counter directory")
     parser.add_argument("--slurm-job-id", default="", help="SLURM job ID")
     parser.add_argument("--slurm-nodelist", default="", help="SLURM node list")
@@ -385,6 +408,7 @@ def main():
         slurm_job_id=args.slurm_job_id,
         slurm_nodelist=args.slurm_nodelist,
         output_dir=args.output.parent,
+        arts_only=args.arts_only,
     )
 
     # Write output

@@ -276,6 +276,7 @@ echo "=========================================="
     --arts-duration $ARTS_DURATION \\
     --omp-exit $OMP_EXIT \\
     --omp-duration $OMP_DURATION \\
+{arts_only_arg}
     --counter-dir "$COUNTER_DIR" \\
     --slurm-job-id "$SLURM_JOB_ID" \\
     --slurm-nodelist "$SLURM_JOB_NODELIST" \\
@@ -493,6 +494,7 @@ def generate_sbatch_script(
     cpus_per_task = config.threads + sender_threads + receiver_threads
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
+    arts_only_arg = '    --arts-only \\\n' if not config.run_openmp else ''
 
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     srun_prefix = (
@@ -546,6 +548,7 @@ def generate_sbatch_script(
         size=config.size,
         threads=config.threads,
         timeout_seconds=config.timeout_seconds,
+        arts_only_arg=arts_only_arg,
     )
 
     # Create run directory
