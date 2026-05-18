@@ -3239,3 +3239,18 @@ def generate_report_from_rows(
         command=command,
         steps=steps,
     )
+
+
+def generate_carts_report(
+    results_dir: Path,
+    output_dir: Optional[Path] = None,
+    extra_results: Optional[Iterable[Path]] = None,
+):
+    """Generate the static interactive CARTS Report artifact."""
+    from carts_report import generate_carts_report as generate_static_carts_report
+
+    return generate_static_carts_report(
+        results_dir,
+        output_dir=output_dir,
+        extra_results=extra_results,
+    )

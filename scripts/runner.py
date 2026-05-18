@@ -5652,28 +5652,36 @@ def clean(
     print_success(f"Cleaned {cleaned} benchmarks!")
 
 
-@app.command(name="dashboard")
-def dashboard_command(
+@app.command(name="report")
+def report_command(
     results_dir: Path = typer.Argument(
         ..., help="Benchmark results directory containing results.json"
     ),
     extra_results: Optional[List[Path]] = typer.Option(
         None,
         "--extra-results",
-        help="Additional benchmark results directories to merge into the dashboard",
+        help="Additional benchmark results directories to merge into the report",
     ),
     output_dir: Optional[Path] = typer.Option(
         None,
         "--output-dir",
         "-o",
-        help="Dashboard output directory (default: <results-dir>/presentation/carts-panel-dashboard)",
+        help="Report output directory (default: <results-dir>/presentation/carts-report)",
     ),
 ):
-    """Generate a static interactive CARTS scalability dashboard."""
-    from dashboard import generate_dashboard
+    """Generate the static interactive CARTS Report."""
+    _generate_carts_report(results_dir, extra_results, output_dir)
+
+
+def _generate_carts_report(
+    results_dir: Path,
+    extra_results: Optional[List[Path]],
+    output_dir: Optional[Path],
+) -> None:
+    from report import generate_carts_report
 
     try:
-        artifact = generate_dashboard(
+        artifact = generate_carts_report(
             results_dir,
             output_dir=output_dir,
             extra_results=extra_results,
@@ -5682,7 +5690,7 @@ def dashboard_command(
         print_error(str(exc))
         raise typer.Exit(1)
 
-    print_success(f"Dashboard written to {artifact.index_html}")
+    print_success(f"CARTS Report written to {artifact.index_html}")
 
 
 # ============================================================================

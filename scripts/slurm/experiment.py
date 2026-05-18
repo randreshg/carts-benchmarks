@@ -77,7 +77,7 @@ def infer_arts_runtime_mode(executable_arts: Path) -> Tuple[str, str]:
     host.  They still produce a ``*_arts`` executable for apples-to-apples
     compile plumbing, but multinode Slurm runs of those binaries execute one
     independent host process per rank and cannot produce ARTS communication
-    counters.  Persisting this mode keeps reports and dashboards honest.
+    counters.  Persisting this mode keeps reports honest.
     """
     build_dir = executable_arts.parent
     ir_files = sorted(build_dir.glob("*-arts.ll"))

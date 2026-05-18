@@ -9,25 +9,25 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-DASHBOARD_DIRNAME = "carts-panel-dashboard"
+REPORT_DIRNAME = "carts-report"
 PHASE_THREAD = "single_node"
 PHASE_NODE = "multinode"
 PHASE_NODE_DB = "multinode_distributed_db"
 
 
 @dataclass(frozen=True)
-class DashboardArtifact:
+class ReportArtifact:
     output_dir: Path
     index_html: Path
     data_js: Path
 
 
-def generate_dashboard(
+def generate_carts_report(
     results_dir: Path,
     output_dir: Path | None = None,
     extra_results: Iterable[Path] | None = None,
-) -> DashboardArtifact:
-    """Generate a self-contained static dashboard for a benchmark results directory."""
+) -> ReportArtifact:
+    """Generate a self-contained static report for a benchmark results directory."""
     results_dir = Path(results_dir).resolve()
     results_json = results_dir / "results.json"
     if not results_json.exists():
@@ -58,10 +58,10 @@ def generate_dashboard(
             if isinstance(result, dict)
         )
         source_results.append(extra_json)
-    dashboard_data = _build_dashboard_data(payload.get("metadata") or {}, rows, source_results)
+    report_data = _build_report_data(payload.get("metadata") or {}, rows, source_results)
 
     if output_dir is None:
-        output_dir = results_dir / "presentation" / DASHBOARD_DIRNAME
+        output_dir = results_dir / "presentation" / REPORT_DIRNAME
     output_dir = Path(output_dir).resolve()
     assets_dir = output_dir / "assets"
     data_dir = output_dir / "data"
@@ -77,27 +77,27 @@ def generate_dashboard(
     (assets_dir / "app.js").write_text(_APP_JS, encoding="utf-8")
     (src_dir / "app.ts").write_text(_APP_TS, encoding="utf-8")
     (assets_dir / "data.js").write_text(
-        "window.CARTS_DASHBOARD_DATA = "
-        + json.dumps(dashboard_data, sort_keys=True, separators=(",", ":"))
+        "window.CARTS_REPORT_DATA = "
+        + json.dumps(report_data, sort_keys=True, separators=(",", ":"))
         + ";\n",
         encoding="utf-8",
     )
 
-    _write_csv(data_dir / "results_flat.csv", dashboard_data["rows"])
-    _write_csv(data_dir / "phase_summary.csv", dashboard_data["tables"]["phase_summary"])
-    _write_csv(data_dir / "thread_scaling.csv", dashboard_data["tables"]["thread_scaling"])
-    _write_csv(data_dir / "node_scaling.csv", dashboard_data["tables"]["node_scaling"])
-    _write_csv(data_dir / "issues.csv", dashboard_data["tables"]["issues"])
-    _write_csv(data_dir / "communication.csv", dashboard_data["tables"]["communication"])
-    _write_csv(data_dir / "communication_summary.csv", dashboard_data["tables"]["communication_summary"])
-    _write_csv(data_dir / "family_thread_summary.csv", dashboard_data["tables"]["family_thread_summary"])
-    _write_csv(data_dir / "family_node_summary.csv", dashboard_data["tables"]["family_node_summary"])
-    _write_csv(data_dir / "timing_summary.csv", dashboard_data["tables"]["timing_summary"])
-    _write_csv(data_dir / "top_examples.csv", dashboard_data["tables"]["top_examples"])
-    _write_csv(data_dir / "family_examples.csv", dashboard_data["tables"]["family_examples"])
+    _write_csv(data_dir / "results_flat.csv", report_data["rows"])
+    _write_csv(data_dir / "phase_summary.csv", report_data["tables"]["phase_summary"])
+    _write_csv(data_dir / "thread_scaling.csv", report_data["tables"]["thread_scaling"])
+    _write_csv(data_dir / "node_scaling.csv", report_data["tables"]["node_scaling"])
+    _write_csv(data_dir / "issues.csv", report_data["tables"]["issues"])
+    _write_csv(data_dir / "communication.csv", report_data["tables"]["communication"])
+    _write_csv(data_dir / "communication_summary.csv", report_data["tables"]["communication_summary"])
+    _write_csv(data_dir / "family_thread_summary.csv", report_data["tables"]["family_thread_summary"])
+    _write_csv(data_dir / "family_node_summary.csv", report_data["tables"]["family_node_summary"])
+    _write_csv(data_dir / "timing_summary.csv", report_data["tables"]["timing_summary"])
+    _write_csv(data_dir / "top_examples.csv", report_data["tables"]["top_examples"])
+    _write_csv(data_dir / "family_examples.csv", report_data["tables"]["family_examples"])
 
-    (output_dir / "README.md").write_text(_readme(dashboard_data), encoding="utf-8")
-    return DashboardArtifact(
+    (output_dir / "README.md").write_text(_readme(report_data), encoding="utf-8")
+    return ReportArtifact(
         output_dir=output_dir,
         index_html=output_dir / "index.html",
         data_js=assets_dir / "data.js",
@@ -180,7 +180,7 @@ def _normalize_result(result: dict[str, Any], results_dir: Path) -> dict[str, An
     }
 
 
-def _build_dashboard_data(metadata: dict[str, Any], rows: list[dict[str, Any]], source_results: list[Path]) -> dict[str, Any]:
+def _build_report_data(metadata: dict[str, Any], rows: list[dict[str, Any]], source_results: list[Path]) -> dict[str, Any]:
     _attach_self_scaling(rows)
     phase_summary = _phase_summary(rows)
     thread_scaling = _thread_scaling(rows)
@@ -197,7 +197,7 @@ def _build_dashboard_data(metadata: dict[str, Any], rows: list[dict[str, Any]], 
     optimizations = _optimization_recommendations(rows, node_scaling, communication)
     headline = _headline(rows, thread_scaling, node_scaling, issues, communication)
     metadata_out = {
-        "title": "CARTS Scalability Evidence Dashboard",
+        "title": "CARTS Report",
         "source_results": [str(path) for path in source_results],
         "timestamp": metadata.get("timestamp"),
         "experiment_name": metadata.get("experiment_name"),
@@ -205,7 +205,7 @@ def _build_dashboard_data(metadata: dict[str, Any], rows: list[dict[str, Any]], 
         "timeout_sec": _infer_timeout(metadata, rows),
         "transport_note": (
             "Multinode CARTS runs use the ARTS runtime transport selected by the benchmark configuration. "
-            "The dashboard frames results around CARTS compiler/runtime behavior and keeps protocol details in metrics."
+            "The report frames results around CARTS compiler/runtime behavior and keeps protocol details in metrics."
         ),
     }
     return {
@@ -599,7 +599,7 @@ def _optimization_recommendations(
     recs.append({
         "area": "Weak scaling follow-up",
         "priority": 4,
-        "evidence": "This dashboard is a fixed-size scaling study; high node counts can become overhead dominated.",
+        "evidence": "This report is a fixed-size scaling study; high node counts can become overhead dominated.",
         "proposal": "Add a weak-scaling companion run to separate runtime overhead from insufficient work per node.",
     })
     return recs
@@ -815,9 +815,10 @@ def _infer_timeout(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> int 
 def _readme(data: dict[str, Any]) -> str:
     headline = data["headline"]
     return "\n".join([
-        "# CARTS Scalability Evidence Dashboard",
+        "# CARTS Report",
         "",
-        "Open `index.html` in a browser. The dashboard is static and reads only local files in this directory.",
+        "Open `index.html` in a browser. The report is static and reads only local files in this directory.",
+        "Figures can be downloaded as SVG from the controls next to each plot.",
         "",
         "## Headline",
         "",
@@ -828,7 +829,7 @@ def _readme(data: dict[str, Any]) -> str:
         "",
         "## Data",
         "",
-        "- `assets/data.js`: dashboard payload.",
+        "- `assets/data.js`: report payload.",
         "- `data/results_flat.csv`: flattened run rows.",
         "- `data/thread_scaling.csv`: single-node scaling summary.",
         "- `data/node_scaling.csv`: multinode scaling summary.",
@@ -851,7 +852,7 @@ _INDEX_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>CARTS Scalability Evidence Dashboard</title>
+<title>CARTS Report</title>
 <link rel="stylesheet" href="assets/styles.css" />
 <script src="assets/data.js"></script>
 <script defer src="assets/app.js"></script>
@@ -859,11 +860,12 @@ _INDEX_HTML = """<!doctype html>
 <body>
 <header class="topbar">
   <div>
-    <h1>CARTS Scalability Evidence Dashboard</h1>
+    <h1>CARTS Report</h1>
     <p>Compiler-managed task execution from OpenMP-style source programs, measured from one node through the full multinode sweep.</p>
   </div>
   <nav>
     <a href="#overview">Overview</a>
+    <a href="#tables">Tables</a>
     <a href="#single">Single Node</a>
     <a href="#multi">Multinode</a>
     <a href="#openmp">OpenMP</a>
@@ -876,8 +878,20 @@ _INDEX_HTML = """<!doctype html>
     <h2>Evidence Overview</h2>
     <div id="kpis" class="kpis"></div>
     <div class="grid two">
+      <article class="panel wide"><h3>Study Matrix</h3><div id="study-matrix" class="table"></div></article>
+    </div>
+    <div class="grid two">
       <article class="panel"><h3>Pass Rate By Phase</h3><div id="phase-pass" class="chart"></div></article>
       <article class="panel"><h3>Issues</h3><div id="issues" class="table"></div></article>
+    </div>
+  </section>
+  <section id="tables">
+    <h2>Report Tables And Exports</h2>
+    <div id="export-links" class="export-grid"></div>
+    <div class="grid two">
+      <article class="panel wide"><h3>Scaling Summary</h3><div id="scaling-summary-table" class="table"></div></article>
+      <article class="panel"><h3>Single-Node Family Summary</h3><div id="family-thread-table" class="table"></div></article>
+      <article class="panel"><h3>Multinode Family Summary</h3><div id="family-node-table" class="table"></div></article>
     </div>
   </section>
   <section id="single">
@@ -971,22 +985,34 @@ _STYLES_CSS = """
 :root{color-scheme:light;--ink:#18212f;--muted:#637083;--line:#d9e1ea;--panel:#fff;--bg:#f5f7fa;--blue:#2867b2;--green:#187a5b;--red:#b64242;--gold:#9b6b17}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:inherit}
 .topbar{position:sticky;top:0;z-index:5;background:#101827;color:white;padding:18px 28px;border-bottom:1px solid #263246}.topbar h1{margin:0 0 4px;font-size:28px;letter-spacing:0}.topbar p{margin:0;color:#cbd5e1;max-width:980px}.topbar nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.topbar a{padding:6px 10px;border:1px solid #3d4b63;border-radius:6px;text-decoration:none;color:#e2e8f0}
-main{max-width:1480px;margin:0 auto;padding:26px}section{margin-bottom:34px}h2{font-size:22px;margin:0 0 14px}h3{font-size:15px;margin:0 0 10px;color:#334155}.subhead{margin:20px 0 12px}.grid{display:grid;gap:16px}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.wide{grid-column:1/-1}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.chart{min-height:300px;width:100%;overflow:hidden}.small-chart{min-height:235px;width:100%;overflow:hidden}.family-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.family-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.family-card h4{font-size:15px;margin:0 0 4px;color:#1f2937}.family-meta{color:var(--muted);font-size:12px;margin-bottom:8px}.family-meta span{display:inline-block;margin-right:8px}.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.kpi .label{color:var(--muted);font-size:12px;text-transform:uppercase}.kpi .value{font-size:25px;font-weight:720;margin-top:4px}.kpi .note{font-size:12px;color:var(--muted);margin-top:3px}.axis text{fill:var(--muted);font-size:11px}.axis line,.axis path{stroke:var(--line)}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:12px}.family-card .legend{max-height:44px;overflow:auto}.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.table{overflow:auto;max-height:360px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#f8fafc;color:#475569}.controls{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px}.controls.compact{margin-top:-4px}.controls label{display:flex;gap:8px;align-items:center;color:var(--muted)}select{border:1px solid var(--line);border-radius:6px;background:white;padding:7px 9px}.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.roadmap{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fbfdff}.roadmap b{display:block;margin-bottom:5px}.roadmap p{margin:4px 0;color:#475569}
-@media(max-width:900px){main{padding:16px}.grid.two,.kpis,.cards,.family-grid{grid-template-columns:1fr}.topbar{position:static}.chart{min-height:260px}}
+main{max-width:1480px;margin:0 auto;padding:26px}section{margin-bottom:34px}h2{font-size:22px;margin:0 0 14px}h3{font-size:15px;margin:0 0 10px;color:#334155}.subhead{margin:20px 0 12px}.grid{display:grid;gap:16px}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.wide{grid-column:1/-1}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.chart{min-height:300px;width:100%;overflow:hidden}.small-chart{min-height:235px;width:100%;overflow:hidden}.figure-tools{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:8px}.figure-tools button,.export-card a{border:1px solid var(--line);border-radius:6px;background:white;color:#334155;padding:6px 9px;font:12px/1.2 inherit;text-decoration:none;cursor:pointer}.figure-tools button:hover,.export-card a:hover{border-color:#94a3b8;background:#f8fafc}.family-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.family-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.family-card h4{font-size:15px;margin:0 0 4px;color:#1f2937}.family-meta{color:var(--muted);font-size:12px;margin-bottom:8px}.family-meta span{display:inline-block;margin-right:8px}.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.kpi .label{color:var(--muted);font-size:12px;text-transform:uppercase}.kpi .value{font-size:25px;font-weight:720;margin-top:4px}.kpi .note{font-size:12px;color:var(--muted);margin-top:3px}.axis text{fill:var(--muted);font-size:11px}.axis line,.axis path{stroke:var(--line)}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:12px}.family-card .legend{max-height:44px;overflow:auto}.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.table{overflow:auto;max-height:420px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#f8fafc;color:#475569}.controls{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px}.controls.compact{margin-top:-4px}.controls label{display:flex;gap:8px;align-items:center;color:var(--muted)}select{border:1px solid var(--line);border-radius:6px;background:white;padding:7px 9px}.cards,.export-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.export-grid{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px}.export-card{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fff}.export-card b{display:block;margin-bottom:4px}.export-card p{margin:0 0 8px;color:var(--muted);font-size:12px}.roadmap{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fbfdff}.roadmap b{display:block;margin-bottom:5px}.roadmap p{margin:4px 0;color:#475569}
+@media(max-width:900px){main{padding:16px}.grid.two,.kpis,.cards,.family-grid,.export-grid{grid-template-columns:1fr}.topbar{position:static}.chart{min-height:260px}}
 """
 
 
-_APP_TS = """// TypeScript reference source for the generated CARTS dashboard.
-// The runtime dashboard uses assets/app.js directly so it opens from file:// without a build step.
-declare global { interface Window { CARTS_DASHBOARD_DATA: any; } }
+_APP_TS = """// TypeScript reference source for the generated CARTS report.
+// The runtime report uses assets/app.js directly so it opens from file:// without a build step.
+declare global { interface Window { CARTS_REPORT_DATA: any; } }
 export {};
 """
 
 
 _APP_JS = """
 (function(){
-const data=window.CARTS_DASHBOARD_DATA;
+const data=window.CARTS_REPORT_DATA;
 const colors=["#2867b2","#187a5b","#9b6b17","#7b3fb3","#b64242","#0f766e"];
+const dataFiles=[
+ ["Thread scaling","Single-node thread sweep aggregates","thread_scaling.csv"],
+ ["Node scaling","Multinode node sweep aggregates","node_scaling.csv"],
+ ["Family thread summary","Single-node per-family subplot source","family_thread_summary.csv"],
+ ["Family node summary","Multinode per-family subplot source","family_node_summary.csv"],
+ ["Family examples","Best and worst examples per family","family_examples.csv"],
+ ["Timing metrics","Startup, kernel, E2E, diagnostics by scale","timing_summary.csv"],
+ ["Communication","Run-level communication counters","communication.csv"],
+ ["Communication summary","Family-level communication medians","communication_summary.csv"],
+ ["Issues","Non-passing and warning rows","issues.csv"],
+ ["Flat results","Merged row-level report data","results_flat.csv"]
+];
 const metricLabels={
  e2e_self_speedup:"E2E self-speedup",
  kernel_self_speedup:"Kernel self-speedup",
@@ -1012,24 +1038,24 @@ function kpis(){
   ["Counter rows",h.counter_rows||0,"communication metrics"]
  ].map(k=>`<div class="kpi"><div class="label">${k[0]}</div><div class="value">${k[1]}</div><div class="note">${k[2]}</div></div>`).join("");
 }
-function svgRoot(w,h){return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="100%" role="img">`}
+function svgRoot(w,h,title="CARTS Report figure"){return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="100%" role="img" aria-label="${esc(title)}" xmlns="http://www.w3.org/2000/svg"><title>${esc(title)}</title><rect x="0" y="0" width="${w}" height="${h}" fill="#ffffff"/>`}
 function lineChart(target,series,xKey,yKey,opts={}){
  const w=opts.width||720,h=opts.height||300,p={l:opts.left||54,r:18,t:18,b:44}; const all=series.flatMap(s=>s.rows.map(r=>({row:r,key:s.yKey||yKey}))).filter(x=>num(x.row[xKey])!==null&&num(x.row[x.key])!==null);
  if(!all.length){el(target).innerHTML="<p>No comparable rows.</p>";return}
  const xs=[...new Set(all.map(x=>num(x.row[xKey])))].sort((a,b)=>a-b); const ys=all.map(x=>num(x.row[x.key]));
  const xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=opts.zero?0:Math.min(0,...ys),ymax=Math.max(...ys,opts.ymax||0);
  const sx=x=>p.l+((x-xmin)/(xmax-xmin||1))*(w-p.l-p.r); const sy=y=>h-p.b-((y-ymin)/(ymax-ymin||1))*(h-p.t-p.b);
- let out=svgRoot(w,h);
+ let out=svgRoot(w,h,opts.title||metricName(yKey));
  out+=axis(w,h,p,xs,ymin,ymax,sx,sy,opts.yLabel||"");
  series.forEach((s,i)=>{const key=s.yKey||yKey; const rows=s.rows.filter(r=>num(r[xKey])!==null&&num(r[key])!==null).sort((a,b)=>num(a[xKey])-num(b[xKey])); const pts=rows.map(r=>`${sx(num(r[xKey]))},${sy(num(r[key]))}`).join(" "); const c=s.color||colors[i%colors.length]; out+=`<polyline points="${pts}" fill="none" stroke="${c}" stroke-width="3"/>`; rows.forEach(r=>out+=`<circle cx="${sx(num(r[xKey]))}" cy="${sy(num(r[key]))}" r="4" fill="${c}"><title>${s.name}: ${r[xKey]}=${num(r[xKey])}, ${key}=${fmt(num(r[key]))}</title></circle>`)}); 
- out+="</svg>"+legend(series); el(target).innerHTML=out;
+ out+="</svg>"+legend(series)+figureTools(target); el(target).innerHTML=out;
 }
 function barChart(target,rows,labelKey,valueKey,opts={}){
  const w=720,h=300,p={l:150,r:18,t:18,b:34}; const vals=rows.map(r=>num(r[valueKey])).filter(v=>v!==null);
  if(!vals.length){el(target).innerHTML="<p>No data.</p>";return}
  const max=Math.max(...vals,opts.max||0); const barH=Math.max(14,(h-p.t-p.b)/rows.length-6);
- let out=svgRoot(w,h); rows.forEach((r,i)=>{const y=p.t+i*(barH+6); const v=num(r[valueKey])||0; const bw=((w-p.l-p.r)*v/(max||1)); const c=opts.color||colors[i%colors.length]; out+=`<text x="${p.l-8}" y="${y+barH*.7}" text-anchor="end" font-size="11" fill="#637083">${short(r[labelKey])}</text><rect x="${p.l}" y="${y}" width="${bw}" height="${barH}" rx="3" fill="${c}"><title>${r[labelKey]}: ${fmt(v)}</title></rect><text x="${p.l+bw+5}" y="${y+barH*.7}" font-size="11" fill="#334155">${opts.percent?pct(v):fmt(v)}</text>`});
- out+="</svg>"; el(target).innerHTML=out;
+ let out=svgRoot(w,h,opts.title||metricName(valueKey)); rows.forEach((r,i)=>{const y=p.t+i*(barH+6); const v=num(r[valueKey])||0; const bw=((w-p.l-p.r)*v/(max||1)); const c=opts.color||colors[i%colors.length]; out+=`<text x="${p.l-8}" y="${y+barH*.7}" text-anchor="end" font-size="11" fill="#637083">${short(r[labelKey])}</text><rect x="${p.l}" y="${y}" width="${bw}" height="${barH}" rx="3" fill="${c}"><title>${esc(r[labelKey])}: ${fmt(v)}</title></rect><text x="${p.l+bw+5}" y="${y+barH*.7}" font-size="11" fill="#334155">${opts.percent?pct(v):fmt(v)}</text>`});
+ out+="</svg>"+figureTools(target); el(target).innerHTML=out;
 }
 function heatmap(target,rows,xKey,yKey,valueKey){
  const xs=[...new Set(rows.map(r=>r[xKey]))].sort((a,b)=>Number(a)-Number(b)); const ys=[...new Set(rows.map(r=>r[yKey]))].sort();
@@ -1037,14 +1063,15 @@ function heatmap(target,rows,xKey,yKey,valueKey){
  const cellW=70,cellH=26,w=150+cellW*xs.length,h=42+cellH*ys.length;
  const vals=rows.map(r=>num(r[valueKey])).filter(v=>v!==null); const max=Math.max(...vals,1),min=Math.min(...vals,0);
  const m=new Map(rows.map(r=>[`${r[yKey]}|${r[xKey]}`,num(r[valueKey])]));
- let out=svgRoot(w,h); xs.forEach((x,i)=>out+=`<text x="${150+i*cellW+cellW/2}" y="20" text-anchor="middle" font-size="11" fill="#637083">${x}</text>`);
+ let out=svgRoot(w,h,metricName(valueKey)); xs.forEach((x,i)=>out+=`<text x="${150+i*cellW+cellW/2}" y="20" text-anchor="middle" font-size="11" fill="#637083">${x}</text>`);
  ys.forEach((y,j)=>{out+=`<text x="142" y="${42+j*cellH+17}" text-anchor="end" font-size="11" fill="#637083">${short(y,28)}</text>`; xs.forEach((x,i)=>{const v=m.get(`${y}|${x}`); const t=v===null||v===undefined?0:(v-min)/(max-min||1); const fill=v===null||v===undefined?"#eef2f7":mix([231,239,248],[24,122,91],t); out+=`<rect x="${150+i*cellW}" y="${30+j*cellH}" width="${cellW-2}" height="${cellH-2}" rx="2" fill="${fill}"><title>${y} ${x}: ${fmt(v)}</title></rect>`; if(v!==null&&v!==undefined) out+=`<text x="${150+i*cellW+cellW/2}" y="${47+j*cellH}" text-anchor="middle" font-size="10" fill="${t>.55?"white":"#18212f"}">${fmt(v,2)}</text>`})});
- out+="</svg>"; el(target).innerHTML=out;
+ out+="</svg>"+figureTools(target); el(target).innerHTML=out;
 }
-function table(target,rows,cols,limit=12){
+function table(target,rows,cols,limit=12,csvFile=null){
  if(!rows.length){el(target).innerHTML="<p>No rows.</p>";return}
  const body=rows.slice(0,limit).map(r=>`<tr>${cols.map(c=>`<td>${cell(r[c])}</td>`).join("")}</tr>`).join("");
- el(target).innerHTML=`<table><thead><tr>${cols.map(c=>`<th>${c.replaceAll("_"," ")}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+ const link=csvFile?`<div class="figure-tools"><a href="data/${csvFile}" download>Download CSV</a></div>`:"";
+ el(target).innerHTML=`<table><thead><tr>${cols.map(c=>`<th>${c.replaceAll("_"," ")}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>${link}`;
 }
 function familySubplots(target,phaseKinds,xKey,yKey){
  const kinds=Array.isArray(phaseKinds)?phaseKinds:[phaseKinds];
@@ -1075,34 +1102,67 @@ function setupFamilyControls(){
  single.addEventListener("change",drawSingle); multi.addEventListener("change",drawMulti);
  drawSingle(); drawMulti();
 }
+function exportLinks(){
+ el("export-links").innerHTML=dataFiles.map(([name,desc,file])=>`<div class="export-card"><b>${name}</b><p>${desc}</p><a href="data/${file}" download>Download CSV</a></div>`).join("");
+}
+function studyMatrix(){
+ const rows=[
+  {study:"Single-node CARTS thread sweep",size:"large",scale:"1,2,4,8,16,32,64 threads",benchmarks:data.benchmarks.length,status:`${findScale(data.tables.thread_scaling,"threads",64)?.pass||0}/${findScale(data.tables.thread_scaling,"threads",64)?.total||0} at 64 threads`},
+  {study:"Multinode CARTS node sweep",size:"extralarge",scale:"1,2,4,8,16,32,64 nodes",benchmarks:data.benchmarks.length,status:`${findNode("multinode")?.pass||0}/${findNode("multinode")?.total||0} at 64 nodes`},
+  {study:"Multinode CARTS distributed DB sweep",size:"extralarge",scale:"1,2,4,8,16,32,64 nodes",benchmarks:data.benchmarks.length,status:`${findNode("multinode_distributed_db")?.pass||0}/${findNode("multinode_distributed_db")?.total||0} at 64 nodes`},
+  {study:"Single-node OpenMP comparison",size:"large",scale:"64 threads",benchmarks:data.tables.openmp.length,status:`${data.tables.openmp.length} comparison rows`},
+  {study:"Communication counter profile",size:"extralarge",scale:"1,2,4,8 nodes",benchmarks:data.tables.communication_summary.length,status:`${data.tables.communication.length} counter-backed rows`}
+ ];
+ table("study-matrix",rows,["study","size","scale","benchmarks","status"],20);
+}
+function scalingSummary(){
+ const thread64=findScale(data.tables.thread_scaling,"threads",64)||{};
+ const node64=data.tables.node_scaling.filter(r=>r.nodes===64);
+ const rows=[
+  {view:"Single-node 64-thread",pass:`${thread64.pass||0}/${thread64.total||0}`,e2e_geomean_speedup:thread64.e2e_geomean_speedup,kernel_geomean_speedup:thread64.kernel_geomean_speedup,e2e_efficiency:thread64.e2e_geomean_efficiency},
+  ...node64.map(r=>({view:`64-node ${r.phase_label}`,pass:`${r.pass}/${r.total}`,e2e_geomean_speedup:r.e2e_geomean_speedup,kernel_geomean_speedup:r.kernel_geomean_speedup,e2e_efficiency:r.e2e_geomean_efficiency}))
+ ];
+ table("scaling-summary-table",rows,["view","pass","e2e_geomean_speedup","kernel_geomean_speedup","e2e_efficiency"],10);
+ table("family-thread-table",data.tables.family_thread_summary.filter(r=>r.threads===64),["family","pass","total","pass_pct","e2e_geomean_speedup","kernel_geomean_speedup","e2e_geomean_efficiency","median_startup_share_pct"],50,"family_thread_summary.csv");
+ table("family-node-table",data.tables.family_node_summary.filter(r=>r.nodes===64),["family","phase_label","pass","total","pass_pct","e2e_geomean_speedup","kernel_geomean_speedup","e2e_geomean_efficiency","median_startup_share_pct"],80,"family_node_summary.csv");
+}
+function setupDownloads(){
+ if(!document.addEventListener||window.__cartsReportDownloads)return;
+ window.__cartsReportDownloads=true;
+ document.addEventListener("click",ev=>{const btn=ev.target.closest&&ev.target.closest("[data-svg-target]"); if(btn) downloadSvg(btn.getAttribute("data-svg-target"));});
+}
 function render(){
+ setupDownloads();
  kpis();
- barChart("phase-pass",data.tables.phase_summary,"phase","pass_pct",{percent:true,color:"#187a5b",max:100});
- table("issues",data.tables.issues,["benchmark","phase","threads","nodes","status","runtime_warning"],50);
- lineChart("thread-speedup",[{name:"E2E",rows:data.tables.thread_scaling},{name:"Kernel",rows:data.tables.thread_scaling,yKey:"kernel_geomean_speedup",color:"#187a5b"}],"threads","e2e_geomean_speedup",{zero:true});
- lineChart("thread-efficiency",[{name:"E2E",rows:data.tables.thread_scaling},{name:"Kernel",rows:data.tables.thread_scaling,yKey:"kernel_geomean_efficiency",color:"#187a5b"}],"threads","e2e_geomean_efficiency",{zero:true,ymax:1});
- table("single-examples",data.tables.top_examples.filter(r=>r.kind==="single-node"),["benchmark","family","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],30);
- table("single-family-examples",data.tables.family_examples.filter(r=>r.kind==="single-node"),["family","scale","pass","total","pass_pct","geomean_e2e_speedup","best_benchmark","best_e2e_speedup","worst_benchmark","worst_e2e_speedup","median_startup_share_pct"],50);
+ exportLinks();
+ studyMatrix();
+ scalingSummary();
+ barChart("phase-pass",data.tables.phase_summary,"phase","pass_pct",{percent:true,color:"#187a5b",max:100,title:"Pass rate by phase"});
+ table("issues",data.tables.issues,["benchmark","phase","threads","nodes","status","runtime_warning"],50,"issues.csv");
+ lineChart("thread-speedup",[{name:"E2E",rows:data.tables.thread_scaling},{name:"Kernel",rows:data.tables.thread_scaling,yKey:"kernel_geomean_speedup",color:"#187a5b"}],"threads","e2e_geomean_speedup",{zero:true,title:"Single-node geomean speedup"});
+ lineChart("thread-efficiency",[{name:"E2E",rows:data.tables.thread_scaling},{name:"Kernel",rows:data.tables.thread_scaling,yKey:"kernel_geomean_efficiency",color:"#187a5b"}],"threads","e2e_geomean_efficiency",{zero:true,ymax:1,title:"Single-node geomean efficiency"});
+ table("single-examples",data.tables.top_examples.filter(r=>r.kind==="single-node"),["benchmark","family","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],30,"top_examples.csv");
+ table("single-family-examples",data.tables.family_examples.filter(r=>r.kind==="single-node"),["family","scale","pass","total","pass_pct","geomean_e2e_speedup","best_benchmark","best_e2e_speedup","worst_benchmark","worst_e2e_speedup","median_startup_share_pct"],50,"family_examples.csv");
  const nodeBy=by(data.tables.node_scaling,"phase_label");
- lineChart("node-speedup",Object.entries(nodeBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_geomean_speedup",{zero:true});
- lineChart("node-efficiency",Object.entries(nodeBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_geomean_efficiency",{zero:true,ymax:1});
+ lineChart("node-speedup",Object.entries(nodeBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_geomean_speedup",{zero:true,title:"Multinode geomean speedup"});
+ lineChart("node-efficiency",Object.entries(nodeBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_geomean_efficiency",{zero:true,ymax:1,title:"Multinode geomean efficiency"});
  heatmap("family-heatmap",data.tables.family_node_summary,"nodes","family","e2e_geomean_efficiency");
  const gemm=data.rows.filter(r=>r.benchmark==="polybench/gemm"&&r.phase_kind!=="single_node");
- lineChart("gemm",Object.entries(by(gemm,"phase")).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_self_speedup",{zero:true});
- table("multi-examples",data.tables.top_examples.filter(r=>r.kind==="multinode"),["benchmark","family","phase","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],40);
- table("multi-family-examples",data.tables.family_examples.filter(r=>r.kind!=="single-node"),["kind","family","scale","pass","total","pass_pct","geomean_e2e_speedup","best_benchmark","best_e2e_speedup","worst_benchmark","worst_e2e_speedup","median_startup_share_pct"],80);
- barChart("openmp-bars",data.tables.openmp.slice().sort((a,b)=>(b.carts_vs_openmp||0)-(a.carts_vs_openmp||0)).slice(0,12),"benchmark","carts_vs_openmp",{color:"#2867b2"});
- table("openmp-table",data.tables.openmp,["benchmark","threads","arts_e2e_sec","openmp_e2e_sec","carts_vs_openmp"],50);
+ lineChart("gemm",Object.entries(by(gemm,"phase")).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_self_speedup",{zero:true,title:"GEMM multinode speedup"});
+ table("multi-examples",data.tables.top_examples.filter(r=>r.kind==="multinode"),["benchmark","family","phase","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],40,"top_examples.csv");
+ table("multi-family-examples",data.tables.family_examples.filter(r=>r.kind!=="single-node"),["kind","family","scale","pass","total","pass_pct","geomean_e2e_speedup","best_benchmark","best_e2e_speedup","worst_benchmark","worst_e2e_speedup","median_startup_share_pct"],80,"family_examples.csv");
+ barChart("openmp-bars",data.tables.openmp.slice().sort((a,b)=>(b.carts_vs_openmp||0)-(a.carts_vs_openmp||0)).slice(0,12),"benchmark","carts_vs_openmp",{color:"#2867b2",title:"CARTS over OpenMP ratio"});
+ table("openmp-table",data.tables.openmp,["benchmark","threads","arts_e2e_sec","openmp_e2e_sec","carts_vs_openmp"],50,"results_flat.csv");
  const timingBy=by(data.tables.timing_summary,"phase_label");
- lineChart("startup-share",Object.entries(timingBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"scale","median_startup_share_pct",{zero:true,ymax:100});
- lineChart("median-e2e",Object.entries(timingBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"scale","median_e2e_sec",{zero:true});
+ lineChart("startup-share",Object.entries(timingBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"scale","median_startup_share_pct",{zero:true,ymax:100,title:"Median startup share"});
+ lineChart("median-e2e",Object.entries(timingBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"scale","median_e2e_sec",{zero:true,title:"Median E2E time"});
  const diag=data.tables.timing_summary.map(r=>({...r,diag_total:(r.srun_error_count||0)+(r.runtime_warning_count||0),label:`${r.phase_label} ${r.scale} ${r.scale_label}`}));
  barChart("diagnostics",diag.filter(r=>r.diag_total>0).slice(-18),"label","diag_total",{color:"#b64242"});
- table("timing-table",data.tables.timing_summary,["phase_label","scale","scale_label","pass","total","median_e2e_sec","median_startup_share_pct","median_kernel_share_pct","srun_error_count","runtime_warning_count"],40);
+ table("timing-table",data.tables.timing_summary,["phase_label","scale","scale_label","pass","total","median_e2e_sec","median_startup_share_pct","median_kernel_share_pct","srun_error_count","runtime_warning_count"],40,"timing_summary.csv");
  const commByNodes=Object.values(by(data.tables.communication,"nodes")).map(rows=>({nodes:rows[0].nodes,remote_bytes_total:median(rows.map(r=>r.remote_bytes_total)),connect_success_pct:median(rows.map(r=>r.connect_success_pct))})).sort((a,b)=>a.nodes-b.nodes);
- lineChart("comm-bytes",[{name:"median remote bytes",rows:commByNodes}],"nodes","remote_bytes_total",{zero:true});
- lineChart("comm-connect",[{name:"median connect success",rows:commByNodes,color:"#187a5b"}],"nodes","connect_success_pct",{zero:true,ymax:100});
- table("comm-family-table",data.tables.communication_summary,["family","nodes","counter_rows","median_remote_bytes_total","median_remote_messages_total","median_remote_bytes_per_message","median_remote_bytes_per_sec","median_connect_success_pct"],80);
+ lineChart("comm-bytes",[{name:"median remote bytes",rows:commByNodes}],"nodes","remote_bytes_total",{zero:true,title:"Median remote bytes"});
+ lineChart("comm-connect",[{name:"median connect success",rows:commByNodes,color:"#187a5b"}],"nodes","connect_success_pct",{zero:true,ymax:100,title:"Connection success"});
+ table("comm-family-table",data.tables.communication_summary,["family","nodes","counter_rows","median_remote_bytes_total","median_remote_messages_total","median_remote_bytes_per_message","median_remote_bytes_per_sec","median_connect_success_pct"],80,"communication_summary.csv");
  el("optimizations").innerHTML=data.optimizations.map(r=>`<div class="roadmap"><b>${r.priority}. ${r.area}</b><p>${r.evidence}</p><p>${r.proposal}</p></div>`).join("");
  setupFamilyControls();
  setupExplorer();
@@ -1114,6 +1174,17 @@ function setupExplorer(){
  function draw(){const bench=b.value,metric=m.value; const rows=data.rows.filter(r=>r.benchmark===bench&&r.status==="PASS"); lineChart("explorer-single",[{name:bench,rows:rows.filter(r=>r.phase_kind==="single_node")}],"threads",metric,{zero:metric.includes("speedup")||metric.includes("efficiency")}); const groups=Object.entries(by(rows.filter(r=>r.phase_kind!=="single_node"),"phase")).map(([name,rows],i)=>({name,rows,color:colors[i]})); lineChart("explorer-multi",groups,"nodes",metric,{zero:metric.includes("speedup")||metric.includes("efficiency")});}
  b.addEventListener("change",draw); m.addEventListener("change",draw); draw();
 }
+function figureTools(target){return `<div class="figure-tools"><button type="button" data-svg-target="${target}">Download SVG</button></div>`}
+function downloadSvg(target){
+ const host=el(target),svg=host&&host.querySelector?host.querySelector("svg"):null;
+ if(!svg)return;
+ const text=new XMLSerializer().serializeToString(svg);
+ const blob=new Blob([text],{type:"image/svg+xml"});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement("a");
+ a.href=url; a.download=`${safe(target)}.svg`; document.body.appendChild(a); a.click(); a.remove();
+ URL.revokeObjectURL(url);
+}
 function axis(w,h,p,xs,ymin,ymax,sx,sy,label){let out=""; for(let i=0;i<=4;i++){const yv=ymin+(ymax-ymin)*i/4,y=sy(yv); out+=`<line x1="${p.l}" x2="${w-p.r}" y1="${y}" y2="${y}" stroke="#e2e8f0"/><text x="${p.l-8}" y="${y+4}" text-anchor="end" font-size="11" fill="#637083">${fmt(yv,1)}</text>`} xs.forEach(x=>out+=`<text x="${sx(x)}" y="${h-18}" text-anchor="middle" font-size="11" fill="#637083">${x}</text>`); out+=`<line x1="${p.l}" x2="${w-p.r}" y1="${h-p.b}" y2="${h-p.b}" stroke="#cbd5e1"/><line x1="${p.l}" x2="${p.l}" y1="${p.t}" y2="${h-p.b}" stroke="#cbd5e1"/>`; return out}
 function legend(series){return `<div class="legend">${series.map((s,i)=>`<span><span class="swatch" style="background:${s.color||colors[i%colors.length]}"></span>${s.name}</span>`).join("")}</div>`}
 function num(v){const n=Number(v);return Number.isFinite(n)?n:null}
@@ -1122,10 +1193,13 @@ function cell(v){if(typeof v==="number")return fmt(v); if(v===null||v===undefine
 function metricName(k){return metricLabels[k]||k.replaceAll("_"," ")}
 function metricZero(k){return k.includes("speedup")||k.includes("efficiency")||k.includes("sec")||k.includes("share")}
 function metricMax(k){return k.includes("efficiency")?1:(k.includes("share")?100:undefined)}
+function findScale(rows,key,value){return rows.find(r=>r[key]===value)}
+function findNode(kind){return data.tables.node_scaling.find(r=>r.phase_kind===kind&&r.nodes===64)}
 function median(vals){vals=vals.map(num).filter(v=>v!==null).sort((a,b)=>a-b); if(!vals.length)return null; const i=Math.floor(vals.length/2); return vals.length%2?vals[i]:(vals[i-1]+vals[i])/2}
 function mix(a,b,t){const c=a.map((x,i)=>Math.round(x+(b[i]-x)*t));return `rgb(${c[0]},${c[1]},${c[2]})`}
 function max(vals){vals=vals.map(num).filter(v=>v!==null);return vals.length?Math.max(...vals):null}
 function safe(v){return String(v).replace(/[^a-zA-Z0-9_-]/g,"_")}
+function esc(v){return String(v).replace(/[&<>"']/g,c=>c==="&"?"&amp;":c==="<"?"&lt;":c===">"?"&gt;":c==='"'?"&quot;":"&#39;")}
 render();
 })();
 """

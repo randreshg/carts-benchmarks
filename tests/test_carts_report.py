@@ -11,11 +11,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = REPO_ROOT / "external" / "carts-benchmarks" / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from dashboard import generate_dashboard  # noqa: E402
+from report import generate_carts_report  # noqa: E402
 
 
-class DashboardGenerationTest(unittest.TestCase):
-    def test_generate_dashboard_writes_static_app_and_data_extracts(self) -> None:
+class CartsReportGenerationTest(unittest.TestCase):
+    def test_generate_carts_report_writes_static_app_and_data_extracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             results_dir = root / "run"
@@ -52,7 +52,7 @@ class DashboardGenerationTest(unittest.TestCase):
             }
             (results_dir / "results.json").write_text(json.dumps(payload))
 
-            artifact = generate_dashboard(results_dir)
+            artifact = generate_carts_report(results_dir)
 
             self.assertTrue(artifact.index_html.exists())
             self.assertTrue(artifact.data_js.exists())
@@ -61,13 +61,15 @@ class DashboardGenerationTest(unittest.TestCase):
             self.assertTrue((artifact.output_dir / "data" / "family_examples.csv").exists())
             self.assertTrue((artifact.output_dir / "data" / "communication_summary.csv").exists())
             data_js = artifact.data_js.read_text()
-            self.assertIn("CARTS_DASHBOARD_DATA", data_js)
+            self.assertIn("CARTS_REPORT_DATA", data_js)
+            self.assertIn("CARTS Report", artifact.index_html.read_text())
+            self.assertIn("Download SVG", (artifact.output_dir / "assets" / "app.js").read_text())
             self.assertIn("remote_bytes_total", data_js)
             self.assertIn("remote_bytes_per_message", data_js)
             self.assertIn("family_examples", data_js)
             self.assertIn("polybench/gemm", data_js)
 
-    def test_generate_dashboard_merges_extra_results_for_openmp_comparison(self) -> None:
+    def test_generate_carts_report_merges_extra_results_for_openmp_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             primary = root / "primary"
@@ -83,12 +85,26 @@ class DashboardGenerationTest(unittest.TestCase):
                 "results": [self._result("openmp-compare-large-64t", 64, 1, 5.0, omp=7.5)],
             }))
 
-            artifact = generate_dashboard(primary, extra_results=[extra])
+            artifact = generate_carts_report(primary, extra_results=[extra])
             data_js = artifact.data_js.read_text()
 
             self.assertIn("openmp-compare-large-64t", data_js)
             self.assertIn("carts_vs_openmp", data_js)
             self.assertIn(str(extra / "results.json"), data_js)
+
+    def test_report_generator_uses_carts_report_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results_dir = Path(tmp) / "run"
+            results_dir.mkdir()
+            (results_dir / "results.json").write_text(json.dumps({
+                "metadata": {"timestamp": "primary"},
+                "results": [self._result("thread-sweep-large-cap120", 64, 1, 4.0)],
+            }))
+
+            artifact = generate_carts_report(results_dir)
+
+            self.assertEqual(artifact.output_dir.name, "carts-report")
+            self.assertTrue(artifact.index_html.exists())
 
     @staticmethod
     def _result(
