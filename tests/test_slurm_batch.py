@@ -634,7 +634,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertIn("required=72 runtime_required=68 requested=72", content)
             self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
 
-    def test_generate_sbatch_script_preloads_runtime_snapshot(self) -> None:
+    def test_generate_sbatch_script_uses_runtime_snapshot_library_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run_1"
@@ -677,12 +677,16 @@ class SlurmBatchPollingTest(unittest.TestCase):
 
             content = script_path.read_text()
             self.assertIn(f'ARTS_RUNTIME_LIB_DIR="{runtime_lib_dir.resolve()}"', content)
-            self.assertIn("export ARTS_RUNTIME_PRELOAD", content)
-            self.assertIn("ARTS Runtime Preload: $ARTS_RUNTIME_PRELOAD", content)
+            self.assertIn(f'ARTS_EXECUTABLE="{executable_arts.resolve()}"', content)
+            self.assertIn("export ARTS_RUNTIME_LIB", content)
+            self.assertIn("ARTS Runtime Library: $ARTS_RUNTIME_LIB", content)
+            self.assertIn("ARTS Runtime Resolved: $ARTS_RUNTIME_RESOLVED", content)
+            self.assertIn("RUNPATH rather than RPATH", content)
             self.assertIn(
-                'env LD_PRELOAD="${ARTS_RUNTIME_PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}"',
+                'env LD_LIBRARY_PATH="${ARTS_RUNTIME_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"',
                 content,
             )
+            self.assertNotIn("LD_PRELOAD", content)
             self.assertIn(str(executable_arts.resolve()), content)
 
     def test_generate_sbatch_script_honors_requested_nodelist(self) -> None:

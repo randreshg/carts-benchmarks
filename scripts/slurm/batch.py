@@ -524,24 +524,42 @@ def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
         )
 
     lib_dir = config.arts_runtime_lib_dir.resolve()
+    executable = config.executable_arts.resolve()
     section = f"""ARTS_RUNTIME_LIB_DIR="{lib_dir}"
-ARTS_RUNTIME_PRELOAD="$ARTS_RUNTIME_LIB_DIR/libarts.so.2"
-if [ ! -e "$ARTS_RUNTIME_PRELOAD" ]; then
-    ARTS_RUNTIME_PRELOAD="$ARTS_RUNTIME_LIB_DIR/libarts.so"
+ARTS_EXECUTABLE="{executable}"
+ARTS_RUNTIME_LIB="$ARTS_RUNTIME_LIB_DIR/libarts.so.2"
+if [ ! -e "$ARTS_RUNTIME_LIB" ]; then
+    ARTS_RUNTIME_LIB="$ARTS_RUNTIME_LIB_DIR/libarts.so"
 fi
-if [ ! -e "$ARTS_RUNTIME_PRELOAD" ]; then
+if [ ! -e "$ARTS_RUNTIME_LIB" ]; then
     echo "Missing ARTS runtime snapshot: $ARTS_RUNTIME_LIB_DIR" >&2
     exit 126
 fi
 export ARTS_RUNTIME_LIB_DIR
-export ARTS_RUNTIME_PRELOAD
+export ARTS_RUNTIME_LIB
 export LD_LIBRARY_PATH="$ARTS_RUNTIME_LIB_DIR${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 echo "ARTS Runtime Lib Dir: $ARTS_RUNTIME_LIB_DIR"
-echo "ARTS Runtime Preload: $ARTS_RUNTIME_PRELOAD"
+echo "ARTS Runtime Library: $ARTS_RUNTIME_LIB"
+if command -v ldd >/dev/null 2>&1; then
+    ARTS_RUNTIME_RESOLVED=$(LD_LIBRARY_PATH="$ARTS_RUNTIME_LIB_DIR${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}" ldd "$ARTS_EXECUTABLE" 2>/dev/null | awk '/libarts\\.so/ {{print $3; exit}}')
+    case "$ARTS_RUNTIME_RESOLVED" in
+        "$ARTS_RUNTIME_LIB_DIR"/*)
+            echo "ARTS Runtime Resolved: $ARTS_RUNTIME_RESOLVED"
+            ;;
+        "")
+            echo "Unable to resolve libarts for $ARTS_EXECUTABLE" >&2
+            exit 126
+            ;;
+        *)
+            echo "ARTS runtime snapshot not selected: $ARTS_RUNTIME_RESOLVED (expected under $ARTS_RUNTIME_LIB_DIR)" >&2
+            echo "Rebuild the benchmark artifact so the executable uses RUNPATH rather than RPATH." >&2
+            exit 126
+            ;;
+    esac
+fi
 """
     env_prefix = (
-        'env LD_PRELOAD="${ARTS_RUNTIME_PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}" '
-        'LD_LIBRARY_PATH="${ARTS_RUNTIME_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" '
+        'env LD_LIBRARY_PATH="${ARTS_RUNTIME_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" '
     )
     return section.rstrip(), env_prefix
 
