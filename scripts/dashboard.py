@@ -89,10 +89,12 @@ def generate_dashboard(
     _write_csv(data_dir / "node_scaling.csv", dashboard_data["tables"]["node_scaling"])
     _write_csv(data_dir / "issues.csv", dashboard_data["tables"]["issues"])
     _write_csv(data_dir / "communication.csv", dashboard_data["tables"]["communication"])
+    _write_csv(data_dir / "communication_summary.csv", dashboard_data["tables"]["communication_summary"])
     _write_csv(data_dir / "family_thread_summary.csv", dashboard_data["tables"]["family_thread_summary"])
     _write_csv(data_dir / "family_node_summary.csv", dashboard_data["tables"]["family_node_summary"])
     _write_csv(data_dir / "timing_summary.csv", dashboard_data["tables"]["timing_summary"])
     _write_csv(data_dir / "top_examples.csv", dashboard_data["tables"]["top_examples"])
+    _write_csv(data_dir / "family_examples.csv", dashboard_data["tables"]["family_examples"])
 
     (output_dir / "README.md").write_text(_readme(dashboard_data), encoding="utf-8")
     return DashboardArtifact(
@@ -186,10 +188,12 @@ def _build_dashboard_data(metadata: dict[str, Any], rows: list[dict[str, Any]], 
     issues = _issues(rows)
     openmp = _openmp_rows(rows)
     communication = _communication_rows(rows)
+    communication_summary = _communication_summary(communication)
     family_thread_summary = _family_thread_summary(rows)
     family_summary = _family_node_summary(rows)
     timing_summary = _timing_summary(rows)
     top_examples = _top_examples(rows)
+    family_examples = _family_examples(rows)
     optimizations = _optimization_recommendations(rows, node_scaling, communication)
     headline = _headline(rows, thread_scaling, node_scaling, issues, communication)
     metadata_out = {
@@ -215,10 +219,12 @@ def _build_dashboard_data(metadata: dict[str, Any], rows: list[dict[str, Any]], 
             "issues": issues,
             "openmp": openmp,
             "communication": communication,
+            "communication_summary": communication_summary,
             "family_thread_summary": family_thread_summary,
             "family_node_summary": family_summary,
             "timing_summary": timing_summary,
             "top_examples": top_examples,
+            "family_examples": family_examples,
         },
         "benchmarks": sorted({row["benchmark"] for row in rows}),
         "families": sorted({row["family"] for row in rows}),
@@ -365,6 +371,9 @@ def _communication_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         received = _float(row.get("remote_bytes_received")) or 0.0
         sends = _float(row.get("remote_sends")) or 0.0
         receives = _float(row.get("remote_receives")) or 0.0
+        total_bytes = sent + received
+        total_messages = sends + receives
+        e2e_sec = _float(row.get("arts_e2e_sec"))
         out.append({
             "benchmark": row["benchmark"],
             "family": row["family"],
@@ -372,14 +381,36 @@ def _communication_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "phase_kind": row["phase_kind"],
             "threads": row["threads"],
             "nodes": row["nodes"],
-            "remote_bytes_total": sent + received,
-            "remote_messages_total": sends + receives,
+            "remote_bytes_total": total_bytes,
+            "remote_messages_total": total_messages,
+            "remote_bytes_per_message": _safe_div(total_bytes, total_messages),
+            "remote_bytes_per_sec": _safe_div(total_bytes, e2e_sec),
+            "remote_messages_per_sec": _safe_div(total_messages, e2e_sec),
             "connect_success_pct": _pct(_float(row.get("connect_success")) or 0.0, _float(row.get("connect_attempts")) or 0.0),
             "memory_footprint_bytes": row.get("memory_footprint_bytes"),
             "time_init_ms": row.get("time_init_ms"),
             "time_total_ms": row.get("time_total_ms"),
         })
     return sorted(out, key=lambda row: (row["phase"], row["nodes"], row["benchmark"]))
+
+
+def _communication_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[(row["family"], row["nodes"])].append(row)
+    out = []
+    for (family, nodes), subset in sorted(grouped.items()):
+        out.append({
+            "family": family,
+            "nodes": nodes,
+            "counter_rows": len(subset),
+            "median_remote_bytes_total": _median(row.get("remote_bytes_total") for row in subset),
+            "median_remote_messages_total": _median(row.get("remote_messages_total") for row in subset),
+            "median_remote_bytes_per_message": _median(row.get("remote_bytes_per_message") for row in subset),
+            "median_remote_bytes_per_sec": _median(row.get("remote_bytes_per_sec") for row in subset),
+            "median_connect_success_pct": _median(row.get("connect_success_pct") for row in subset),
+        })
+    return out
 
 
 def _family_thread_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -477,6 +508,44 @@ def _top_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _family_examples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    specs = [
+        ("single-node", PHASE_THREAD, "threads"),
+        ("multinode", PHASE_NODE, "nodes"),
+        ("multinode distributed DB", PHASE_NODE_DB, "nodes"),
+    ]
+    for kind, phase_kind, scale_key in specs:
+        phase_rows = [row for row in rows if row["phase_kind"] == phase_kind]
+        max_scale = max((row[scale_key] for row in phase_rows), default=0)
+        if not max_scale:
+            continue
+        for family in sorted({row["family"] for row in phase_rows}):
+            family_rows = [row for row in phase_rows if row["family"] == family and row[scale_key] == max_scale]
+            passed = [row for row in family_rows if row["status"] == "PASS"]
+            comparable = [row for row in passed if row.get("e2e_self_speedup") is not None]
+            best = max(comparable, key=lambda row: row["e2e_self_speedup"], default=None)
+            worst = min(comparable, key=lambda row: row["e2e_self_speedup"], default=None)
+            out.append({
+                "kind": kind,
+                "family": family,
+                "scale_label": scale_key,
+                "scale": max_scale,
+                "pass": len(passed),
+                "total": len(family_rows),
+                "pass_pct": _pct(len(passed), len(family_rows)),
+                "geomean_e2e_speedup": _geomean(row.get("e2e_self_speedup") for row in comparable),
+                "geomean_kernel_speedup": _geomean(row.get("kernel_self_speedup") for row in comparable),
+                "median_e2e_sec": _median(row.get("arts_e2e_sec") for row in passed),
+                "median_startup_share_pct": _median(row.get("startup_share_pct") for row in passed),
+                "best_benchmark": best.get("benchmark") if best else None,
+                "best_e2e_speedup": best.get("e2e_self_speedup") if best else None,
+                "worst_benchmark": worst.get("benchmark") if worst else None,
+                "worst_e2e_speedup": worst.get("e2e_self_speedup") if worst else None,
+            })
+    return out
+
+
 def _example_row(kind: str, row: dict[str, Any], scale_label: str, scale: int) -> dict[str, Any]:
     return {
         "kind": kind,
@@ -543,7 +612,11 @@ def _headline(
     issues: list[dict[str, Any]],
     communication: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    passed = sum(1 for row in rows if row["status"] == "PASS")
+    scaling_rows = [
+        row for row in rows
+        if row["phase_kind"] in {PHASE_THREAD, PHASE_NODE, PHASE_NODE_DB}
+    ] or rows
+    passed = sum(1 for row in scaling_rows if row["status"] == "PASS")
     thread_max = max(thread_scaling, key=lambda row: row["threads"], default={})
     node64 = [row for row in node_scaling if row["nodes"] == 64]
     gemm64 = [
@@ -551,9 +624,9 @@ def _headline(
         if row["benchmark"] == "polybench/gemm" and row["nodes"] == 64 and row["status"] == "PASS"
     ]
     return {
-        "overall_pass_rate_pct": _pct(passed, len(rows)),
+        "overall_pass_rate_pct": _pct(passed, len(scaling_rows)),
         "overall_passes": passed,
-        "overall_total": len(rows),
+        "overall_total": len(scaling_rows),
         "single_node_max_threads": thread_max.get("threads"),
         "single_node_geomean_e2e_speedup": thread_max.get("e2e_geomean_speedup"),
         "node64_baseline_geomean_e2e_speedup": _first(
@@ -748,7 +821,7 @@ def _readme(data: dict[str, Any]) -> str:
         "",
         "## Headline",
         "",
-        f"- Overall pass rate: {headline['overall_pass_rate_pct']:.1f}% ({headline['overall_passes']}/{headline['overall_total']}).",
+        f"- CARTS scaling pass rate: {headline['overall_pass_rate_pct']:.1f}% ({headline['overall_passes']}/{headline['overall_total']}).",
         f"- Max single-node thread speedup: {_fmt(headline.get('single_node_geomean_e2e_speedup'))}x.",
         f"- 64-node baseline geomean speedup: {_fmt(headline.get('node64_baseline_geomean_e2e_speedup'))}x.",
         f"- 64-node distributed-DB geomean speedup: {_fmt(headline.get('node64_distributed_db_geomean_e2e_speedup'))}x.",
@@ -761,6 +834,8 @@ def _readme(data: dict[str, Any]) -> str:
         "- `data/node_scaling.csv`: multinode scaling summary.",
         "- `data/family_thread_summary.csv`: per-family single-node subplots source.",
         "- `data/family_node_summary.csv`: per-family multinode subplots source.",
+        "- `data/family_examples.csv`: best and worst examples per family at the largest scale.",
+        "- `data/communication_summary.csv`: family-level communication counter medians.",
         "- `data/timing_summary.csv`: startup/kernel/overhead metrics by scale.",
         "- `data/issues.csv`: non-passing or warning rows.",
     ]) + "\n"
@@ -811,8 +886,19 @@ _INDEX_HTML = """<!doctype html>
       <article class="panel"><h3>Geomean Speedup</h3><div id="thread-speedup" class="chart"></div></article>
       <article class="panel"><h3>Geomean Efficiency</h3><div id="thread-efficiency" class="chart"></div></article>
       <article class="panel wide"><h3>Top 64-Thread Examples</h3><div id="single-examples" class="table"></div></article>
+      <article class="panel wide"><h3>Family 64-Thread Best/Worst Examples</h3><div id="single-family-examples" class="table"></div></article>
     </div>
     <h3 class="subhead">Per-Family Benchmark Subplots</h3>
+    <div class="controls compact">
+      <label>Family metric <select id="single-family-metric-select">
+        <option value="e2e_self_speedup">E2E self-speedup</option>
+        <option value="kernel_self_speedup">Kernel self-speedup</option>
+        <option value="e2e_efficiency">E2E efficiency</option>
+        <option value="kernel_efficiency">Kernel efficiency</option>
+        <option value="arts_e2e_sec">E2E seconds</option>
+        <option value="startup_share_pct">Startup share</option>
+      </select></label>
+    </div>
     <div id="single-family-plots" class="family-grid"></div>
   </section>
   <section id="multi">
@@ -823,8 +909,19 @@ _INDEX_HTML = """<!doctype html>
       <article class="panel wide"><h3>Family Efficiency Heatmap</h3><div id="family-heatmap" class="chart"></div></article>
       <article class="panel wide"><h3>GEMM Node Scaling</h3><div id="gemm" class="chart"></div></article>
       <article class="panel wide"><h3>Top 64-Node Examples</h3><div id="multi-examples" class="table"></div></article>
+      <article class="panel wide"><h3>Family 64-Node Best/Worst Examples</h3><div id="multi-family-examples" class="table"></div></article>
     </div>
     <h3 class="subhead">Per-Family Multinode Subplots</h3>
+    <div class="controls compact">
+      <label>Family metric <select id="multi-family-metric-select">
+        <option value="e2e_self_speedup">E2E self-speedup</option>
+        <option value="kernel_self_speedup">Kernel self-speedup</option>
+        <option value="e2e_efficiency">E2E efficiency</option>
+        <option value="kernel_efficiency">Kernel efficiency</option>
+        <option value="arts_e2e_sec">E2E seconds</option>
+        <option value="startup_share_pct">Startup share</option>
+      </select></label>
+    </div>
     <div id="multi-family-plots" class="family-grid"></div>
   </section>
   <section id="openmp">
@@ -843,6 +940,7 @@ _INDEX_HTML = """<!doctype html>
       <article class="panel"><h3>Timing Metrics</h3><div id="timing-table" class="table"></div></article>
       <article class="panel"><h3>Remote Bytes</h3><div id="comm-bytes" class="chart"></div></article>
       <article class="panel"><h3>Connection Success</h3><div id="comm-connect" class="chart"></div></article>
+      <article class="panel wide"><h3>Communication Summary By Family</h3><div id="comm-family-table" class="table"></div></article>
       <article class="panel wide"><h3>Optimization Roadmap</h3><div id="optimizations" class="cards"></div></article>
     </div>
   </section>
@@ -873,7 +971,7 @@ _STYLES_CSS = """
 :root{color-scheme:light;--ink:#18212f;--muted:#637083;--line:#d9e1ea;--panel:#fff;--bg:#f5f7fa;--blue:#2867b2;--green:#187a5b;--red:#b64242;--gold:#9b6b17}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:inherit}
 .topbar{position:sticky;top:0;z-index:5;background:#101827;color:white;padding:18px 28px;border-bottom:1px solid #263246}.topbar h1{margin:0 0 4px;font-size:28px;letter-spacing:0}.topbar p{margin:0;color:#cbd5e1;max-width:980px}.topbar nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.topbar a{padding:6px 10px;border:1px solid #3d4b63;border-radius:6px;text-decoration:none;color:#e2e8f0}
-main{max-width:1480px;margin:0 auto;padding:26px}section{margin-bottom:34px}h2{font-size:22px;margin:0 0 14px}h3{font-size:15px;margin:0 0 10px;color:#334155}.subhead{margin:20px 0 12px}.grid{display:grid;gap:16px}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.wide{grid-column:1/-1}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.chart{min-height:300px;width:100%;overflow:hidden}.small-chart{min-height:235px;width:100%;overflow:hidden}.family-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.family-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.family-card h4{font-size:15px;margin:0 0 4px;color:#1f2937}.family-meta{color:var(--muted);font-size:12px;margin-bottom:8px}.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.kpi .label{color:var(--muted);font-size:12px;text-transform:uppercase}.kpi .value{font-size:25px;font-weight:720;margin-top:4px}.kpi .note{font-size:12px;color:var(--muted);margin-top:3px}.axis text{fill:var(--muted);font-size:11px}.axis line,.axis path{stroke:var(--line)}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:12px}.family-card .legend{max-height:44px;overflow:auto}.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.table{overflow:auto;max-height:360px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#f8fafc;color:#475569}.controls{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px}.controls label{display:flex;gap:8px;align-items:center;color:var(--muted)}select{border:1px solid var(--line);border-radius:6px;background:white;padding:7px 9px}.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.roadmap{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fbfdff}.roadmap b{display:block;margin-bottom:5px}.roadmap p{margin:4px 0;color:#475569}
+main{max-width:1480px;margin:0 auto;padding:26px}section{margin-bottom:34px}h2{font-size:22px;margin:0 0 14px}h3{font-size:15px;margin:0 0 10px;color:#334155}.subhead{margin:20px 0 12px}.grid{display:grid;gap:16px}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.wide{grid-column:1/-1}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.chart{min-height:300px;width:100%;overflow:hidden}.small-chart{min-height:235px;width:100%;overflow:hidden}.family-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.family-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;box-shadow:0 1px 2px rgba(16,24,40,.04)}.family-card h4{font-size:15px;margin:0 0 4px;color:#1f2937}.family-meta{color:var(--muted);font-size:12px;margin-bottom:8px}.family-meta span{display:inline-block;margin-right:8px}.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.kpi .label{color:var(--muted);font-size:12px;text-transform:uppercase}.kpi .value{font-size:25px;font-weight:720;margin-top:4px}.kpi .note{font-size:12px;color:var(--muted);margin-top:3px}.axis text{fill:var(--muted);font-size:11px}.axis line,.axis path{stroke:var(--line)}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:12px}.family-card .legend{max-height:44px;overflow:auto}.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.table{overflow:auto;max-height:360px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#f8fafc;color:#475569}.controls{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px}.controls.compact{margin-top:-4px}.controls label{display:flex;gap:8px;align-items:center;color:var(--muted)}select{border:1px solid var(--line);border-radius:6px;background:white;padding:7px 9px}.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.roadmap{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fbfdff}.roadmap b{display:block;margin-bottom:5px}.roadmap p{margin:4px 0;color:#475569}
 @media(max-width:900px){main{padding:16px}.grid.two,.kpis,.cards,.family-grid{grid-template-columns:1fr}.topbar{position:static}.chart{min-height:260px}}
 """
 
@@ -889,6 +987,17 @@ _APP_JS = """
 (function(){
 const data=window.CARTS_DASHBOARD_DATA;
 const colors=["#2867b2","#187a5b","#9b6b17","#7b3fb3","#b64242","#0f766e"];
+const metricLabels={
+ e2e_self_speedup:"E2E self-speedup",
+ kernel_self_speedup:"Kernel self-speedup",
+ e2e_efficiency:"E2E efficiency",
+ kernel_efficiency:"Kernel efficiency",
+ arts_e2e_sec:"E2E seconds",
+ arts_kernel_sec:"Kernel seconds",
+ startup_share_pct:"Startup share",
+ remote_bytes_total:"Remote bytes",
+ remote_messages_total:"Remote messages"
+};
 const fmt=(v,d=2)=>v===null||v===undefined||Number.isNaN(Number(v))?"n/a":Number(v).toFixed(d);
 const pct=(v)=>v===null||v===undefined?"n/a":`${fmt(v,1)}%`;
 const by=(rows,key)=>rows.reduce((m,r)=>{const k=typeof key==="function"?key(r):r[key];(m[k]??=[]).push(r);return m},{});
@@ -896,7 +1005,7 @@ function el(id){return document.getElementById(id)}
 function kpis(){
  const h=data.headline;
  el("kpis").innerHTML=[
-  ["Pass rate",pct(h.overall_pass_rate_pct),`${h.overall_passes}/${h.overall_total} runs`],
+  ["Scaling pass rate",pct(h.overall_pass_rate_pct),`${h.overall_passes}/${h.overall_total} CARTS scaling runs`],
   ["Single-node speedup",`${fmt(h.single_node_geomean_e2e_speedup)}x`,`${h.single_node_max_threads||"max"} threads`],
   ["64-node baseline",`${fmt(h.node64_baseline_geomean_e2e_speedup)}x`,"CARTS multinode"],
   ["64-node distributed DB",`${fmt(h.node64_distributed_db_geomean_e2e_speedup)}x`,"CARTS runtime config"],
@@ -945,39 +1054,57 @@ function familySubplots(target,phaseKinds,xKey,yKey){
   const rows=data.rows.filter(r=>r.family===family&&kinds.includes(r.phase_kind)&&r.status==="PASS"&&num(r[yKey])!==null);
   const passed=rows.length,total=data.rows.filter(r=>r.family===family&&kinds.includes(r.phase_kind)).length;
   const scale=max(rows.map(r=>r[xKey]));
-  el(safe(target+"-"+family+"-meta")).textContent=`${passed}/${total} passing points, max ${xKey}: ${scale||"n/a"}`;
+  const atMax=rows.filter(r=>r[xKey]===scale);
+  const best=atMax.slice().sort((a,b)=>(num(b[yKey])||0)-(num(a[yKey])||0))[0];
+  const worst=atMax.slice().sort((a,b)=>(num(a[yKey])||0)-(num(b[yKey])||0))[0];
+  el(safe(target+"-"+family+"-meta")).innerHTML=[
+   `<span>${passed}/${total} passing points</span>`,
+   `<span>max ${xKey}: ${scale||"n/a"}</span>`,
+   `<span>${metricName(yKey)}</span>`,
+   best?`<span>best ${short(best.benchmark,30)} ${fmt(best[yKey])}</span>`:"",
+   worst&&worst!==best?`<span>worst ${short(worst.benchmark,30)} ${fmt(worst[yKey])}</span>`:""
+  ].filter(Boolean).join(" | ");
   const groups=Object.entries(by(rows,r=>kinds.length>1?`${r.benchmark} | ${r.phase_label}`:r.benchmark)).map(([name,rs],i)=>({name,rows:rs,color:colors[i%colors.length]}));
-  lineChart(safe(target+"-"+family),groups,xKey,yKey,{zero:true,width:640,height:235,left:46});
+  lineChart(safe(target+"-"+family),groups,xKey,yKey,{zero:metricZero(yKey),width:640,height:235,left:46,ymax:metricMax(yKey)});
  });
+}
+function setupFamilyControls(){
+ const single=el("single-family-metric-select"),multi=el("multi-family-metric-select");
+ function drawSingle(){familySubplots("single-family-plots","single_node","threads",single.value)}
+ function drawMulti(){familySubplots("multi-family-plots",["multinode","multinode_distributed_db"],"nodes",multi.value)}
+ single.addEventListener("change",drawSingle); multi.addEventListener("change",drawMulti);
+ drawSingle(); drawMulti();
 }
 function render(){
  kpis();
  barChart("phase-pass",data.tables.phase_summary,"phase","pass_pct",{percent:true,color:"#187a5b",max:100});
- table("issues",data.tables.issues,["benchmark","phase","threads","nodes","status","runtime_warning"],10);
+ table("issues",data.tables.issues,["benchmark","phase","threads","nodes","status","runtime_warning"],50);
  lineChart("thread-speedup",[{name:"E2E",rows:data.tables.thread_scaling},{name:"Kernel",rows:data.tables.thread_scaling,yKey:"kernel_geomean_speedup",color:"#187a5b"}],"threads","e2e_geomean_speedup",{zero:true});
  lineChart("thread-efficiency",[{name:"E2E",rows:data.tables.thread_scaling},{name:"Kernel",rows:data.tables.thread_scaling,yKey:"kernel_geomean_efficiency",color:"#187a5b"}],"threads","e2e_geomean_efficiency",{zero:true,ymax:1});
- table("single-examples",data.tables.top_examples.filter(r=>r.kind==="single-node"),["benchmark","family","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],12);
- familySubplots("single-family-plots","single_node","threads","e2e_self_speedup");
+ table("single-examples",data.tables.top_examples.filter(r=>r.kind==="single-node"),["benchmark","family","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],30);
+ table("single-family-examples",data.tables.family_examples.filter(r=>r.kind==="single-node"),["family","scale","pass","total","pass_pct","geomean_e2e_speedup","best_benchmark","best_e2e_speedup","worst_benchmark","worst_e2e_speedup","median_startup_share_pct"],50);
  const nodeBy=by(data.tables.node_scaling,"phase_label");
  lineChart("node-speedup",Object.entries(nodeBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_geomean_speedup",{zero:true});
  lineChart("node-efficiency",Object.entries(nodeBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_geomean_efficiency",{zero:true,ymax:1});
  heatmap("family-heatmap",data.tables.family_node_summary,"nodes","family","e2e_geomean_efficiency");
  const gemm=data.rows.filter(r=>r.benchmark==="polybench/gemm"&&r.phase_kind!=="single_node");
  lineChart("gemm",Object.entries(by(gemm,"phase")).map(([name,rows],i)=>({name,rows,color:colors[i]})),"nodes","e2e_self_speedup",{zero:true});
- table("multi-examples",data.tables.top_examples.filter(r=>r.kind==="multinode"),["benchmark","family","phase","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],16);
- familySubplots("multi-family-plots",["multinode","multinode_distributed_db"],"nodes","e2e_self_speedup");
+ table("multi-examples",data.tables.top_examples.filter(r=>r.kind==="multinode"),["benchmark","family","phase","scale","e2e_speedup","kernel_speedup","e2e_efficiency","arts_e2e_sec"],40);
+ table("multi-family-examples",data.tables.family_examples.filter(r=>r.kind!=="single-node"),["kind","family","scale","pass","total","pass_pct","geomean_e2e_speedup","best_benchmark","best_e2e_speedup","worst_benchmark","worst_e2e_speedup","median_startup_share_pct"],80);
  barChart("openmp-bars",data.tables.openmp.slice().sort((a,b)=>(b.carts_vs_openmp||0)-(a.carts_vs_openmp||0)).slice(0,12),"benchmark","carts_vs_openmp",{color:"#2867b2"});
- table("openmp-table",data.tables.openmp,["benchmark","threads","arts_e2e_sec","openmp_e2e_sec","carts_vs_openmp"],12);
+ table("openmp-table",data.tables.openmp,["benchmark","threads","arts_e2e_sec","openmp_e2e_sec","carts_vs_openmp"],50);
  const timingBy=by(data.tables.timing_summary,"phase_label");
  lineChart("startup-share",Object.entries(timingBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"scale","median_startup_share_pct",{zero:true,ymax:100});
  lineChart("median-e2e",Object.entries(timingBy).map(([name,rows],i)=>({name,rows,color:colors[i]})),"scale","median_e2e_sec",{zero:true});
  const diag=data.tables.timing_summary.map(r=>({...r,diag_total:(r.srun_error_count||0)+(r.runtime_warning_count||0),label:`${r.phase_label} ${r.scale} ${r.scale_label}`}));
  barChart("diagnostics",diag.filter(r=>r.diag_total>0).slice(-18),"label","diag_total",{color:"#b64242"});
- table("timing-table",data.tables.timing_summary,["phase_label","scale","scale_label","pass","total","median_e2e_sec","median_startup_share_pct","median_kernel_share_pct","srun_error_count","runtime_warning_count"],16);
+ table("timing-table",data.tables.timing_summary,["phase_label","scale","scale_label","pass","total","median_e2e_sec","median_startup_share_pct","median_kernel_share_pct","srun_error_count","runtime_warning_count"],40);
  const commByNodes=Object.values(by(data.tables.communication,"nodes")).map(rows=>({nodes:rows[0].nodes,remote_bytes_total:median(rows.map(r=>r.remote_bytes_total)),connect_success_pct:median(rows.map(r=>r.connect_success_pct))})).sort((a,b)=>a.nodes-b.nodes);
  lineChart("comm-bytes",[{name:"median remote bytes",rows:commByNodes}],"nodes","remote_bytes_total",{zero:true});
  lineChart("comm-connect",[{name:"median connect success",rows:commByNodes,color:"#187a5b"}],"nodes","connect_success_pct",{zero:true,ymax:100});
+ table("comm-family-table",data.tables.communication_summary,["family","nodes","counter_rows","median_remote_bytes_total","median_remote_messages_total","median_remote_bytes_per_message","median_remote_bytes_per_sec","median_connect_success_pct"],80);
  el("optimizations").innerHTML=data.optimizations.map(r=>`<div class="roadmap"><b>${r.priority}. ${r.area}</b><p>${r.evidence}</p><p>${r.proposal}</p></div>`).join("");
+ setupFamilyControls();
  setupExplorer();
 }
 function setupExplorer(){
@@ -992,6 +1119,9 @@ function legend(series){return `<div class="legend">${series.map((s,i)=>`<span><
 function num(v){const n=Number(v);return Number.isFinite(n)?n:null}
 function short(v,n=22){v=String(v);return v.length>n?v.slice(0,n-1)+"...":v}
 function cell(v){if(typeof v==="number")return fmt(v); if(v===null||v===undefined)return ""; return String(v)}
+function metricName(k){return metricLabels[k]||k.replaceAll("_"," ")}
+function metricZero(k){return k.includes("speedup")||k.includes("efficiency")||k.includes("sec")||k.includes("share")}
+function metricMax(k){return k.includes("efficiency")?1:(k.includes("share")?100:undefined)}
 function median(vals){vals=vals.map(num).filter(v=>v!==null).sort((a,b)=>a-b); if(!vals.length)return null; const i=Math.floor(vals.length/2); return vals.length%2?vals[i]:(vals[i-1]+vals[i])/2}
 function mix(a,b,t){const c=a.map((x,i)=>Math.round(x+(b[i]-x)*t));return `rgb(${c[0]},${c[1]},${c[2]})`}
 function max(vals){vals=vals.map(num).filter(v=>v!==null);return vals.length?Math.max(...vals):null}

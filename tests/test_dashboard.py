@@ -58,9 +58,13 @@ class DashboardGenerationTest(unittest.TestCase):
             self.assertTrue(artifact.data_js.exists())
             self.assertTrue((artifact.output_dir / "assets" / "app.js").exists())
             self.assertTrue((artifact.output_dir / "data" / "results_flat.csv").exists())
+            self.assertTrue((artifact.output_dir / "data" / "family_examples.csv").exists())
+            self.assertTrue((artifact.output_dir / "data" / "communication_summary.csv").exists())
             data_js = artifact.data_js.read_text()
             self.assertIn("CARTS_DASHBOARD_DATA", data_js)
             self.assertIn("remote_bytes_total", data_js)
+            self.assertIn("remote_bytes_per_message", data_js)
+            self.assertIn("family_examples", data_js)
             self.assertIn("polybench/gemm", data_js)
 
     def test_generate_dashboard_merges_extra_results_for_openmp_comparison(self) -> None:
