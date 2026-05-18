@@ -16,7 +16,12 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from common import RUN_CONFIG_JSON_FILENAME, SLURM_OUT_FILENAME, parse_checksum  # noqa: E402
 from models import Status  # noqa: E402
 from verification import verify_against_omp, verify_against_reference  # noqa: E402
-from slurm.job_result import determine_status, generate_result  # noqa: E402
+from slurm.job_result import (  # noqa: E402
+    ARTS_RUNTIME_MODE_HOST_OPENMP,
+    ARTS_RUNTIME_MODE_TASK,
+    determine_status,
+    generate_result,
+)
 
 
 class BenchmarkVerificationTest(unittest.TestCase):
@@ -151,6 +156,104 @@ Job 47531 on b06u37,b07u01
             result["arts"]["kernel_timings"],
             {"velocity": 30.0},
         )
+
+    def test_generate_result_flags_host_openmp_fallback_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            counter_dir = run_dir / "counters"
+            counter_dir.mkdir()
+            (run_dir / SLURM_OUT_FILENAME).write_text(
+                "\n".join(
+                    [
+                        "[ARTS] Running benchmark...",
+                        "kernel.jacobi-for: 1.000000s",
+                        "checksum: 1.0",
+                        "[ARTS] Exit code: 0",
+                    ]
+                )
+            )
+            (run_dir / RUN_CONFIG_JSON_FILENAME).write_text(
+                f"""
+{{
+  "nodes": 2,
+  "profile": "configs/profiles/profile-comm.cfg",
+  "arts_runtime_mode": "{ARTS_RUNTIME_MODE_HOST_OPENMP}"
+}}
+"""
+            )
+
+            result = generate_result(
+                benchmark="kastors-jacobi/jacobi-for",
+                run_number=1,
+                size="extralarge",
+                arts_exit=0,
+                arts_duration=1.0,
+                omp_exit=-1,
+                omp_duration=0.0,
+                counter_dir=counter_dir,
+                slurm_job_id="1",
+                slurm_nodelist="n[1-2]",
+                output_dir=run_dir,
+                arts_only=True,
+            )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["status_detail"], "WARN")
+        self.assertEqual(result["arts_runtime_mode"], ARTS_RUNTIME_MODE_HOST_OPENMP)
+        self.assertFalse(result["counters"]["available"])
+        self.assertEqual(
+            result["counters"]["reason"],
+            f"not_applicable_{ARTS_RUNTIME_MODE_HOST_OPENMP}",
+        )
+        self.assertIn(
+            f"multinode_{ARTS_RUNTIME_MODE_HOST_OPENMP}",
+            result["diagnostics"]["result_quality_warning"]["reasons"],
+        )
+
+    def test_generate_result_records_available_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            counter_dir = run_dir / "counters"
+            counter_dir.mkdir()
+            (counter_dir / "cluster.json").write_text('{"counters": {}}')
+            (run_dir / SLURM_OUT_FILENAME).write_text(
+                "\n".join(
+                    [
+                        "[ARTS] Running benchmark...",
+                        "kernel.gemm: 1.000000s",
+                        "checksum: 1.0",
+                        "[ARTS] Exit code: 0",
+                    ]
+                )
+            )
+            (run_dir / RUN_CONFIG_JSON_FILENAME).write_text(
+                f"""
+{{
+  "nodes": 2,
+  "profile": "configs/profiles/profile-comm.cfg",
+  "arts_runtime_mode": "{ARTS_RUNTIME_MODE_TASK}"
+}}
+"""
+            )
+
+            result = generate_result(
+                benchmark="polybench/gemm",
+                run_number=1,
+                size="extralarge",
+                arts_exit=0,
+                arts_duration=1.0,
+                omp_exit=-1,
+                omp_duration=0.0,
+                counter_dir=counter_dir,
+                slurm_job_id="1",
+                slurm_nodelist="n[1-2]",
+                output_dir=run_dir,
+                arts_only=True,
+            )
+
+        self.assertTrue(result["counters"]["available"])
+        self.assertEqual(result["counters"]["reason"], "available")
+        self.assertNotIn("status_detail", result)
 
 
 if __name__ == "__main__":

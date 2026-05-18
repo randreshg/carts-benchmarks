@@ -1131,13 +1131,19 @@ class BenchmarkRunner:
         # Keep build outputs flat under the selected output root.
         build_dir_override = output_root
         logs_dir_override = output_root / "logs"
+        tmp_dir_override = output_root / "tmp"
         output_root.mkdir(parents=True, exist_ok=True)
         build_dir_override.mkdir(parents=True, exist_ok=True)
         logs_dir_override.mkdir(parents=True, exist_ok=True)
+        tmp_dir_override.mkdir(parents=True, exist_ok=True)
         arts_output_path = output_root / arts_exe_default.name
         omp_output_path = output_root / omp_exe_default.name
 
-        env_overrides: Dict[str, str] = {}
+        env_overrides: Dict[str, str] = {
+            "TMPDIR": str(tmp_dir_override),
+            "TMP": str(tmp_dir_override),
+            "TEMP": str(tmp_dir_override),
+        }
         effective_arts_config = arts_config
         if variant != VARIANT_OPENMP and effective_arts_config is None:
             # Keep build behavior independent of current working directory.
@@ -4519,6 +4525,7 @@ def _run_step_slurm(
     max_jobs: int = 0,
     report_steps: Optional[List[ExperimentStep]] = None,
     rdma: bool = False,
+    profile: Optional[Path] = None,
     variant: Optional[str] = None,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
@@ -4548,7 +4555,7 @@ def _run_step_slurm(
             cflags=cflags,
             compile_args=compile_args,
             gdb=False,
-            profile=None,
+            profile=profile,
             perf=perf,
             perf_interval=perf_interval,
             exclude_nodes=exclude_nodes,
@@ -4657,6 +4664,7 @@ def _run_slurm_resolved_step(
         max_jobs=request.max_jobs,
         report_steps=report_steps,
         rdma=step_config.rdma,
+        profile=step_config.requested_profile_path,
         variant=request.variant,
     )
 

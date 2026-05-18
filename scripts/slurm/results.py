@@ -100,6 +100,12 @@ def _apply_run_config(result: Dict[str, Any], run_config: Dict[str, Any]) -> Non
         result["compile_args"] = run_config.get("compile_args")
     if "cflags" in run_config:
         result["cflags"] = run_config.get("cflags")
+    if "arts_runtime_mode" in run_config:
+        result["arts_runtime_mode"] = run_config.get("arts_runtime_mode")
+    if "arts_runtime_mode_source" in run_config:
+        result["arts_runtime_mode_source"] = run_config.get(
+            "arts_runtime_mode_source"
+        )
     if "reporting" in run_config:
         result["reporting"] = run_config.get("reporting")
     if "config" in run_config and isinstance(run_config["config"], dict):
@@ -212,6 +218,9 @@ def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
         summary["rdma_abandoned_connect_count"] = len(
             re.findall(r"abandoned blocking rconnect|rconnect did not return", text)
         )
+        summary["rdma_provider_fanout_warning_count"] = len(
+            re.findall(r"provider open-fanout|provider-fanout|rsocket/RoCE provider", text)
+        )
         summary["crash_count"] = len(re.findall(r"\[ARTS\] Crashed:", text))
     return summary
 
@@ -244,6 +253,9 @@ def _runtime_warning_reasons(diagnostics: Any) -> List[str]:
         "connection_refused_count": int(slurm_err.get("connection_refused_count") or 0),
         "rdma_abandoned_connect_count": int(
             slurm_err.get("rdma_abandoned_connect_count") or 0
+        ),
+        "rdma_provider_fanout_warning_count": int(
+            slurm_err.get("rdma_provider_fanout_warning_count") or 0
         ),
         "crash_count": int(slurm_err.get("crash_count") or 0),
     }

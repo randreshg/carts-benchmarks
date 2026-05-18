@@ -92,6 +92,7 @@ RESULTS_COLUMNS = [
     "counter_timeout_warnings",
     "remote_send_hard_timeout_count",
     "connection_refused_count",
+    "rdma_provider_fanout_warning_count",
     "speedup_basis",
     "arts_e2e_sec",
     "omp_e2e_sec",
@@ -376,6 +377,7 @@ INT_FIELDS = {
     "counter_timeout_warnings",
     "remote_send_hard_timeout_count",
     "connection_refused_count",
+    "rdma_provider_fanout_warning_count",
     "counter_files_found",
     "counter_files_valid",
     "counter_expected_nodes",
@@ -1050,6 +1052,7 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
             "counter_timeout_warnings": None,
             "remote_send_hard_timeout_count": None,
             "connection_refused_count": None,
+            "rdma_provider_fanout_warning_count": None,
             "speedup_basis": result.timing.speedup_basis,
             "arts_e2e_sec": result.timing.arts_e2e_sec,
             "omp_e2e_sec": result.timing.omp_e2e_sec,
@@ -1140,6 +1143,7 @@ def _flatten_result_serialized(
                 "counter_timeout_warnings",
                 "remote_send_hard_timeout_count",
                 "connection_refused_count",
+                "rdma_provider_fanout_warning_count",
             )
         )
     if status == STATUS_PASS and detected_runtime_warning and status_detail == STATUS_PASS:
@@ -1198,6 +1202,7 @@ def _flatten_result_serialized(
             "counter_timeout_warnings": slurm_stderr.get("counter_timeout_warnings"),
             "remote_send_hard_timeout_count": slurm_stderr.get("remote_send_hard_timeout_count"),
             "connection_refused_count": slurm_stderr.get("connection_refused_count"),
+            "rdma_provider_fanout_warning_count": slurm_stderr.get("rdma_provider_fanout_warning_count"),
             "speedup_basis": None,
             "arts_e2e_sec": _first_timing_value(arts.get("e2e_timings")),
             "omp_e2e_sec": _first_timing_value(omp.get("e2e_timings")),

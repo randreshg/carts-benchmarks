@@ -55,6 +55,13 @@ from common import (
 from models import Status, VerificationMode, VerificationResult
 from verification import verify_against_omp, verify_against_reference
 
+ARTS_RUNTIME_MODE_TASK = "arts_task_runtime"
+ARTS_RUNTIME_MODE_HOST_OPENMP = "host_openmp_fallback"
+ARTS_RUNTIME_MODE_HOST_SERIAL = "host_serial_fallback"
+COUNTER_REASON_AVAILABLE = "available"
+COUNTER_REASON_NOT_REQUESTED = "not_requested"
+COUNTER_REASON_MISSING_CLUSTER = "missing_cluster_json"
+
 
 def read_slurm_output(output_dir: Path) -> Tuple[str, str]:
     """Read SLURM stdout and stderr files.
@@ -164,6 +171,9 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
         "rdma_abandoned_connect_count": len(
             re.findall(r"abandoned blocking rconnect|rconnect did not return", stderr)
         ),
+        "rdma_provider_fanout_warning_count": len(
+            re.findall(r"provider open-fanout|provider-fanout|rsocket/RoCE provider", stderr)
+        ),
         "crash_count": len(re.findall(r"\[ARTS\] Crashed:", stderr)),
     }
 
@@ -190,6 +200,11 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
             "rdma_abandoned_connect_count="
             f"{slurm_stderr_summary['rdma_abandoned_connect_count']}"
         )
+    if slurm_stderr_summary["rdma_provider_fanout_warning_count"] > 0:
+        warning_reasons.append(
+            "rdma_provider_fanout_warning_count="
+            f"{slurm_stderr_summary['rdma_provider_fanout_warning_count']}"
+        )
     if slurm_stderr_summary["crash_count"] > 0:
         warning_reasons.append(f"crash_count={slurm_stderr_summary['crash_count']}")
 
@@ -209,6 +224,62 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
         summary["slurm_stderr"]["tail"] = stderr_lines[-40:]
 
     return summary
+
+
+def classify_counter_availability(
+    counter_dir: Optional[Path],
+    run_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Classify whether an instrumented Slurm run produced ARTS counters."""
+    profile_requested = bool(run_config.get("profile"))
+    requested = bool(counter_dir and profile_requested)
+    cluster_file = counter_dir / "cluster.json" if counter_dir else None
+    mode = str(run_config.get("arts_runtime_mode") or "")
+
+    if not requested:
+        reason = COUNTER_REASON_NOT_REQUESTED
+        available = False
+    elif cluster_file and cluster_file.exists():
+        reason = COUNTER_REASON_AVAILABLE
+        available = True
+    elif mode and mode != ARTS_RUNTIME_MODE_TASK:
+        reason = f"not_applicable_{mode}"
+        available = False
+    else:
+        reason = COUNTER_REASON_MISSING_CLUSTER
+        available = False
+
+    return {
+        "requested": requested,
+        "available": available,
+        "reason": reason,
+        "cluster_file": str(cluster_file) if cluster_file else None,
+    }
+
+
+def result_quality_warnings(
+    run_config: Dict[str, Any],
+    counter_status: Dict[str, Any],
+) -> List[str]:
+    """Return non-fatal warnings that affect interpretation of a passing run."""
+    warnings: List[str] = []
+    mode = str(run_config.get("arts_runtime_mode") or "")
+    try:
+        nodes = int(run_config.get("nodes") or 1)
+    except (TypeError, ValueError):
+        nodes = 1
+
+    if nodes > 1 and mode in {
+        ARTS_RUNTIME_MODE_HOST_OPENMP,
+        ARTS_RUNTIME_MODE_HOST_SERIAL,
+    }:
+        warnings.append(f"multinode_{mode}")
+
+    if counter_status.get("requested") and not counter_status.get("available"):
+        reason = str(counter_status.get("reason") or COUNTER_REASON_MISSING_CLUSTER)
+        warnings.append(f"counter_{reason}")
+
+    return warnings
 
 
 def generate_result(
@@ -313,6 +384,8 @@ def generate_result(
         arts_only=arts_only,
     )
     diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != STATUS_PASS))
+    counter_status = classify_counter_availability(counter_dir, run_config)
+    quality_warnings = result_quality_warnings(run_config, counter_status)
 
     # Build result
     result = {
@@ -355,6 +428,9 @@ def generate_result(
             "job_id": slurm_job_id,
             "nodelist": slurm_nodelist,
         },
+        "arts_runtime_mode": run_config.get("arts_runtime_mode"),
+        "arts_runtime_mode_source": run_config.get("arts_runtime_mode_source"),
+        "counters": counter_status,
         "artifacts": {
             "run_dir": str(output_dir),
             "slurm_out": str(output_dir / SLURM_OUT_FILENAME),
@@ -366,6 +442,12 @@ def generate_result(
 
     if status == STATUS_PASS and diagnostics.get("runtime_warning", {}).get("has_warning"):
         result["status_detail"] = STATUS_WARN
+    if status == STATUS_PASS and quality_warnings:
+        result["status_detail"] = STATUS_WARN
+        result.setdefault("diagnostics", {})["result_quality_warning"] = {
+            "has_warning": True,
+            "reasons": quality_warnings,
+        }
 
     # Compute speedup if both ran
     if omp_exit != -1 and omp_duration > 0 and arts_duration > 0:

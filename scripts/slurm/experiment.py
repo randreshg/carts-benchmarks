@@ -59,6 +59,51 @@ ARTS_RUNTIME_SNAPSHOT_DIR = Path("runtime") / "arts" / "lib"
 ARTS_RUNTIME_SNAPSHOT_MARKER = "runtime_snapshot.json"
 BuildArtifacts = Tuple[Path, Optional[Path], Path, Optional[Path]]
 
+ARTS_RUNTIME_MODE_TASK = "arts_task_runtime"
+ARTS_RUNTIME_MODE_HOST_OPENMP = "host_openmp_fallback"
+ARTS_RUNTIME_MODE_HOST_SERIAL = "host_serial_fallback"
+ARTS_RUNTIME_MODE_UNKNOWN = "unknown"
+ARTS_RUNTIME_MODE_SOURCE_MISSING = "llvm_ir_missing"
+ARTS_RUNTIME_MODE_SOURCE_AMBIGUOUS = "llvm_ir_ambiguous"
+ARTS_EPOCH_SYMBOL = "arts_initialize_and_start_epoch"
+HOST_OPENMP_MARKER_SYMBOL = "carts_benchmarks_mark_host_openmp"
+OMP_DIALECT_TOKEN = "omp."
+
+
+def infer_arts_runtime_mode(executable_arts: Path) -> Tuple[str, str]:
+    """Infer whether a CARTS artifact really enters the ARTS task runtime.
+
+    Some benchmark sources intentionally keep unsupported OpenMP regions on the
+    host.  They still produce a ``*_arts`` executable for apples-to-apples
+    compile plumbing, but multinode Slurm runs of those binaries execute one
+    independent host process per rank and cannot produce ARTS communication
+    counters.  Persisting this mode keeps reports and dashboards honest.
+    """
+    build_dir = executable_arts.parent
+    ir_files = sorted(build_dir.glob("*-arts.ll"))
+    if not ir_files:
+        return ARTS_RUNTIME_MODE_UNKNOWN, ARTS_RUNTIME_MODE_SOURCE_MISSING
+    if len(ir_files) > 1:
+        executable_stem = executable_arts.name
+        if executable_stem.endswith("_arts"):
+            candidate = build_dir / f"{executable_stem[:-5]}-arts.ll"
+            if candidate.exists():
+                ir_files = [candidate]
+            else:
+                return ARTS_RUNTIME_MODE_UNKNOWN, ARTS_RUNTIME_MODE_SOURCE_AMBIGUOUS
+
+    ir_path = ir_files[0]
+    try:
+        text = ir_path.read_text(errors="replace")
+    except OSError:
+        return ARTS_RUNTIME_MODE_UNKNOWN, str(ir_path)
+
+    if ARTS_EPOCH_SYMBOL in text:
+        return ARTS_RUNTIME_MODE_TASK, str(ir_path)
+    if HOST_OPENMP_MARKER_SYMBOL in text or OMP_DIALECT_TOKEN in text:
+        return ARTS_RUNTIME_MODE_HOST_OPENMP, str(ir_path)
+    return ARTS_RUNTIME_MODE_HOST_SERIAL, str(ir_path)
+
 
 @dataclass(frozen=True)
 class SlurmBatchRequest:
@@ -172,7 +217,7 @@ def require_slurm_commands(dry_run: bool) -> None:
     """Validate that the required SLURM executables are available."""
     required_slurm_cmds = ["sbatch"]
     if not dry_run:
-        required_slurm_cmds.extend(["squeue", "sacct", "scontrol", "sinfo"])
+        required_slurm_cmds.extend(["srun", "squeue", "sacct", "scontrol", "sinfo"])
     missing_slurm_cmds = [cmd for cmd in required_slurm_cmds if shutil.which(cmd) is None]
     if missing_slurm_cmds:
         raise ValueError(
@@ -984,6 +1029,9 @@ class SlurmBatchExecutor:
             build_arts_cfg,
             runtime_lib_dir,
         ) in build_results.items():
+            arts_runtime_mode, arts_runtime_mode_source = infer_arts_runtime_mode(
+                arts_exe
+            )
             safe_name = bench.replace("/", "_")
             for run_num in range(1, self.request.runs + 1):
                 bench_config = BenchmarkConfig(
@@ -1033,6 +1081,8 @@ class SlurmBatchExecutor:
                         if node_count > 1 and bench in reference_checksums
                         else None
                     ),
+                    arts_runtime_mode=arts_runtime_mode,
+                    arts_runtime_mode_source=arts_runtime_mode_source,
                 )
                 am.record_run(
                     bench,

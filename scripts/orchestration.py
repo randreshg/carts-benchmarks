@@ -40,6 +40,7 @@ class ResolvedStepConfig:
     name: str
     bench_list: List[str]
     profile_path: Path
+    requested_profile_path: Optional[Path]
     rdma: bool
     debug: int
     should_rebuild_arts: bool
@@ -261,11 +262,8 @@ class StepResolver:
             step_def.benchmarks,
         )
 
-        profile_path = (
-            Path(step_def.profile)
-            if step_def.profile
-            else self.profiles_dir / "profile-none.cfg"
-        )
+        requested_profile_path = Path(step_def.profile) if step_def.profile else None
+        profile_path = requested_profile_path or self.profiles_dir / "profile-none.cfg"
         step_debug = (
             step_def.debug
             if self._uses_step_override(
@@ -397,6 +395,7 @@ class StepResolver:
             name=step_name,
             bench_list=step_bench_list,
             profile_path=profile_path,
+            requested_profile_path=requested_profile_path,
             rdma=step_rdma,
             debug=step_debug,
             should_rebuild_arts=should_rebuild_arts,

@@ -18,6 +18,8 @@ from arts_config import KEY_PROTOCOL, PROTOCOL_TCP  # noqa: E402
 from artifacts import ArtifactManager  # noqa: E402
 from models import BenchmarkConfig, BuildResult, ReferenceChecksum, Status  # noqa: E402
 from slurm.experiment import (  # noqa: E402
+    ARTS_RUNTIME_MODE_HOST_OPENMP,
+    ARTS_RUNTIME_MODE_TASK,
     SlurmBatchExecutor,
     SlurmBatchRequest,
     SlurmExecutorDependencies,
@@ -25,6 +27,7 @@ from slurm.experiment import (  # noqa: E402
     count_total_slurm_jobs,
     find_multinode_disabled_benchmarks,
     format_node_counts_display,
+    infer_arts_runtime_mode,
     load_existing_job_statuses,
     merge_result_rows,
 )
@@ -128,6 +131,33 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 ["suite/a", "suite/b"],
             )
             self.assertEqual(disabled, {"suite/b"})
+
+    def test_infer_arts_runtime_mode_from_generated_ir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "gemm_arts"
+            exe.write_text("#!/bin/sh\n")
+            (root / "gemm-arts.ll").write_text(
+                "declare i64 @arts_initialize_and_start_epoch(i64, i32)\n"
+            )
+
+            mode, source = infer_arts_runtime_mode(exe)
+
+            self.assertEqual(mode, ARTS_RUNTIME_MODE_TASK)
+            self.assertTrue(source.endswith("gemm-arts.ll"))
+
+    def test_infer_arts_runtime_mode_marks_host_openmp_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "jacobi-for_arts"
+            exe.write_text("#!/bin/sh\n")
+            (root / "jacobi-for-arts.ll").write_text(
+                "declare void @carts_benchmarks_mark_host_openmp()\n"
+            )
+
+            mode, _ = infer_arts_runtime_mode(exe)
+
+            self.assertEqual(mode, ARTS_RUNTIME_MODE_HOST_OPENMP)
 
     def test_merge_result_rows_prefers_first_seen_key(self) -> None:
         merged = merge_result_rows(

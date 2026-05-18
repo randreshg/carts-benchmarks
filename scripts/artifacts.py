@@ -226,6 +226,8 @@ class ArtifactManager:
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
+        arts_runtime_mode: Optional[str] = None,
+        arts_runtime_mode_source: Optional[str] = None,
         reporting: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """Save the effective arts.cfg and a run_config.json into the run directory.
@@ -299,6 +301,10 @@ class ArtifactManager:
             run_config["arts_cfg_source"] = str(arts_cfg_path)
         if arts_runtime_lib_dir is not None:
             run_config["arts_runtime_lib_dir"] = str(arts_runtime_lib_dir)
+        if arts_runtime_mode:
+            run_config["arts_runtime_mode"] = arts_runtime_mode
+        if arts_runtime_mode_source:
+            run_config["arts_runtime_mode_source"] = arts_runtime_mode_source
         if (
             reference_checksum is not None
             or reference_source is not None

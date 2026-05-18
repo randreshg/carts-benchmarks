@@ -120,8 +120,47 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
         self.assertEqual(resolved.nodelist, "b05u[01,07]")
         self.assertEqual(resolved.launcher, "slurm")
         self.assertEqual(resolved.arts_config, arts_cfg.resolve())
+        self.assertIsNone(resolved.requested_profile_path)
         self.assertEqual(resolved.debug, 2)
         self.assertTrue(resolved.rdma)
+        self.assertTrue(resolved.should_rebuild_arts)
+
+    def test_explicit_profile_is_preserved_for_run_metadata(self) -> None:
+        profile = self.profiles_dir / "profile-comm.cfg"
+        profile.write_text("# counters\n")
+
+        step = ExperimentStep(name="profiled", profile=str(profile.resolve()))
+        setattr(step, "_has_profile", True)
+
+        defaults = StepCliDefaults(
+            size="small",
+            timeout=10,
+            threads_spec=None,
+            nodes_spec="2",
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            cflags=None,
+            compile_args=None,
+            debug=0,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher=None,
+            explicit_step_mode=True,
+            size_from_cli=False,
+            rdma=True,
+        )
+
+        resolved = self.resolver.resolve_step_config(
+            step,
+            1,
+            ["polybench/gemm"],
+            defaults,
+        )
+
+        self.assertEqual(resolved.profile_path, profile.resolve())
+        self.assertEqual(resolved.requested_profile_path, profile.resolve())
         self.assertTrue(resolved.should_rebuild_arts)
 
     def test_local_execution_orchestrator_sets_phase_and_result_phase(self) -> None:

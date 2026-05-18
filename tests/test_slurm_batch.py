@@ -455,7 +455,19 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 content,
             )
             self.assertIn(
+                'export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-0}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"',
+                content,
+            )
+            self.assertIn(
                 'export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS="${ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS:-5000}"',
                 content,
             )
             self.assertIn(
