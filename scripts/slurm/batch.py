@@ -291,7 +291,9 @@ exit $ARTS_EXIT
 """
 
 OMP_SECTION_TEMPLATE = """
-if [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
+if [ "$ARTS_EXIT" -ne 0 ]; then
+    echo "[OpenMP] Skipped because ARTS exited with $ARTS_EXIT"
+elif [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
     echo ""
     echo "[OpenMP] Running benchmark..."
     export OMP_NUM_THREADS={threads}
@@ -372,8 +374,19 @@ def _env_network_threads() -> Tuple[Optional[int], Optional[int]]:
     return sender_threads, receiver_threads
 
 
-def _slurm_cpu_headroom() -> int:
-    return _env_nonnegative_int("CARTS_SLURM_CPU_HEADROOM") or 0
+def _slurm_cpu_headroom(node_count: int) -> int:
+    configured = _env_nonnegative_int("CARTS_SLURM_CPU_HEADROOM")
+    if configured is not None:
+        return configured
+
+    # Some SLURM CPU cgroups expose fewer PUs to hwloc than --cpus-per-task
+    # requested. The benchmark preflight catches this, but without headroom the
+    # ARTS runtime can still fail immediately on otherwise useful nodes, e.g.
+    # worker_threads=64 with only 60 visible PUs. Reserve a small buffer for
+    # single-node thread sweeps where worker_threads == requested threads.
+    if node_count == 1:
+        return 4
+    return 0
 
 
 def _slurm_min_iterations_per_worker(
@@ -716,7 +729,7 @@ def generate_sbatch_script(
     worker_threads = _worker_threads_from_config(config)
     sender_threads, receiver_threads = _network_threads_from_config(config)
     runtime_thread_count = worker_threads + sender_threads + receiver_threads
-    cpu_headroom = _slurm_cpu_headroom()
+    cpu_headroom = _slurm_cpu_headroom(config.node_count)
     cpus_per_task = runtime_thread_count + cpu_headroom
     strict_headroom = _env_bool("CARTS_SLURM_STRICT_CPU_HEADROOM", False)
     required_cpu_count = (
@@ -724,6 +737,7 @@ def generate_sbatch_script(
         if strict_headroom
         else runtime_thread_count
     )
+    strict_preflight_default = True
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
     arts_only_arg = '    --arts-only \\\n' if not should_run_openmp else ''
@@ -742,7 +756,7 @@ def generate_sbatch_script(
         worker_threads=worker_threads,
         sender_threads=sender_threads,
         receiver_threads=receiver_threads,
-        strict_preflight_default=strict_headroom,
+        strict_preflight_default=strict_preflight_default,
     )
     if config.gdb:
         srun_command = (
