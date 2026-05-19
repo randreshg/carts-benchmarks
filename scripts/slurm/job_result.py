@@ -101,6 +101,7 @@ def determine_status(
     reference_omp_threads: Optional[int] = None,
     tolerance: float = 0.01,
     arts_only: bool = False,
+    openmp_only: bool = False,
 ) -> Tuple[str, VerificationResult]:
     """Determine overall status and verification result.
 
@@ -114,6 +115,26 @@ def determine_status(
     Returns:
         Tuple of (status, verification_result)
     """
+    if openmp_only:
+        omp_status = Status.PASS if omp_exit == 0 else Status.FAIL
+        if omp_status == Status.PASS:
+            note = (
+                "OpenMP-only run completed; checksum recorded"
+                if omp_checksum is not None
+                else "OpenMP-only run completed; checksum not found in output"
+            )
+        else:
+            note = "OpenMP-only run failed"
+        verification = VerificationResult(
+            correct=omp_status == Status.PASS,
+            arts_checksum=None,
+            omp_checksum=omp_checksum,
+            tolerance_used=tolerance,
+            note=note,
+            mode=VerificationMode.OPENMP_ONLY.value,
+        )
+        return (STATUS_PASS if verification.correct else STATUS_FAIL, verification)
+
     arts_status = Status.PASS if arts_exit == 0 else Status.FAIL
     if arts_only:
         if arts_status == Status.PASS:
@@ -295,6 +316,7 @@ def generate_result(
     slurm_nodelist: str,
     output_dir: Path,
     arts_only: bool = False,
+    openmp_only: bool = False,
 ) -> Dict[str, Any]:
     """Generate a complete result dictionary.
 
@@ -382,6 +404,7 @@ def generate_result(
             int(reference_omp_threads) if reference_omp_threads is not None else None
         ),
         arts_only=arts_only,
+        openmp_only=openmp_only,
     )
     diagnostics = summarize_slurm_logs(stdout, stderr, include_tails=(status != STATUS_PASS))
     counter_status = classify_counter_availability(counter_dir, run_config)
@@ -470,6 +493,7 @@ def main():
     parser.add_argument("--omp-exit", type=int, required=True, help="OpenMP exit code (-1 if skipped)")
     parser.add_argument("--omp-duration", type=float, required=True, help="OpenMP duration")
     parser.add_argument("--arts-only", action="store_true", help="Treat missing OpenMP/reference as intentional")
+    parser.add_argument("--openmp-only", action="store_true", help="Treat missing ARTS/reference as intentional")
     parser.add_argument("--counter-dir", type=Path, help="Counter directory")
     parser.add_argument("--slurm-job-id", default="", help="SLURM job ID")
     parser.add_argument("--slurm-nodelist", default="", help="SLURM node list")
@@ -491,6 +515,7 @@ def main():
         slurm_nodelist=args.slurm_nodelist,
         output_dir=args.output.parent,
         arts_only=args.arts_only,
+        openmp_only=args.openmp_only,
     )
 
     # Write output

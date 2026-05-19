@@ -40,6 +40,7 @@ class VerificationMode(str, Enum):
     DIRECT_OMP = "direct_omp"
     STORED_OMP_REFERENCE = "stored_omp_reference"
     ARTS_ONLY = "arts_only"
+    OPENMP_ONLY = "openmp_only"
 
 
 @dataclass

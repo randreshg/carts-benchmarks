@@ -230,7 +230,7 @@ export counter_folder="$COUNTER_DIR"
 {rdma_environment_section}
 {cpu_preflight_section}
 
-ARTS_EXIT=125
+ARTS_EXIT={initial_arts_exit}
 ARTS_DURATION=0
 OMP_EXIT=-1
 OMP_DURATION=0
@@ -248,16 +248,7 @@ echo "Timeout: {timeout_seconds}s"
 echo "Start: $(date -Iseconds)"
 echo "=========================================="
 
-# Run ARTS benchmark
-echo ""
-echo "[ARTS] Running benchmark..."
-ARTS_START=$(date +%s)
-timeout --signal=TERM --kill-after=30s {timeout_seconds}s {srun_command}
-ARTS_EXIT=$?
-ARTS_END=$(date +%s)
-ARTS_DURATION=$((ARTS_END - ARTS_START))
-echo "[ARTS] Exit code: $ARTS_EXIT"
-echo "[ARTS] Duration: $ARTS_DURATION seconds"
+{arts_section}
 
 # Run OpenMP benchmark (single-node only - skip for multi-node)
 OMP_EXIT=-1
@@ -279,7 +270,7 @@ echo "=========================================="
     --omp-exit $OMP_EXIT \\
     --omp-duration $OMP_DURATION \\
 {arts_only_arg}    --counter-dir "$COUNTER_DIR" \\
-    --slurm-job-id "$SLURM_JOB_ID" \\
+{openmp_only_arg}    --slurm-job-id "$SLURM_JOB_ID" \\
     --slurm-nodelist "$SLURM_JOB_NODELIST" \\
     --output "{result_json}"
 RESULT_GENERATOR_EXIT=$?
@@ -287,11 +278,11 @@ if [ $RESULT_GENERATOR_EXIT -ne 0 ]; then
     echo "Warning: job_result.py failed with exit code $RESULT_GENERATOR_EXIT"
 fi
 
-exit $ARTS_EXIT
+exit {exit_status}
 """
 
 OMP_SECTION_TEMPLATE = """
-if [ "$ARTS_EXIT" -ne 0 ]; then
+if [ {require_arts_success} -eq 1 ] && [ "$ARTS_EXIT" -ne 0 ]; then
     echo "[OpenMP] Skipped because ARTS exited with $ARTS_EXIT"
 elif [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
     echo ""
@@ -308,6 +299,25 @@ elif [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
 else
     echo "[OpenMP] Skipped (multi-node or executable not found)"
 fi
+"""
+
+ARTS_SECTION_TEMPLATE = """
+# Run ARTS benchmark
+echo ""
+echo "[ARTS] Running benchmark..."
+ARTS_START=$(date +%s)
+timeout --signal=TERM --kill-after=30s {timeout_seconds}s {srun_command}
+ARTS_EXIT=$?
+ARTS_END=$(date +%s)
+ARTS_DURATION=$((ARTS_END - ARTS_START))
+echo "[ARTS] Exit code: $ARTS_EXIT"
+echo "[ARTS] Duration: $ARTS_DURATION seconds"
+"""
+
+ARTS_SKIPPED_SECTION = """
+# ARTS intentionally skipped for OpenMP-only runs.
+echo ""
+echo "[ARTS] Skipped (OpenMP-only run)"
 """
 
 
@@ -537,7 +547,11 @@ def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
             "",
         )
 
-    executable = config.executable_arts.resolve()
+    executable = (
+        config.executable_arts.resolve()
+        if config.run_arts and config.executable_arts
+        else None
+    )
     omp_executable = (
         config.executable_omp.resolve()
         if config.run_openmp and config.node_count == 1 and config.executable_omp
@@ -550,9 +564,19 @@ def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
         if omp_executable is not None
         else ""
     )
+    arts_executable_var = (
+        f'ARTS_EXECUTABLE="{executable}"'
+        if executable is not None
+        else 'ARTS_EXECUTABLE=""'
+    )
+    arts_check = (
+        'check_carts_dynamic_deps "ARTS" "$ARTS_EXECUTABLE"'
+        if executable is not None
+        else ""
+    )
     section = f"""CARTS_RUNTIME_LIBRARY_PATH="{runtime_path}"
 CARTS_RUNTIME_LIBRARY_DIRS="{printable_dirs}"
-ARTS_EXECUTABLE="{executable}"
+{arts_executable_var}
 export CARTS_RUNTIME_LIBRARY_PATH
 export CARTS_RUNTIME_LIBRARY_DIRS
 case "$(uname -s 2>/dev/null || echo unknown)" in
@@ -593,7 +617,7 @@ check_carts_dynamic_deps() {{
         otool -L "$executable" || true
     fi
 }}
-check_carts_dynamic_deps "ARTS" "$ARTS_EXECUTABLE"
+{arts_check}
 {omp_check}
 """
     env_prefix = (
@@ -688,6 +712,8 @@ def generate_sbatch_script(
         perf_dir_section = '# Perf profiling disabled'
 
     should_run_openmp = config.run_openmp and config.node_count == 1
+    if not config.run_arts and not should_run_openmp:
+        raise ValueError("SLURM job must run ARTS, OpenMP, or both.")
     if should_run_openmp and executable_omp_abs is None:
         raise ValueError("Single-node Slurm benchmark runs require an OpenMP executable.")
 
@@ -705,6 +731,7 @@ def generate_sbatch_script(
             omp_run_command = str(executable_omp_abs)
 
         omp_section = OMP_SECTION_TEMPLATE.format(
+            require_arts_success=1 if config.run_arts else 0,
             node_count=config.node_count,
             executable_omp=executable_omp_abs,
             threads=config.threads,
@@ -740,7 +767,9 @@ def generate_sbatch_script(
     strict_preflight_default = True
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
-    arts_only_arg = '    --arts-only \\\n' if not should_run_openmp else ''
+    arts_only_arg = '    --arts-only \\\n' if config.run_arts and not should_run_openmp else ''
+    openmp_only_arg = '    --openmp-only \\\n' if (not config.run_arts and should_run_openmp) else ''
+    initial_arts_exit = 125 if config.run_arts else -1
 
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     srun_prefix = (
@@ -777,6 +806,16 @@ def generate_sbatch_script(
     else:
         srun_command = f"{srun_prefix} {runtime_env_prefix}{executable_arts_abs}"
 
+    arts_section = (
+        ARTS_SECTION_TEMPLATE.format(
+            timeout_seconds=config.timeout_seconds,
+            srun_command=srun_command,
+        )
+        if config.run_arts
+        else ARTS_SKIPPED_SECTION
+    )
+    exit_status = "$ARTS_EXIT" if config.run_arts else "$OMP_EXIT"
+
     script_content = SBATCH_TEMPLATE.format(
         job_name=job_name,
         node_count=config.node_count,
@@ -796,6 +835,8 @@ def generate_sbatch_script(
         runtime_library_section=runtime_library_section,
         rdma_environment_section=rdma_environment_section,
         cpu_preflight_section=cpu_preflight_section,
+        initial_arts_exit=initial_arts_exit,
+        arts_section=arts_section,
         result_json=result_json,
         executable_arts=executable_arts_abs,
         srun_command=srun_command,
@@ -806,6 +847,8 @@ def generate_sbatch_script(
         threads=config.threads,
         timeout_seconds=config.timeout_seconds,
         arts_only_arg=arts_only_arg,
+        openmp_only_arg=openmp_only_arg,
+        exit_status=exit_status,
     )
 
     # Create run directory

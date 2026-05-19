@@ -220,6 +220,60 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertNotIn("--arts-only \\\n\n", content)
             self.assertNotIn("[OpenMP] Running benchmark", content)
 
+    def test_generate_sbatch_script_can_run_openmp_only_without_arts_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            executable_omp = root / "gemm_omp"
+            python_executable = root / ".venv" / "bin" / "python"
+            runtime_lib_dir = root / "install" / "arts" / "lib"
+
+            for path in (
+                job_result_script,
+                arts_cfg,
+                executable_arts,
+                executable_omp,
+                python_executable,
+                runtime_lib_dir / "libarts.so.2",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=1,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=executable_omp,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="small",
+                threads=4,
+                timeout_seconds=60,
+                runtime_library_dirs=[runtime_lib_dir],
+                run_arts=False,
+                run_openmp=True,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("[ARTS] Skipped (OpenMP-only run)", content)
+            self.assertNotIn("[ARTS] Running benchmark", content)
+            self.assertNotIn('check_carts_dynamic_deps "ARTS"', content)
+            self.assertIn('check_carts_dynamic_deps "OpenMP"', content)
+            self.assertIn("[OpenMP] Running benchmark", content)
+            self.assertIn("--openmp-only", content)
+            self.assertIn("exit $OMP_EXIT", content)
+
     def test_generate_sbatch_script_requires_openmp_for_single_node_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -927,7 +981,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn('if [ "$ARTS_EXIT" -ne 0 ]; then', content)
+            self.assertIn('if [ 1 -eq 1 ] && [ "$ARTS_EXIT" -ne 0 ]; then', content)
             self.assertIn(
                 'echo "[OpenMP] Skipped because ARTS exited with $ARTS_EXIT"',
                 content,

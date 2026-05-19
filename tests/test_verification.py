@@ -81,6 +81,23 @@ class BenchmarkVerificationTest(unittest.TestCase):
         self.assertTrue(verification.correct)
         self.assertEqual(verification.mode, "arts_only")
 
+    def test_determine_status_passes_openmp_only_without_arts(self) -> None:
+        status, verification = determine_status(
+            arts_exit=-1,
+            omp_exit=0,
+            arts_checksum=None,
+            omp_checksum="123.0",
+            reference_checksum=None,
+            reference_source=None,
+            reference_omp_threads=None,
+            tolerance=0.01,
+            openmp_only=True,
+        )
+        self.assertEqual(status, "PASS")
+        self.assertTrue(verification.correct)
+        self.assertEqual(verification.mode, "openmp_only")
+        self.assertEqual(verification.omp_checksum, "123.0")
+
     def test_determine_status_fails_when_direct_checksum_is_missing(self) -> None:
         status, verification = determine_status(
             arts_exit=0,

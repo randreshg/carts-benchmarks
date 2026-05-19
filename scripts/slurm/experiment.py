@@ -793,6 +793,7 @@ class SlurmBatchExecutor:
                 arts_exe
             )
             safe_name = bench.replace("/", "_")
+            run_arts = self.request.variant != VARIANT_OPENMP
             run_openmp = self.request.variant != VARIANT_ARTS and node_count == 1
             for run_num in range(1, self.request.runs + 1):
                 bench_config = BenchmarkConfig(
@@ -860,6 +861,7 @@ class SlurmBatchExecutor:
                     exclude_nodes=self.request.exclude_nodes,
                     nodelist=self.request.nodelist,
                     job_label=step_token,
+                    run_arts=run_arts,
                     run_openmp=run_openmp,
                 )
                 script_path = (
