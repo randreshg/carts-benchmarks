@@ -165,7 +165,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             content = script_path.read_text()
             self.assertIn(f'"{python_executable.resolve()}" "{job_result_script.resolve()}"', content)
             self.assertIn("srun --exclusive -N2 --ntasks=2 --ntasks-per-node=1", content)
-            self.assertIn("--cpus-per-task=6 --cpu-bind=none", content)
+            self.assertIn("--cpus-per-task=10 --cpu-bind=none", content)
             self.assertIn("# OpenMP skipped (multi-node ARTS-only run)", content)
             self.assertIn("--arts-only", content)
             self.assertNotIn("[OpenMP] Running benchmark", content)
@@ -284,7 +284,12 @@ class SlurmBatchPollingTest(unittest.TestCase):
             executable_arts = root / "gemm_arts"
             python_executable = root / ".venv" / "bin" / "python"
 
-            for path in (job_result_script, arts_cfg, executable_arts, python_executable):
+            for path in (
+                job_result_script,
+                arts_cfg,
+                executable_arts,
+                python_executable,
+            ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("#!/bin/sh\n")
 
@@ -579,12 +584,12 @@ class SlurmBatchPollingTest(unittest.TestCase):
             content = script_path.read_text()
             self.assertIn("#SBATCH --nodes=4", content)
             self.assertIn("#SBATCH --ntasks-per-node=1", content)
-            self.assertIn("#SBATCH --cpus-per-task=8", content)
+            self.assertIn("#SBATCH --cpus-per-task=12", content)
             self.assertIn("[SLURM] CPU visibility preflight", content)
             self.assertIn("required=8", content)
             self.assertIn(
                 "srun --exclusive -N4 --ntasks=4 --ntasks-per-node=1 "
-                "--cpus-per-task=8 --cpu-bind=none --kill-on-bad-exit=1",
+                "--cpus-per-task=12 --cpu-bind=none --kill-on-bad-exit=1",
                 content,
             )
             self.assertNotIn("known_hosts", content)
@@ -678,12 +683,13 @@ class SlurmBatchPollingTest(unittest.TestCase):
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn("#SBATCH --cpus-per-task=64", content)
+            self.assertIn("#SBATCH --cpus-per-task=68", content)
             self.assertIn(
                 "[SLURM] Runtime threads: worker=60 sender=2 receiver=2 total=64",
                 content,
             )
-            self.assertIn("--cpus-per-task=64 --cpu-bind=none", content)
+            self.assertIn("required=64 runtime_required=64 requested=68", content)
+            self.assertIn("--cpus-per-task=68 --cpu-bind=none", content)
             self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
 
     def test_generate_sbatch_script_adds_single_node_cpu_headroom_by_default(self) -> None:
@@ -734,6 +740,52 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertIn("required=64 runtime_required=64 requested=68", content)
             self.assertIn("--cpus-per-task=68 --cpu-bind=none", content)
             self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
+
+    def test_generate_sbatch_script_adds_multinode_cpu_headroom_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (
+                job_result_script,
+                arts_cfg,
+                executable_arts,
+                python_executable,
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+            arts_cfg.write_text(
+                "[ARTS]\nworker_threads=64\nsender_threads=1\nreceiver_threads=1\n"
+            )
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=8,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=None,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="large",
+                threads=64,
+                timeout_seconds=90,
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("#SBATCH --cpus-per-task=70", content)
+            self.assertIn("required=66 runtime_required=66 requested=70", content)
+            self.assertIn("--cpus-per-task=70 --cpu-bind=none", content)
 
     def test_generate_sbatch_script_can_disable_single_node_cpu_headroom(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

@@ -391,12 +391,10 @@ def _slurm_cpu_headroom(node_count: int) -> int:
 
     # Some SLURM CPU cgroups expose fewer PUs to hwloc than --cpus-per-task
     # requested. The benchmark preflight catches this, but without headroom the
-    # ARTS runtime can still fail immediately on otherwise useful nodes, e.g.
-    # worker_threads=64 with only 60 visible PUs. Reserve a small buffer for
-    # single-node thread sweeps where worker_threads == requested threads.
-    if node_count == 1:
-        return 4
-    return 0
+    # ARTS runtime can still fail immediately on otherwise useful nodes. This is
+    # common in both single-node and multinode sweeps, e.g. worker_threads=64
+    # with only 60 visible PUs after the scheduler reserves service cores.
+    return 4
 
 
 def _slurm_min_iterations_per_worker(
