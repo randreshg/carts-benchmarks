@@ -453,6 +453,112 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_32_values)
             self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_64_values)
 
+    def test_generate_arts_config_for_node_supports_cpu_pinning_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template = root / "arts.cfg"
+            template.write_text(
+                "\n".join(
+                    [
+                        "[ARTS]",
+                        "launcher=slurm",
+                        "node_count=1",
+                        "worker_threads=8",
+                        f"{KEY_PROTOCOL}={PROTOCOL_TCP}",
+                        "pin=0",
+                    ]
+                )
+                + "\n"
+            )
+
+            runtime_cfg = generate_arts_config_for_node(
+                template,
+                root / "runtime-build",
+                node_count=4,
+                threads=16,
+                cpu_pinning="runtime",
+            )
+            both_cfg = generate_arts_config_for_node(
+                template,
+                root / "both-build",
+                node_count=4,
+                threads=16,
+                cpu_pinning="both",
+            )
+            slurm_cfg = generate_arts_config_for_node(
+                template,
+                root / "slurm-build",
+                node_count=4,
+                threads=16,
+                cpu_pinning="slurm",
+            )
+            off_single_cfg = generate_arts_config_for_node(
+                template,
+                root / "off-single-build",
+                node_count=1,
+                threads=16,
+                cpu_pinning="off",
+            )
+
+            self.assertEqual(parse_arts_cfg(runtime_cfg)["pin"], "1")
+            self.assertEqual(parse_arts_cfg(both_cfg)["pin"], "1")
+            self.assertEqual(parse_arts_cfg(slurm_cfg)["pin"], "0")
+            self.assertEqual(parse_arts_cfg(off_single_cfg)["pin"], "0")
+
+    def test_generate_sbatch_script_supports_cpu_pinning_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "bench_arts"
+            executable_omp = root / "bench_omp"
+            python_executable = root / "python"
+
+            arts_cfg.write_text(
+                "\n".join(
+                    [
+                        "[ARTS]",
+                        "launcher=slurm",
+                        "node_count=1",
+                        "worker_threads=4",
+                        f"{KEY_PROTOCOL}={PROTOCOL_TCP}",
+                        "pin=1",
+                    ]
+                )
+                + "\n"
+            )
+            for path in (job_result_script, executable_arts, executable_omp, python_executable):
+                path.write_text("#!/bin/sh\n")
+                path.chmod(0o755)
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=1,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=executable_omp,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="small",
+                threads=4,
+                timeout_seconds=60,
+                cpu_pinning="both",
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("--cpus-per-task=8 --cpu-bind=cores", content)
+            self.assertIn("CPU Pinning: both (srun cpu-bind=cores, arts pin=1)", content)
+            self.assertIn('export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"', content)
+            self.assertIn('export OMP_PLACES="${OMP_PLACES:-cores}"', content)
+
     def test_generate_arts_config_can_override_min_iterations_per_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             "os.environ",

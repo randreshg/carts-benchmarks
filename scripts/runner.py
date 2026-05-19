@@ -88,6 +88,7 @@ from slurm.experiment import (
     require_slurm_commands,
     validate_requested_node_counts,
 )
+from slurm.batch import CPU_PINNING_DEFAULT, normalize_cpu_pinning
 
 # Shared constants and parsing
 from common import (
@@ -4515,6 +4516,7 @@ def _run_step_slurm(
     rdma: bool = False,
     profile: Optional[Path] = None,
     variant: Optional[str] = None,
+    cpu_pinning: str = CPU_PINNING_DEFAULT,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
     if not node_counts:
@@ -4546,6 +4548,7 @@ def _run_step_slurm(
             profile=profile,
             perf=perf,
             perf_interval=perf_interval,
+            cpu_pinning=cpu_pinning,
             exclude_nodes=exclude_nodes,
             nodelist=nodelist,
             exclude=None,
@@ -4654,6 +4657,7 @@ def _run_slurm_resolved_step(
         rdma=step_config.rdma,
         profile=step_config.requested_profile_path,
         variant=request.variant,
+        cpu_pinning=request.cpu_pinning,
     )
 
 
@@ -4738,6 +4742,9 @@ def run(
     rdma: bool = typer.Option(
         False, "--rdma",
         help="Rebuild/use ARTS with RDMA RSockets transport for all steps."),
+    cpu_pinning: str = typer.Option(
+        CPU_PINNING_DEFAULT, "--cpu-pinning",
+        help="CPU pinning mode for SLURM jobs: default, off, slurm, runtime, both"),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of times to run each benchmark for statistical significance"),
     perf: bool = typer.Option(
@@ -4782,6 +4789,7 @@ def run(
     """Run benchmarks with verification and timing."""
     try:
         size = parse_size(size, "--size")
+        cpu_pinning = normalize_cpu_pinning(cpu_pinning)
     except ValueError as e:
         print_error(str(e))
         raise typer.Exit(2)
@@ -4951,6 +4959,7 @@ def run(
                     artifact_manager=am,
                     max_jobs=max_jobs,
                     variant=variant,
+                    cpu_pinning=cpu_pinning,
                 ),
             )
         except ValueError as e:
@@ -4960,6 +4969,8 @@ def run(
 
     if exclude_nodes:
         print_warning("Ignoring --exclude-nodes because --slurm is not enabled.")
+    if cpu_pinning != CPU_PINNING_DEFAULT:
+        print_warning("Ignoring --cpu-pinning because --slurm is not enabled.")
 
     # Print header
     if not quiet:
@@ -4984,6 +4995,8 @@ def run(
             config_items.append(f"profile={profile.name}")
         if rdma:
             config_items.append("rdma=on")
+        if cpu_pinning != CPU_PINNING_DEFAULT:
+            config_items.append(f"cpu-pinning={cpu_pinning}")
         if perf:
             config_items.append("perf=on")
         if experiment:
@@ -5743,6 +5756,9 @@ def _execute_slurm_batch(
     perf_interval: float = typer.Option(
         0.1, "--perf-interval",
         help="Perf stat sampling interval in seconds"),
+    cpu_pinning: str = typer.Option(
+        CPU_PINNING_DEFAULT, "--cpu-pinning",
+        help="CPU pinning mode for SLURM jobs: default, off, slurm, runtime, both"),
     exclude_nodes: Optional[str] = typer.Option(
         None, "--exclude-nodes", "-X",
         help="SLURM nodes to exclude (comma-separated, e.g. j006,j007)"),
@@ -5792,6 +5808,7 @@ def _execute_slurm_batch(
     - Sweep across multiple node counts with --nodes=1-15
     """
     size = parse_size(size, "--size")
+    cpu_pinning = normalize_cpu_pinning(cpu_pinning)
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
     require_slurm_commands(dry_run)
     resolved_time_limit = resolve_slurm_time_limit(timeout, time_limit)
@@ -5903,6 +5920,7 @@ def _execute_slurm_batch(
         profile=profile,
         perf=perf,
         perf_interval=perf_interval,
+        cpu_pinning=cpu_pinning,
         exclude_nodes=exclude_nodes,
         nodelist=nodelist,
         artifact_manager=artifact_manager,

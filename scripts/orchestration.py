@@ -86,6 +86,7 @@ class SlurmStepExecutionRequest:
     artifact_manager: ArtifactManager
     max_jobs: int
     variant: Optional[str] = None  # None=both, "arts", "openmp"
+    cpu_pinning: str = "default"
 
 
 class StepRebuildCallback(Protocol):

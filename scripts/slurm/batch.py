@@ -107,6 +107,56 @@ from .results import (
 
 _POLL_SPINNER_FRAMES = ("|", "/", "-", "\\")
 
+CPU_PINNING_DEFAULT = "default"
+CPU_PINNING_MODES = frozenset(("default", "off", "slurm", "runtime", "both"))
+
+
+def normalize_cpu_pinning(mode: Optional[str]) -> str:
+    """Normalize the CPU pinning mode used by Slurm benchmark jobs."""
+    normalized = (mode or CPU_PINNING_DEFAULT).strip().lower()
+    aliases = {
+        "none": "off",
+        "false": "off",
+        "0": "off",
+        "true": "both",
+        "1": "both",
+        "on": "both",
+        "arts": "runtime",
+        "arts-runtime": "runtime",
+        "srun": "slurm",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in CPU_PINNING_MODES:
+        valid = ", ".join(sorted(CPU_PINNING_MODES))
+        raise ValueError(f"CPU pinning mode must be one of: {valid}; got {mode!r}")
+    return normalized
+
+
+def srun_cpu_bind_for_pinning(cpu_pinning: str) -> str:
+    return "cores" if normalize_cpu_pinning(cpu_pinning) in {"slurm", "both"} else "none"
+
+
+def arts_pin_for_pinning(cpu_pinning: str, node_count: int) -> Optional[str]:
+    """Return the generated ARTS pin value, or None to preserve the template."""
+    mode = normalize_cpu_pinning(cpu_pinning)
+    if mode == "default":
+        return "0" if node_count > 1 else None
+    if mode in {"off", "slurm"}:
+        return "0"
+    return "1"
+
+
+def _omp_affinity_exports(cpu_pinning: str) -> str:
+    mode = normalize_cpu_pinning(cpu_pinning)
+    if mode in {"default", "off"}:
+        return "# OpenMP affinity left to the environment"
+    return "\n".join(
+        (
+            'export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"',
+            'export OMP_PLACES="${OMP_PLACES:-cores}"',
+        )
+    )
+
 
 # ============================================================================
 # Data Classes
@@ -243,6 +293,7 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
 echo "Node Count: $SLURM_NNODES"
 echo "CPUs/Task: ${{SLURM_CPUS_PER_TASK:-unknown}}"
+echo "CPU Pinning: {cpu_pinning} (srun cpu-bind={srun_cpu_bind}, arts pin={arts_pin})"
 echo "Counter Dir: $COUNTER_DIR"
 echo "Timeout: {timeout_seconds}s"
 echo "Start: $(date -Iseconds)"
@@ -289,6 +340,7 @@ elif [ {node_count} -eq 1 ] && [ -x "{executable_omp}" ]; then
     echo "[OpenMP] Running benchmark..."
     export OMP_NUM_THREADS={threads}
     export OMP_WAIT_POLICY=ACTIVE
+    {omp_affinity_exports}
     OMP_START=$(date +%s)
     timeout --signal=TERM --kill-after=30s {timeout_seconds}s {omp_run_command}
     OMP_EXIT=$?
@@ -680,6 +732,10 @@ def generate_sbatch_script(
         script_path: Path to write the sbatch script
         slurm_job_result_script: Path to the slurm/job_result.py script
     """
+    cpu_pinning = normalize_cpu_pinning(config.cpu_pinning)
+    srun_cpu_bind = srun_cpu_bind_for_pinning(cpu_pinning)
+    arts_pin = parse_arts_cfg(config.arts_config_path).get(KEY_PIN, "template")
+
     # Build partition and account lines (only if specified)
     partition_line = f"#SBATCH --partition={config.partition}" if config.partition else ""
     account_line = f"#SBATCH --account={config.account}" if config.account else ""
@@ -735,6 +791,7 @@ def generate_sbatch_script(
             threads=config.threads,
             omp_run_command=omp_run_command,
             timeout_seconds=config.timeout_seconds,
+            omp_affinity_exports=_omp_affinity_exports(cpu_pinning),
         )
     elif config.node_count > 1:
         omp_section = '# OpenMP skipped (multi-node ARTS-only run)'
@@ -773,7 +830,7 @@ def generate_sbatch_script(
     srun_prefix = (
         f"srun --exclusive -N{config.node_count} --ntasks={config.node_count} "
         f"--ntasks-per-node=1 --cpus-per-task={cpus_per_task} "
-        "--cpu-bind=none --kill-on-bad-exit=1"
+        f"--cpu-bind={srun_cpu_bind} --kill-on-bad-exit=1"
     )
     cpu_preflight_section = _slurm_cpu_preflight_section(
         srun_prefix=srun_prefix,
@@ -826,6 +883,9 @@ def generate_sbatch_script(
         run_dir=run_dir,
         benchmark_name=config.benchmark_name,
         run_number=config.run_number,
+        cpu_pinning=cpu_pinning,
+        srun_cpu_bind=srun_cpu_bind,
+        arts_pin=arts_pin,
         timestamp=datetime.now().isoformat(),
         arts_config_path=arts_config_abs,
         runtime_arts_cfg=runtime_arts_cfg,
@@ -867,6 +927,7 @@ def generate_arts_config_for_node(
     threads: int,
     *,
     rdma: bool = False,
+    cpu_pinning: str = CPU_PINNING_DEFAULT,
 ) -> Path:
     """Generate a node-specific arts.cfg for compilation (goes in build/ directory).
 
@@ -884,6 +945,7 @@ def generate_arts_config_for_node(
         Path to the generated config file (build/{benchmark}/nodes_{N}/{T}T/arts.cfg)
     """
     content = base_config.read_text()
+    cpu_pinning = normalize_cpu_pinning(cpu_pinning)
 
     # CRITICAL: Use absolute paths - jobs run from different working directories
     counter_dir_placeholder = (build_node_dir / COUNTERS_DIR_NAME).resolve()
@@ -893,6 +955,9 @@ def generate_arts_config_for_node(
     content = _set_cfg_key(content, KEY_LAUNCHER, "slurm")
     content = _set_cfg_key(content, KEY_PROTOCOL, protocol_for_rdma(rdma))
     content = _set_cfg_key(content, KEY_COUNTER_CAPTURE_INTERVAL, "10")
+    arts_pin = arts_pin_for_pinning(cpu_pinning, node_count)
+    if arts_pin is not None:
+        content = _set_cfg_key(content, KEY_PIN, arts_pin)
     min_iterations_per_worker = _slurm_min_iterations_per_worker(
         node_count, rdma=rdma,
     )
@@ -918,7 +983,6 @@ def generate_arts_config_for_node(
         content = _set_cfg_key(content, KEY_WORKER_THREADS, str(worker_threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, str(sender_threads))
         content = _set_cfg_key(content, KEY_RECEIVER_THREADS, str(receiver_threads))
-        content = _set_cfg_key(content, KEY_PIN, "0")
     else:
         content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, "0")

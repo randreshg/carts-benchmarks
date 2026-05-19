@@ -25,6 +25,7 @@ from dekk import (
 )
 from arts_config import (
     KEY_COUNTER_FOLDER,
+    KEY_PIN,
     KEY_PROTOCOL,
     get_cfg_str,
     protocol_for_rdma,
@@ -130,6 +131,7 @@ class SlurmBatchRequest:
     exclude_nodes: Optional[str]
     nodelist: Optional[str]
     rdma: bool
+    cpu_pinning: str
     artifact_manager: Optional[ArtifactManager]
     step_name: Optional[str]
     report_steps: Optional[List[ExperimentStep]]
@@ -498,8 +500,17 @@ class SlurmBatchExecutor:
             )
             build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
             expected_protocol = protocol_for_rdma(self.request.rdma)
+            expected_pin = slurm_batch.arts_pin_for_pinning(
+                self.request.cpu_pinning,
+                node_count,
+            )
             cached_protocol = (
                 get_cfg_str(build_arts_cfg, KEY_PROTOCOL)
+                if build_arts_cfg.exists()
+                else None
+            )
+            cached_pin = (
+                get_cfg_str(build_arts_cfg, KEY_PIN)
                 if build_arts_cfg.exists()
                 else None
             )
@@ -508,6 +519,7 @@ class SlurmBatchExecutor:
                 dst_arts.exists()
                 and build_arts_cfg.exists()
                 and cached_protocol == expected_protocol
+                and (expected_pin is None or cached_pin == expected_pin)
             ):
                 with print_lock:
                     console.print(
@@ -548,6 +560,7 @@ class SlurmBatchExecutor:
                 node_count,
                 self.request.threads,
                 rdma=self.request.rdma,
+                cpu_pinning=self.request.cpu_pinning,
             )
             build_arts = self.host.build_benchmark(
                 bench,
@@ -651,8 +664,17 @@ class SlurmBatchExecutor:
                 )
                 build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
                 expected_protocol = protocol_for_rdma(self.request.rdma)
+                expected_pin = slurm_batch.arts_pin_for_pinning(
+                    self.request.cpu_pinning,
+                    node_count,
+                )
                 cached_protocol = (
                     get_cfg_str(build_arts_cfg, KEY_PROTOCOL)
+                    if build_arts_cfg.exists()
+                    else None
+                )
+                cached_pin = (
+                    get_cfg_str(build_arts_cfg, KEY_PIN)
                     if build_arts_cfg.exists()
                     else None
                 )
@@ -661,6 +683,7 @@ class SlurmBatchExecutor:
                     dst_arts.exists()
                     and build_arts_cfg.exists()
                     and cached_protocol == expected_protocol
+                    and (expected_pin is None or cached_pin == expected_pin)
                 ):
                     with print_lock:
                         console.print(
@@ -701,6 +724,7 @@ class SlurmBatchExecutor:
                     node_count,
                     self.request.threads,
                     rdma=self.request.rdma,
+                    cpu_pinning=self.request.cpu_pinning,
                 )
                 build_arts = self.host.build_benchmark(
                     bench,
@@ -827,6 +851,10 @@ class SlurmBatchExecutor:
                     perf_interval=self.request.perf_interval if self.request.perf else None,
                     timeout=self.request.timeout,
                     time_limit=self.request.time_limit,
+                    cpu_pinning=self.request.cpu_pinning,
+                    slurm_cpu_bind=slurm_batch.srun_cpu_bind_for_pinning(
+                        self.request.cpu_pinning
+                    ),
                     runtime_library_dirs=list(runtime_library_dirs),
                     arts_runtime_mode=arts_runtime_mode,
                     arts_runtime_mode_source=arts_runtime_mode_source,
@@ -863,6 +891,7 @@ class SlurmBatchExecutor:
                     job_label=step_token,
                     run_arts=run_arts,
                     run_openmp=run_openmp,
+                    cpu_pinning=self.request.cpu_pinning,
                 )
                 script_path = (
                     scripts_dir

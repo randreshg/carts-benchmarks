@@ -58,6 +58,7 @@ class SlurmJobConfig:
     runtime_library_dirs: List[Path] = field(default_factory=list)
     run_arts: bool = True
     run_openmp: bool = True
+    cpu_pinning: str = "default"
 
 
 @dataclass

@@ -210,6 +210,8 @@ class ArtifactManager:
         perf_interval: Optional[float] = None,
         timeout: Optional[int] = None,
         time_limit: Optional[str] = None,
+        cpu_pinning: Optional[str] = None,
+        slurm_cpu_bind: Optional[str] = None,
         runtime_arts_overrides: Optional[Dict[str, str]] = None,
         runtime_library_dirs: Optional[List[Path]] = None,
         reference_checksum: Optional[str] = None,
@@ -282,6 +284,10 @@ class ArtifactManager:
             run_config["timeout"] = timeout
         if time_limit is not None:
             run_config["time_limit"] = time_limit
+        if cpu_pinning is not None:
+            run_config["cpu_pinning"] = cpu_pinning
+        if slurm_cpu_bind is not None:
+            run_config["slurm_cpu_bind"] = slurm_cpu_bind
         if command:
             run_config["command"] = command
         if env_overrides:
