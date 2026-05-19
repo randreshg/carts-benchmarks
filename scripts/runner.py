@@ -186,6 +186,7 @@ from metadata import (
     get_git_hash, get_compiler_version, get_cpu_info,
     get_reproducibility_metadata, _serialize_parallel_task_timing,
 )
+from carts_paths import active_arts_cmake_cache, active_install_dir, get_carts_dir
 
 
 # ============================================================================
@@ -201,23 +202,10 @@ app = typer.Typer(
 console = _shared_console
 
 
-def get_carts_dir() -> Path:
-    """Get the CARTS root directory."""
-    script_dir = Path(__file__).parent.resolve()
-    # Navigate up from external/carts-benchmarks/scripts to carts root
-    carts_dir = script_dir.parent.parent.parent
-    if not (carts_dir / "tools" / "carts").exists():
-        # Fallback: try CARTS_DIR environment variable
-        env_dir = os.environ.get("CARTS_DIR")
-        if env_dir:
-            carts_dir = Path(env_dir)
-    return carts_dir
-
-
 def arts_runtime_is_installed(carts_dir: Optional[Path] = None) -> bool:
     """Return True when the installed ARTS runtime is present and linkable."""
     root = carts_dir or get_carts_dir()
-    install_dir = root / ".install" / "arts"
+    install_dir = active_install_dir(root) / "arts"
     lib_dir = install_dir / "lib"
     cmake_config = lib_dir / "cmake" / "ARTS" / "ARTSConfig.cmake"
     public_header = install_dir / "include" / "arts.h"
@@ -228,7 +216,7 @@ def arts_runtime_is_installed(carts_dir: Optional[Path] = None) -> bool:
 def arts_runtime_uses_rdma(carts_dir: Optional[Path] = None) -> Optional[bool]:
     """Return the ARTS build transport from CMakeCache, or None if unknown."""
     root = carts_dir or get_carts_dir()
-    cache = root / "external" / "arts" / "build" / "CMakeCache.txt"
+    cache = active_arts_cmake_cache(root)
     if not cache.is_file():
         return None
 

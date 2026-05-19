@@ -130,6 +130,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             executable_arts = root / "gemm_arts"
             executable_omp = root / "gemm_omp"
             python_executable = root / ".venv" / "bin" / "python"
+            runtime_lib_dir = root / "install" / "arts" / "lib"
 
             for path in (
                 job_result_script,
@@ -137,6 +138,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 executable_arts,
                 executable_omp,
                 python_executable,
+                runtime_lib_dir / "libarts.so.2",
             ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("#!/bin/sh\n")
@@ -164,6 +166,9 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertIn(f'"{python_executable.resolve()}" "{job_result_script.resolve()}"', content)
             self.assertIn("srun --exclusive -N2 --ntasks=2 --ntasks-per-node=1", content)
             self.assertIn("--cpus-per-task=6 --cpu-bind=none", content)
+            self.assertIn("# OpenMP skipped (multi-node ARTS-only run)", content)
+            self.assertIn("--arts-only", content)
+            self.assertNotIn("[OpenMP] Running benchmark", content)
             self.assertNotIn('python3 "', content)
 
     def test_generate_sbatch_script_can_skip_openmp_for_arts_only_runs(self) -> None:
@@ -176,6 +181,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             executable_arts = root / "gemm_arts"
             executable_omp = root / "gemm_omp"
             python_executable = root / ".venv" / "bin" / "python"
+            runtime_lib_dir = root / "install" / "arts" / "lib"
 
             for path in (
                 job_result_script,
@@ -183,6 +189,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 executable_arts,
                 executable_omp,
                 python_executable,
+                runtime_lib_dir / "libarts.so.2",
             ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("#!/bin/sh\n")
@@ -208,10 +215,93 @@ class SlurmBatchPollingTest(unittest.TestCase):
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn("# OpenMP skipped (executable not specified)", content)
+            self.assertIn("# OpenMP skipped (ARTS-only run)", content)
             self.assertIn("--arts-only", content)
             self.assertNotIn("--arts-only \\\n\n", content)
             self.assertNotIn("[OpenMP] Running benchmark", content)
+
+    def test_generate_sbatch_script_requires_openmp_for_single_node_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            python_executable = root / ".venv" / "bin" / "python"
+
+            for path in (job_result_script, arts_cfg, executable_arts, python_executable):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=1,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=None,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="small",
+                threads=4,
+                timeout_seconds=60,
+            )
+
+            with self.assertRaisesRegex(ValueError, "OpenMP executable"):
+                generate_sbatch_script(config, script_path, job_result_script)
+
+    def test_generate_sbatch_script_compares_openmp_for_single_node_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run_1"
+            script_path = root / "job.sbatch"
+            job_result_script = root / "job_result.py"
+            arts_cfg = root / "arts.cfg"
+            executable_arts = root / "gemm_arts"
+            executable_omp = root / "gemm_omp"
+            python_executable = root / ".venv" / "bin" / "python"
+            runtime_lib_dir = root / "install" / "arts" / "lib"
+
+            for path in (
+                job_result_script,
+                arts_cfg,
+                executable_arts,
+                executable_omp,
+                python_executable,
+                runtime_lib_dir / "libarts.so.2",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n")
+
+            config = SlurmJobConfig(
+                benchmark_name="polybench/gemm",
+                run_number=1,
+                node_count=1,
+                time_limit="00:05:00",
+                partition=None,
+                account=None,
+                executable_arts=executable_arts,
+                executable_omp=executable_omp,
+                arts_config_path=arts_cfg,
+                python_executable=python_executable,
+                run_dir=run_dir,
+                size="small",
+                threads=4,
+                timeout_seconds=60,
+                runtime_library_dirs=[runtime_lib_dir],
+            )
+
+            generate_sbatch_script(config, script_path, job_result_script)
+
+            content = script_path.read_text()
+            self.assertIn("[OpenMP] Running benchmark", content)
+            self.assertIn(str(executable_omp.resolve()), content)
+            self.assertIn('check_carts_dynamic_deps "OpenMP"', content)
+            self.assertNotIn("--arts-only", content)
 
     def test_generate_arts_config_for_node_sets_protocol_from_rdma_flag_and_unpins_multinode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -634,7 +724,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertIn("required=72 runtime_required=68 requested=72", content)
             self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
 
-    def test_generate_sbatch_script_uses_runtime_snapshot_library_path(self) -> None:
+    def test_generate_sbatch_script_uses_managed_runtime_library_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run_1"
@@ -643,7 +733,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
             arts_cfg = root / "arts.cfg"
             executable_arts = root / "gemm_arts"
             python_executable = root / ".venv" / "bin" / "python"
-            runtime_lib_dir = root / "artifacts" / "runtime" / "arts" / "lib"
+            runtime_lib_dir = root / "install" / "arts" / "lib"
 
             for path in (
                 job_result_script,
@@ -670,20 +760,25 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 size="small",
                 threads=64,
                 timeout_seconds=180,
-                arts_runtime_lib_dir=runtime_lib_dir,
+                runtime_library_dirs=[runtime_lib_dir],
             )
 
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn(f'ARTS_RUNTIME_LIB_DIR="{runtime_lib_dir.resolve()}"', content)
-            self.assertIn(f'ARTS_EXECUTABLE="{executable_arts.resolve()}"', content)
-            self.assertIn("export ARTS_RUNTIME_LIB", content)
-            self.assertIn("ARTS Runtime Library: $ARTS_RUNTIME_LIB", content)
-            self.assertIn("ARTS Runtime Resolved: $ARTS_RUNTIME_RESOLVED", content)
-            self.assertIn("RUNPATH rather than RPATH", content)
             self.assertIn(
-                'env LD_LIBRARY_PATH="${ARTS_RUNTIME_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"',
+                f'CARTS_RUNTIME_LIBRARY_PATH="{runtime_lib_dir.resolve()}"',
+                content,
+            )
+            self.assertIn(f'ARTS_EXECUTABLE="{executable_arts.resolve()}"', content)
+            self.assertIn("export CARTS_RUNTIME_LIBRARY_PATH", content)
+            self.assertIn(
+                "CARTS Runtime Library Path: $CARTS_RUNTIME_LIBRARY_PATH",
+                content,
+            )
+            self.assertIn('check_carts_dynamic_deps "ARTS"', content)
+            self.assertIn(
+                'env LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"',
                 content,
             )
             self.assertNotIn("LD_PRELOAD", content)

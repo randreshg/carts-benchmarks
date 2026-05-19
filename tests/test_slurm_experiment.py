@@ -37,6 +37,7 @@ class _FakeHost:
     def __init__(self, benchmarks_dir: Path) -> None:
         self.benchmarks_dir = benchmarks_dir
         self.artifact_manager = None
+        self.reference_calls = 0
 
     def get_executable_paths(self, bench_path: Path) -> tuple[Path, Path]:
         return bench_path / "bench_arts", bench_path / "bench_omp"
@@ -66,6 +67,7 @@ class _FakeHost:
         timeout: int,
     ) -> ReferenceChecksum:
         del name, size, cflags, timeout
+        self.reference_calls += 1
         return ReferenceChecksum(
             status=Status.PASS,
             checksum="1.0",
@@ -239,7 +241,11 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             runtime_lib_dir = carts_root / ".install" / "arts" / "lib"
             runtime_lib_dir.mkdir(parents=True)
             (runtime_lib_dir / "libarts.so.2").write_text("fake arts runtime\n")
-            cache = carts_root / "external" / "arts" / "build" / "CMakeCache.txt"
+            carts_lib_dir = carts_root / ".install" / "carts" / "lib"
+            carts_lib_dir.mkdir(parents=True)
+            llvm_lib_dir = carts_root / ".install" / "llvm" / "lib"
+            llvm_lib_dir.mkdir(parents=True)
+            cache = carts_root / "build" / "arts" / "CMakeCache.txt"
             cache.parent.mkdir(parents=True)
             cache.write_text("ARTS_USE_RDMA:BOOL=OFF\n")
             am = ArtifactManager(root / "results", "ts")
@@ -308,8 +314,88 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                     / "run_config.json"
                 ).read_text()
             )
-            snapshot_dir = Path(alpha_run_config["arts_runtime_lib_dir"])
-            self.assertTrue((snapshot_dir / "libarts.so.2").exists())
+            runtime_dirs = [
+                Path(path) for path in alpha_run_config["runtime_library_dirs"]
+            ]
+            self.assertIn(runtime_lib_dir.resolve(), runtime_dirs)
+
+    def test_multinode_dry_run_is_arts_only_without_openmp_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            bench = bench_root / "suite" / "a"
+            bench.mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(f"[ARTS]\nworker_threads=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n")
+            carts_root = root / "carts"
+            runtime_lib_dir = carts_root / ".install" / "arts" / "lib"
+            runtime_lib_dir.mkdir(parents=True)
+            (runtime_lib_dir / "libarts.so.2").write_text("fake arts runtime\n")
+            (carts_root / ".install" / "carts" / "lib").mkdir(parents=True)
+            (carts_root / ".install" / "llvm" / "lib").mkdir(parents=True)
+            host = _FakeHost(bench_root)
+            am = ArtifactManager(root / "results", "ts")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[2],
+                size="small",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=1,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=True,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args=None,
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=False,
+                artifact_manager=am,
+                step_name="scale",
+                report_steps=None,
+                command_str="test",
+            )
+
+            SlurmBatchExecutor(host, request, deps).execute()
+
+            self.assertEqual(host.reference_calls, 0)
+            run_config = json.loads(
+                (
+                    am.experiment_dir
+                    / "scale"
+                    / "suite"
+                    / "a"
+                    / "1t_2n"
+                    / "run_1"
+                    / "run_config.json"
+                ).read_text()
+            )
+            self.assertNotIn("reference", run_config)
+            script = (
+                am.experiment_dir
+                / "scripts"
+                / "scale__suite_a_1t_2n_run1.sbatch"
+            ).read_text()
+            self.assertIn("--arts-only", script)
+            self.assertIn("# OpenMP skipped (multi-node ARTS-only run)", script)
+            self.assertNotIn("[OpenMP] Running benchmark", script)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 # SLURM job state constants
@@ -55,7 +55,7 @@ class SlurmJobConfig:
     exclude_nodes: Optional[str] = None
     nodelist: Optional[str] = None
     job_label: Optional[str] = None
-    arts_runtime_lib_dir: Optional[Path] = None
+    runtime_library_dirs: List[Path] = field(default_factory=list)
     run_openmp: bool = True
 
 

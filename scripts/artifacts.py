@@ -9,7 +9,6 @@ post-run from CLI.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import hashlib
 import re
@@ -28,17 +27,7 @@ from common import (
 )
 from models import BenchmarkConfig, BenchmarkResult, Status
 from metadata import get_reproducibility_metadata
-
-
-def _get_carts_dir() -> Path:
-    """Get the CARTS root directory (local helper to avoid circular imports)."""
-    script_dir = Path(__file__).parent.resolve()
-    carts_dir = script_dir.parent.parent.parent
-    if not (carts_dir / "tools" / "carts").exists():
-        env_dir = os.environ.get("CARTS_DIR")
-        if env_dir:
-            carts_dir = Path(env_dir)
-    return carts_dir
+from carts_paths import get_carts_dir
 
 
 def _get_benchmarks_dir() -> Path:
@@ -222,7 +211,7 @@ class ArtifactManager:
         timeout: Optional[int] = None,
         time_limit: Optional[str] = None,
         runtime_arts_overrides: Optional[Dict[str, str]] = None,
-        arts_runtime_lib_dir: Optional[Path] = None,
+        runtime_library_dirs: Optional[List[Path]] = None,
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
@@ -299,8 +288,8 @@ class ArtifactManager:
             run_config["env_overrides"] = env_overrides
         if arts_cfg_path:
             run_config["arts_cfg_source"] = str(arts_cfg_path)
-        if arts_runtime_lib_dir is not None:
-            run_config["arts_runtime_lib_dir"] = str(arts_runtime_lib_dir)
+        if runtime_library_dirs:
+            run_config["runtime_library_dirs"] = [str(path) for path in runtime_library_dirs]
         if arts_runtime_mode:
             run_config["arts_runtime_mode"] = arts_runtime_mode
         if arts_runtime_mode_source:
@@ -390,7 +379,7 @@ class ArtifactManager:
             if speedups else 0.0
         )
 
-        carts_dir = _get_carts_dir()
+        carts_dir = get_carts_dir()
         benchmarks_dir = _get_benchmarks_dir()
         repro = get_reproducibility_metadata(carts_dir, benchmarks_dir)
 

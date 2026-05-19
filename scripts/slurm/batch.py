@@ -516,50 +516,76 @@ fi"""
 
 
 def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
-    """Return sbatch setup and per-task env prefix for a runtime snapshot."""
-    if config.arts_runtime_lib_dir is None:
+    """Return sbatch setup and per-task env prefix for managed runtime dirs."""
+    runtime_dirs = [path.resolve() for path in config.runtime_library_dirs if path.is_dir()]
+    if not runtime_dirs:
         return (
-            '# ARTS runtime library snapshot disabled',
+            '# CARTS managed runtime library path disabled',
             "",
         )
 
-    lib_dir = config.arts_runtime_lib_dir.resolve()
     executable = config.executable_arts.resolve()
-    section = f"""ARTS_RUNTIME_LIB_DIR="{lib_dir}"
+    omp_executable = (
+        config.executable_omp.resolve()
+        if config.run_openmp and config.node_count == 1 and config.executable_omp
+        else None
+    )
+    runtime_path = ":".join(str(path) for path in runtime_dirs)
+    printable_dirs = " ".join(str(path) for path in runtime_dirs)
+    omp_check = (
+        f'check_carts_dynamic_deps "OpenMP" "{omp_executable}"'
+        if omp_executable is not None
+        else ""
+    )
+    section = f"""CARTS_RUNTIME_LIBRARY_PATH="{runtime_path}"
+CARTS_RUNTIME_LIBRARY_DIRS="{printable_dirs}"
 ARTS_EXECUTABLE="{executable}"
-ARTS_RUNTIME_LIB="$ARTS_RUNTIME_LIB_DIR/libarts.so.2"
-if [ ! -e "$ARTS_RUNTIME_LIB" ]; then
-    ARTS_RUNTIME_LIB="$ARTS_RUNTIME_LIB_DIR/libarts.so"
-fi
-if [ ! -e "$ARTS_RUNTIME_LIB" ]; then
-    echo "Missing ARTS runtime snapshot: $ARTS_RUNTIME_LIB_DIR" >&2
-    exit 126
-fi
-export ARTS_RUNTIME_LIB_DIR
-export ARTS_RUNTIME_LIB
-export LD_LIBRARY_PATH="$ARTS_RUNTIME_LIB_DIR${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
-echo "ARTS Runtime Lib Dir: $ARTS_RUNTIME_LIB_DIR"
-echo "ARTS Runtime Library: $ARTS_RUNTIME_LIB"
-if command -v ldd >/dev/null 2>&1; then
-    ARTS_RUNTIME_RESOLVED=$(LD_LIBRARY_PATH="$ARTS_RUNTIME_LIB_DIR${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}" ldd "$ARTS_EXECUTABLE" 2>/dev/null | awk '/libarts\\.so/ {{print $3; exit}}')
-    case "$ARTS_RUNTIME_RESOLVED" in
-        "$ARTS_RUNTIME_LIB_DIR"/*)
-            echo "ARTS Runtime Resolved: $ARTS_RUNTIME_RESOLVED"
-            ;;
-        "")
-            echo "Unable to resolve libarts for $ARTS_EXECUTABLE" >&2
+export CARTS_RUNTIME_LIBRARY_PATH
+export CARTS_RUNTIME_LIBRARY_DIRS
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    Darwin*)
+        export DYLD_LIBRARY_PATH="$CARTS_RUNTIME_LIBRARY_PATH${{DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}}"
+        ;;
+    Linux*)
+        export LD_LIBRARY_PATH="$CARTS_RUNTIME_LIBRARY_PATH${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+        ;;
+    *)
+        export LD_LIBRARY_PATH="$CARTS_RUNTIME_LIBRARY_PATH${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+        export DYLD_LIBRARY_PATH="$CARTS_RUNTIME_LIBRARY_PATH${{DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}}"
+        ;;
+esac
+echo "CARTS Runtime Library Path: $CARTS_RUNTIME_LIBRARY_PATH"
+check_carts_dynamic_deps() {{
+    local label="$1"
+    local executable="$2"
+    if [ ! -x "$executable" ]; then
+        echo "$label executable is missing or not executable: $executable" >&2
+        exit 126
+    fi
+    if command -v ldd >/dev/null 2>&1; then
+        local ldd_output
+        ldd_output=$(ldd "$executable" 2>&1 || true)
+        if printf "%s\\n" "$ldd_output" | grep -q "not found"; then
+            echo "$ldd_output" >&2
+            echo "$label runtime libraries were not found. Verify the CARTS install root is visible on this SLURM node." >&2
             exit 126
-            ;;
-        *)
-            echo "ARTS runtime snapshot not selected: $ARTS_RUNTIME_RESOLVED (expected under $ARTS_RUNTIME_LIB_DIR)" >&2
-            echo "Rebuild the benchmark artifact so the executable uses RUNPATH rather than RPATH." >&2
-            exit 126
-            ;;
-    esac
-fi
+        fi
+        local arts_runtime_resolved
+        arts_runtime_resolved=$(printf "%s\\n" "$ldd_output" | awk '/libarts\\.so/ {{print $3; exit}}')
+        if [ -n "$arts_runtime_resolved" ]; then
+            echo "$label Runtime Resolved: $arts_runtime_resolved"
+        fi
+    elif command -v otool >/dev/null 2>&1; then
+        echo "$label Runtime Dependencies:"
+        otool -L "$executable" || true
+    fi
+}}
+check_carts_dynamic_deps "ARTS" "$ARTS_EXECUTABLE"
+{omp_check}
 """
     env_prefix = (
-        'env LD_LIBRARY_PATH="${ARTS_RUNTIME_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" '
+        'env LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" '
+        'DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-}" '
     )
     return section.rstrip(), env_prefix
 
@@ -648,8 +674,12 @@ def generate_sbatch_script(
     else:
         perf_dir_section = '# Perf profiling disabled'
 
-    # Build OpenMP section (only for single-node)
-    if config.run_openmp and config.node_count == 1 and executable_omp_abs:
+    should_run_openmp = config.run_openmp and config.node_count == 1
+    if should_run_openmp and executable_omp_abs is None:
+        raise ValueError("Single-node Slurm benchmark runs require an OpenMP executable.")
+
+    # Build OpenMP section (single-node comparison only)
+    if should_run_openmp and executable_omp_abs:
         if config.perf and perf_dir:
             events = ",".join(PERF_CACHE_EVENTS)
             interval_ms = int(config.perf_interval * 1000)
@@ -669,10 +699,9 @@ def generate_sbatch_script(
             timeout_seconds=config.timeout_seconds,
         )
     elif config.node_count > 1:
-        omp_section = (
-            '# OpenMP skipped (multi-node run - verification uses the stored '
-            'matching OMP reference when available)'
-        )
+        omp_section = '# OpenMP skipped (multi-node ARTS-only run)'
+    elif not config.run_openmp:
+        omp_section = '# OpenMP skipped (ARTS-only run)'
     else:
         omp_section = '# OpenMP skipped (executable not specified)'
 
@@ -697,7 +726,7 @@ def generate_sbatch_script(
     )
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
-    arts_only_arg = '    --arts-only \\\n' if not config.run_openmp else ''
+    arts_only_arg = '    --arts-only \\\n' if not should_run_openmp else ''
 
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     srun_prefix = (

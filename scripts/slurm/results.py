@@ -138,6 +138,15 @@ def _apply_compile_artifact_paths(result: Dict[str, Any], run_config: Dict[str, 
     artifacts = result.setdefault("artifacts", {})
     artifacts.setdefault("arts_config", str(arts_cfg_path))
     artifacts.setdefault("build_dir", str(arts_cfg_path.parent))
+    runtime_library_dirs = run_config.get("runtime_library_dirs")
+    if isinstance(runtime_library_dirs, list):
+        artifacts.setdefault(
+            "runtime_library_dirs",
+            [
+                str(Path(str(path)).resolve())
+                for path in runtime_library_dirs
+            ],
+        )
     arts_runtime_lib_dir = run_config.get("arts_runtime_lib_dir")
     if arts_runtime_lib_dir:
         artifacts.setdefault(

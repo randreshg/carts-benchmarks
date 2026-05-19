@@ -26,8 +26,6 @@ from dekk import (
 from arts_config import (
     KEY_COUNTER_FOLDER,
     KEY_PROTOCOL,
-    PROTOCOL_RDMA,
-    PROTOCOL_TCP,
     get_cfg_str,
     protocol_for_rdma,
 )
@@ -46,6 +44,7 @@ from common import (
 from metadata import get_reproducibility_metadata
 from models import BenchmarkConfig, ExperimentStep, ReferenceChecksum, Status
 from report import generate_report_from_rows
+from carts_paths import managed_runtime_library_dirs
 
 from . import batch as slurm_batch
 from .models import (
@@ -55,9 +54,7 @@ from .models import (
     SubmissionFailure,
 )
 
-ARTS_RUNTIME_SNAPSHOT_DIR = Path("runtime") / "arts" / "lib"
-ARTS_RUNTIME_SNAPSHOT_MARKER = "runtime_snapshot.json"
-BuildArtifacts = Tuple[Path, Optional[Path], Path, Optional[Path]]
+BuildArtifacts = Tuple[Path, Optional[Path], Path]
 
 ARTS_RUNTIME_MODE_TASK = "arts_task_runtime"
 ARTS_RUNTIME_MODE_HOST_OPENMP = "host_openmp_fallback"
@@ -370,147 +367,6 @@ def count_total_slurm_jobs(
     return total_jobs
 
 
-def _installed_arts_runtime_protocol(carts_dir: Path) -> Optional[str]:
-    """Return the installed ARTS runtime protocol from CMakeCache when known."""
-    cache = carts_dir / "external" / "arts" / "build" / "CMakeCache.txt"
-    if not cache.is_file():
-        return None
-
-    for line in cache.read_text(errors="ignore").splitlines():
-        if not line.startswith("ARTS_USE_RDMA:"):
-            continue
-        value = line.split("=", 1)[-1].strip().upper()
-        if value in {"ON", "TRUE", "1", "YES"}:
-            return PROTOCOL_RDMA
-        if value in {"OFF", "FALSE", "0", "NO"}:
-            return PROTOCOL_TCP
-    return None
-
-
-def _installed_arts_runtime_lib_dir(carts_dir: Path) -> Optional[Path]:
-    """Find the installed ARTS shared library directory."""
-    install_dir = carts_dir / ".install" / "arts"
-    for candidate in (install_dir / "lib", install_dir / "lib64"):
-        if any(candidate.glob("libarts.so*")):
-            return candidate
-    return None
-
-
-def _snapshot_marker_path(runtime_lib_dir: Path) -> Path:
-    return runtime_lib_dir.parent / ARTS_RUNTIME_SNAPSHOT_MARKER
-
-
-def _read_snapshot_marker(runtime_lib_dir: Path) -> Optional[Dict[str, Any]]:
-    marker_path = _snapshot_marker_path(runtime_lib_dir)
-    if not marker_path.is_file():
-        return None
-    try:
-        marker = json.loads(marker_path.read_text())
-    except Exception:
-        return None
-    return marker if isinstance(marker, dict) else None
-
-
-def _snapshot_has_expected_arts_runtime(
-    runtime_lib_dir: Path,
-    expected_protocol: str,
-) -> bool:
-    """Return True when an artifact runtime snapshot is complete and suitable."""
-    if not (
-        (runtime_lib_dir / "libarts.so.2").exists()
-        or (runtime_lib_dir / "libarts.so").exists()
-    ):
-        return False
-
-    marker = _read_snapshot_marker(runtime_lib_dir)
-    if marker is None:
-        return False
-    if marker.get("expected_protocol") != expected_protocol:
-        return False
-    protocol = marker.get("installed_protocol")
-    if protocol in {PROTOCOL_RDMA, PROTOCOL_TCP} and protocol != expected_protocol:
-        return False
-    return True
-
-
-def _copy_arts_runtime_snapshot(
-    *,
-    carts_dir: Path,
-    build_node_dir: Path,
-    expected_protocol: str,
-    source_runtime_lib_dir: Optional[Path] = None,
-) -> Path:
-    """Copy a validated ARTS shared runtime into a benchmark artifact dir."""
-    runtime_lib_dir = build_node_dir / ARTS_RUNTIME_SNAPSHOT_DIR
-    if _snapshot_has_expected_arts_runtime(runtime_lib_dir, expected_protocol):
-        return runtime_lib_dir
-
-    source_marker: Optional[Dict[str, Any]] = None
-    if source_runtime_lib_dir is None:
-        installed_protocol = _installed_arts_runtime_protocol(carts_dir)
-        if installed_protocol is not None and installed_protocol != expected_protocol:
-            raise RuntimeError(
-                "Installed ARTS runtime protocol is "
-                f"{installed_protocol}, but this benchmark artifact expects "
-                f"{expected_protocol}. Rebuild ARTS for {expected_protocol} before "
-                "generating Slurm artifacts."
-            )
-
-        source_lib_dir = _installed_arts_runtime_lib_dir(carts_dir)
-        if source_lib_dir is None:
-            raise RuntimeError(
-                f"Installed ARTS shared libraries not found under {carts_dir / '.install' / 'arts'}"
-            )
-    else:
-        source_lib_dir = source_runtime_lib_dir
-        source_marker = _read_snapshot_marker(source_lib_dir)
-        if source_marker is None:
-            raise RuntimeError(f"ARTS runtime snapshot marker not found for {source_lib_dir}")
-        source_expected = source_marker.get("expected_protocol")
-        source_installed = source_marker.get("installed_protocol")
-        source_protocol = (
-            source_expected
-            if source_expected in {PROTOCOL_RDMA, PROTOCOL_TCP}
-            else source_installed
-        )
-        if source_protocol in {PROTOCOL_RDMA, PROTOCOL_TCP} and source_protocol != expected_protocol:
-            raise RuntimeError(
-                "Cached ARTS runtime snapshot protocol is "
-                f"{source_protocol}, but this benchmark artifact expects {expected_protocol}."
-            )
-        installed_protocol = (
-            str(source_installed)
-            if source_installed in {PROTOCOL_RDMA, PROTOCOL_TCP}
-            else expected_protocol
-        )
-
-    source_libs = sorted(source_lib_dir.glob("libarts.so*"))
-    if not source_libs:
-        raise RuntimeError(f"No libarts.so* files found in {source_lib_dir}")
-
-    runtime_lib_dir.mkdir(parents=True, exist_ok=True)
-    for existing in runtime_lib_dir.glob("libarts.so*"):
-        existing.unlink()
-    for source in source_libs:
-        destination = runtime_lib_dir / source.name
-        if source.is_symlink():
-            os.symlink(os.readlink(source), destination)
-        elif source.is_file():
-            shutil.copy2(source, destination)
-
-    marker = {
-        "source_dir": str(source_lib_dir.resolve()),
-        "created": datetime.now().isoformat(),
-        "expected_protocol": expected_protocol,
-        "installed_protocol": installed_protocol,
-        "libraries": [path.name for path in source_libs],
-    }
-    if source_marker is not None:
-        marker["source_snapshot"] = str(source_lib_dir.resolve())
-    _snapshot_marker_path(runtime_lib_dir).write_text(json.dumps(marker, indent=2))
-    return runtime_lib_dir
-
-
 def merge_result_rows(
     existing_results: Sequence[Dict[str, Any]],
     submission_failure_results: Sequence[Dict[str, Any]],
@@ -555,19 +411,19 @@ class SlurmBatchExecutor:
 
         print_info(f"Experiment directory: {experiment_dir}")
         self._rebuild_profile_if_needed()
-        expected_protocol = protocol_for_rdma(self.request.rdma)
-        runtime_snapshot_lib_dir = _copy_arts_runtime_snapshot(
-            carts_dir=self.deps.get_carts_dir(),
-            build_node_dir=experiment_dir,
-            expected_protocol=expected_protocol,
-        )
+        runtime_library_dirs = managed_runtime_library_dirs(self.deps.get_carts_dir())
+        if not runtime_library_dirs:
+            raise RuntimeError(
+                "No CARTS managed runtime library directories were found. "
+                "Run through `dekk carts ...` after building CARTS/ARTS/LLVM."
+            )
 
         self._build_submit_and_collect_streaming(
             am=am,
             scripts_dir=scripts_dir,
             experiment_dir=experiment_dir,
             slurm_start_time=slurm_start_time,
-            runtime_snapshot_lib_dir=runtime_snapshot_lib_dir,
+            runtime_library_dirs=runtime_library_dirs,
         )
 
     def _prepare_artifact_manager(self) -> ArtifactManager:
@@ -611,11 +467,7 @@ class SlurmBatchExecutor:
         bench: str,
         multinode_disabled: set[str],
         print_lock: threading.Lock,
-        runtime_snapshot_lib_dir: Path,
-    ) -> Tuple[
-        List[Tuple[Tuple[str, int], BuildArtifacts]],
-        Optional[ReferenceChecksum],
-    ]:
+    ) -> List[Tuple[Tuple[str, int], BuildArtifacts]]:
         bench_path = self.host.benchmarks_dir / bench
         effective_base_config = self.deps.resolve_effective_arts_config(
             bench_path,
@@ -623,35 +475,7 @@ class SlurmBatchExecutor:
         )
         src_arts, src_omp = self.host.get_executable_paths(bench_path)
         results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
-        reference_checksum: Optional[ReferenceChecksum] = None
         include_openmp = self.request.variant != VARIANT_ARTS
-
-        needs_multinode_reference = any(
-            node_count > 1 and bench not in multinode_disabled
-            for node_count in self.request.node_counts
-        ) and include_openmp
-        if needs_multinode_reference:
-            reference_timeout = self.deps.parse_time_limit_seconds(
-                self.request.time_limit
-            )
-            reference_timeout = min(reference_timeout, self.request.timeout)
-            reference = self.host.ensure_omp_reference(
-                bench,
-                self.request.size,
-                self.request.cflags or "",
-                self.request.threads,
-                timeout=reference_timeout,
-            )
-            if reference.status != Status.PASS or reference.checksum is None:
-                raise RuntimeError(
-                    f"Failed to establish OpenMP reference for {bench}: {reference.note}"
-                )
-            with print_lock:
-                console.print(
-                    f"  {bench} multinode reference checksum... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}] "
-                    f"[{Colors.DEBUG}]({reference.checksum}, {self.request.threads} OMP threads)[/{Colors.DEBUG}]"
-                )
-            reference_checksum = reference
 
         for node_count in self.request.node_counts:
             if node_count > 1 and bench in multinode_disabled:
@@ -698,12 +522,6 @@ class SlurmBatchExecutor:
                         cflags=self.request.cflags or "",
                         build_output_dir=build_node_dir,
                     )
-                runtime_lib_dir = _copy_arts_runtime_snapshot(
-                    carts_dir=self.deps.get_carts_dir(),
-                    build_node_dir=build_node_dir,
-                    expected_protocol=expected_protocol,
-                    source_runtime_lib_dir=runtime_snapshot_lib_dir,
-                )
                 results.append(
                     (
                         (bench, node_count),
@@ -711,7 +529,6 @@ class SlurmBatchExecutor:
                             dst_arts,
                             dst_omp if dst_omp and dst_omp.exists() else None,
                             build_arts_cfg,
-                            runtime_lib_dir,
                         ),
                     )
                 )
@@ -774,33 +591,19 @@ class SlurmBatchExecutor:
                 console.print(
                     f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
                 )
-            runtime_lib_dir = _copy_arts_runtime_snapshot(
-                carts_dir=self.deps.get_carts_dir(),
-                build_node_dir=build_node_dir,
-                expected_protocol=expected_protocol,
-                source_runtime_lib_dir=runtime_snapshot_lib_dir,
-            )
             results.append(
                 (
                     (bench, node_count),
-                    (dst_arts, dst_omp, build_arts_cfg, runtime_lib_dir),
+                    (dst_arts, dst_omp, build_arts_cfg),
                 )
             )
 
-        return results, reference_checksum
+        return results
 
     def _build_benchmarks(
         self,
         am: ArtifactManager,
-        runtime_snapshot_lib_dir: Path,
-    ) -> Tuple[
-        Dict[Tuple[str, int], BuildArtifacts],
-        Dict[str, ReferenceChecksum],
-    ]:
-        # Multinode setup runs an OpenMP reference with self.request.threads for
-        # each benchmark. Running many 64-thread references concurrently
-        # oversubscribes the login/build host and turns the benchmark timeout
-        # into a scheduler artifact, so cap the prebuild pool accordingly.
+    ) -> Dict[Tuple[str, int], BuildArtifacts]:
         num_workers = compute_prebuild_worker_count(
             os.cpu_count(),
             self.request.threads,
@@ -809,7 +612,6 @@ class SlurmBatchExecutor:
         print_step(f"Building benchmarks per node count ({num_workers} workers)", 1, 5)
 
         build_results: Dict[Tuple[str, int], BuildArtifacts] = {}
-        reference_checksums: Dict[str, ReferenceChecksum] = {}
         print_lock = threading.Lock()
         multinode_disabled = find_multinode_disabled_benchmarks(
             self.host,
@@ -827,33 +629,6 @@ class SlurmBatchExecutor:
             src_arts, src_omp = self.host.get_executable_paths(bench_path)
             results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
             include_openmp = self.request.variant != VARIANT_ARTS
-
-            needs_multinode_reference = any(
-                node_count > 1 and bench not in multinode_disabled
-                for node_count in self.request.node_counts
-            ) and include_openmp
-            if needs_multinode_reference:
-                reference_timeout = self.deps.parse_time_limit_seconds(
-                    self.request.time_limit
-                )
-                reference_timeout = min(reference_timeout, self.request.timeout)
-                reference = self.host.ensure_omp_reference(
-                    bench,
-                    self.request.size,
-                    self.request.cflags or "",
-                    self.request.threads,
-                    timeout=reference_timeout,
-                )
-                if reference.status != Status.PASS or reference.checksum is None:
-                    raise RuntimeError(
-                        f"Failed to establish OpenMP reference for {bench}: {reference.note}"
-                    )
-                with print_lock:
-                    console.print(
-                        f"  {bench} multinode reference checksum... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}] "
-                        f"[{Colors.DEBUG}]({reference.checksum}, {self.request.threads} OMP threads)[/{Colors.DEBUG}]"
-                    )
-                reference_checksums[bench] = reference
 
             for node_count in self.request.node_counts:
                 if node_count > 1 and bench in multinode_disabled:
@@ -900,12 +675,6 @@ class SlurmBatchExecutor:
                             cflags=self.request.cflags or "",
                             build_output_dir=build_node_dir,
                         )
-                    runtime_lib_dir = _copy_arts_runtime_snapshot(
-                        carts_dir=self.deps.get_carts_dir(),
-                        build_node_dir=build_node_dir,
-                        expected_protocol=expected_protocol,
-                        source_runtime_lib_dir=runtime_snapshot_lib_dir,
-                    )
                     results.append(
                         (
                             (bench, node_count),
@@ -913,7 +682,6 @@ class SlurmBatchExecutor:
                                 dst_arts,
                                 dst_omp if dst_omp and dst_omp.exists() else None,
                                 build_arts_cfg,
-                                runtime_lib_dir,
                             ),
                         )
                     )
@@ -976,16 +744,10 @@ class SlurmBatchExecutor:
                     console.print(
                         f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
                     )
-                runtime_lib_dir = _copy_arts_runtime_snapshot(
-                    carts_dir=self.deps.get_carts_dir(),
-                    build_node_dir=build_node_dir,
-                    expected_protocol=expected_protocol,
-                    source_runtime_lib_dir=runtime_snapshot_lib_dir,
-                )
                 results.append(
                     (
                         (bench, node_count),
-                        (dst_arts, dst_omp, build_arts_cfg, runtime_lib_dir),
+                        (dst_arts, dst_omp, build_arts_cfg),
                     )
                 )
             return results
@@ -999,7 +761,7 @@ class SlurmBatchExecutor:
                 for key, value in future.result():
                     build_results[key] = value
 
-        return build_results, reference_checksums
+        return build_results
 
     def _generate_job_scripts(
         self,
@@ -1007,7 +769,7 @@ class SlurmBatchExecutor:
         am: ArtifactManager,
         scripts_dir: Path,
         build_results: Dict[Tuple[str, int], BuildArtifacts],
-        reference_checksums: Dict[str, ReferenceChecksum],
+        runtime_library_dirs: Sequence[Path],
         seen_run_dirs: Optional[set[Path]] = None,
         seen_script_paths: Optional[set[Path]] = None,
         emit_header: bool = True,
@@ -1017,7 +779,6 @@ class SlurmBatchExecutor:
         slurm_job_result_script = Path(__file__).parent / "job_result.py"
         job_configs: List[Tuple[slurm_batch.SlurmJobConfig, Path]] = []
         step_token = self.deps.step_name_to_token(self.request.step_name or "default")
-        run_openmp = self.request.variant != VARIANT_ARTS
         if seen_run_dirs is None:
             seen_run_dirs = set()
         if seen_script_paths is None:
@@ -1027,12 +788,12 @@ class SlurmBatchExecutor:
             arts_exe,
             omp_exe,
             build_arts_cfg,
-            runtime_lib_dir,
         ) in build_results.items():
             arts_runtime_mode, arts_runtime_mode_source = infer_arts_runtime_mode(
                 arts_exe
             )
             safe_name = bench.replace("/", "_")
+            run_openmp = self.request.variant != VARIANT_ARTS and node_count == 1
             for run_num in range(1, self.request.runs + 1):
                 bench_config = BenchmarkConfig(
                     arts_threads=self.request.threads,
@@ -1065,22 +826,7 @@ class SlurmBatchExecutor:
                     perf_interval=self.request.perf_interval if self.request.perf else None,
                     timeout=self.request.timeout,
                     time_limit=self.request.time_limit,
-                    arts_runtime_lib_dir=runtime_lib_dir,
-                    reference_checksum=(
-                        reference_checksums.get(bench).checksum
-                        if node_count > 1 and bench in reference_checksums
-                        else None
-                    ),
-                    reference_source=(
-                        reference_checksums.get(bench).source
-                        if node_count > 1 and bench in reference_checksums
-                        else None
-                    ),
-                    reference_threads=(
-                        reference_checksums.get(bench).omp_threads
-                        if node_count > 1 and bench in reference_checksums
-                        else None
-                    ),
+                    runtime_library_dirs=list(runtime_library_dirs),
                     arts_runtime_mode=arts_runtime_mode,
                     arts_runtime_mode_source=arts_runtime_mode_source,
                 )
@@ -1107,7 +853,7 @@ class SlurmBatchExecutor:
                     size=self.request.size,
                     threads=self.request.threads,
                     timeout_seconds=self.request.timeout,
-                    arts_runtime_lib_dir=runtime_lib_dir,
+                    runtime_library_dirs=list(runtime_library_dirs),
                     gdb=self.request.gdb,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval,
@@ -1162,7 +908,7 @@ class SlurmBatchExecutor:
         scripts_dir: Path,
         experiment_dir: Path,
         slurm_start_time: float,
-        runtime_snapshot_lib_dir: Path,
+        runtime_library_dirs: Sequence[Path],
     ) -> None:
         num_workers = compute_prebuild_worker_count(
             os.cpu_count(),
@@ -1190,7 +936,6 @@ class SlurmBatchExecutor:
         existing_job_statuses = load_existing_job_statuses(manifest_file)
         current_job_statuses: Dict[str, SlurmJobStatus] = {}
         submission_failures: List[SubmissionFailure] = []
-        reference_checksums: Dict[str, ReferenceChecksum] = {}
         seen_run_dirs: set[Path] = set()
         seen_script_paths: set[Path] = set()
         print_lock = threading.Lock()
@@ -1273,21 +1018,18 @@ class SlurmBatchExecutor:
                     bench=bench,
                     multinode_disabled=multinode_disabled,
                     print_lock=print_lock,
-                    runtime_snapshot_lib_dir=runtime_snapshot_lib_dir,
                 ): bench
                 for bench in self.request.bench_list
             }
             for future in as_completed(futures):
                 bench = futures[future]
-                build_records, reference = future.result()
-                if reference is not None:
-                    reference_checksums[bench] = reference
+                build_records = future.result()
                 build_results = {key: value for key, value in build_records}
                 job_configs = self._generate_job_scripts(
                     am=am,
                     scripts_dir=scripts_dir,
                     build_results=build_results,
-                    reference_checksums=reference_checksums,
+                    runtime_library_dirs=runtime_library_dirs,
                     seen_run_dirs=seen_run_dirs,
                     seen_script_paths=seen_script_paths,
                     emit_header=False,

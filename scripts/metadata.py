@@ -14,20 +14,10 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from carts_paths import active_install_dir, get_carts_dir
 from models import ParallelTaskTiming
 
 logger = logging.getLogger(__name__)
-
-
-def _get_carts_dir() -> Path:
-    """Get the CARTS root directory (local helper to avoid circular imports)."""
-    script_dir = Path(__file__).parent.resolve()
-    carts_dir = script_dir.parent.parent.parent
-    if not (carts_dir / "tools" / "carts").exists():
-        env_dir = os.environ.get("CARTS_DIR")
-        if env_dir:
-            carts_dir = Path(env_dir)
-    return carts_dir
 
 
 def get_git_hash(repo_path: Path) -> Optional[str]:
@@ -49,33 +39,26 @@ def get_git_hash(repo_path: Path) -> Optional[str]:
 def get_compiler_version() -> Dict[str, Optional[str]]:
     """Get compiler version information.
 
-    Prioritizes CARTS-installed LLVM/clang over system compilers,
-    since CARTS builds LLVM from source.
+    Reports the CARTS-installed LLVM/clang selected by the active install root.
     """
     compilers = {}
-    carts_dir = _get_carts_dir()
+    carts_dir = get_carts_dir()
 
-    # Try CARTS-installed LLVM clang first (built from source)
-    carts_clang = carts_dir / ".install" / "llvm" / "bin" / "clang"
-    clang_paths = [str(carts_clang), "clang"]
+    carts_clang = active_install_dir(carts_dir) / "llvm" / "bin" / "clang"
 
-    for clang_path in clang_paths:
+    if carts_clang.is_file():
         try:
             result = subprocess.run(
-                [clang_path, "--version"],
+                [str(carts_clang), "--version"],
                 capture_output=True,
                 text=True,
             )
             if result.returncode == 0:
                 first_line = result.stdout.split('\n')[0]
                 compilers["clang"] = first_line
-                # Record which clang was found
-                if clang_path != "clang":
-                    compilers["clang_path"] = clang_path
-                break
+                compilers["clang_path"] = str(carts_clang)
         except Exception:
-            logger.debug("Failed to get clang version from %s", clang_path, exc_info=True)
-            continue
+            logger.debug("Failed to get clang version from %s", carts_clang, exc_info=True)
 
     # Try gcc
     try:
