@@ -3,6 +3,9 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from io import StringIO
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 
@@ -13,7 +16,13 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from arts_config import parse_arts_cfg  # noqa: E402
+from arts_config import (  # noqa: E402
+    KEY_PROTOCOL,
+    PROTOCOL_RDMA,
+    PROTOCOL_TCP,
+    compile_args_for_node_count,
+    parse_arts_cfg,
+)
 from execution import (  # noqa: E402
     BenchmarkExecutionContext,
     BenchmarkProcessRunner,
@@ -21,7 +30,8 @@ from execution import (  # noqa: E402
 )
 from models import BenchmarkConfig, BuildResult, RunResult, Status  # noqa: E402
 from pipeline import ConfigExecutionExecutor, ConfigExecutionPlan, ExecutionHooks  # noqa: E402
-from runner import generate_arts_config  # noqa: E402
+from rich.console import Console  # noqa: E402
+from runner import BenchmarkRunner, generate_arts_config  # noqa: E402
 
 
 class _RunOnlyHost:
@@ -136,6 +146,106 @@ class BenchmarkPipelineTest(unittest.TestCase):
                 self.assertEqual(parsed["master_node"], "localhost:34739")
             finally:
                 generated.unlink(missing_ok=True)
+
+    def test_local_generated_config_sets_protocol_from_rdma_flag_for_multinode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "arts.cfg"
+            template.write_text(
+                "\n".join(
+                    [
+                        "[ARTS]",
+                        "worker_threads=1",
+                        "launcher=local",
+                        "node_count=1",
+                        f"{KEY_PROTOCOL}={PROTOCOL_TCP}",
+                    ]
+                )
+                + "\n"
+            )
+
+            rdma_cfg = generate_arts_config(
+                template,
+                threads=4,
+                launcher="local",
+                nodes_override=2,
+                benchmark_name="unit/protocol",
+                rdma=True,
+            )
+            tcp_cfg = generate_arts_config(
+                template,
+                threads=4,
+                launcher="local",
+                nodes_override=2,
+                benchmark_name="unit/protocol",
+                rdma=False,
+            )
+            single_cfg = generate_arts_config(
+                template,
+                threads=4,
+                launcher="local",
+                nodes_override=1,
+                benchmark_name="unit/protocol",
+                rdma=True,
+            )
+            try:
+                self.assertNotEqual(rdma_cfg, tcp_cfg)
+                self.assertEqual(parse_arts_cfg(rdma_cfg)[KEY_PROTOCOL], PROTOCOL_RDMA)
+                self.assertEqual(parse_arts_cfg(tcp_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
+                self.assertEqual(parse_arts_cfg(single_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
+            finally:
+                rdma_cfg.unlink(missing_ok=True)
+                tcp_cfg.unlink(missing_ok=True)
+                single_cfg.unlink(missing_ok=True)
+
+    def test_single_node_compile_args_strip_distributed_db(self) -> None:
+        self.assertIsNone(compile_args_for_node_count("--distributed-db", 1))
+        self.assertEqual(
+            compile_args_for_node_count("--distributed-db --foo=bar", 1),
+            "--foo=bar",
+        )
+        self.assertEqual(
+            compile_args_for_node_count("--distributed-db --foo=bar", 2),
+            "--distributed-db --foo=bar",
+        )
+
+    def test_size_build_passes_user_cflags_as_extra_cflags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench = root / "suite" / "unit"
+            bench.mkdir(parents=True)
+            (bench / "Makefile").write_text("EXAMPLE_NAME := unit\n")
+            cfg = root / "arts.cfg"
+            cfg.write_text("[ARTS]\nlauncher=local\nnode_count=1\n")
+            build_dir = root / "artifacts"
+            observed_cmd: list[str] = []
+
+            def fake_run(cmd, **kwargs):
+                del kwargs
+                observed_cmd[:] = list(cmd)
+                for token in cmd:
+                    if token.startswith("ARTS_BINARY="):
+                        exe = Path(token.split("=", 1)[1])
+                        exe.write_text("#!/bin/sh\n")
+                        exe.chmod(0o755)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch("runner.get_carts_dir", return_value=REPO_ROOT):
+                runner = BenchmarkRunner(Console(file=StringIO()))
+            runner.benchmarks_dir = root
+            with mock.patch("runner.subprocess.run", side_effect=fake_run), \
+                 mock.patch("runner._validate_embedded_arts_cfg", return_value=None):
+                result = runner.build_benchmark(
+                    "suite/unit",
+                    "extralarge",
+                    arts_config=cfg,
+                    cflags="-DNREPS=1",
+                    compile_args="--distributed-db",
+                    build_output_dir=build_dir,
+                )
+
+            self.assertEqual(result.status, Status.PASS)
+            self.assertIn("EXTRA_CFLAGS=-DNREPS=1", observed_cmd)
+            self.assertNotIn("CFLAGS=-DNREPS=1", observed_cmd)
 
 
 if __name__ == "__main__":

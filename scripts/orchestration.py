@@ -87,6 +87,7 @@ class SlurmStepExecutionRequest:
     max_jobs: int
     variant: Optional[str] = None  # None=both, "arts", "openmp"
     cpu_pinning: str = "default"
+    dry_run: bool = False
 
 
 class StepRebuildCallback(Protocol):
@@ -272,11 +273,7 @@ class StepResolver:
             )
             else defaults.debug
         )
-        should_rebuild_arts = (
-            step_def.profile is not None
-            or step_debug > 0
-            or step_def.rdma
-        )
+        should_rebuild_arts = step_def.profile is not None or step_debug > 0
         step_rdma = (
             step_def.rdma
             if self._uses_step_override(
@@ -284,8 +281,6 @@ class StepResolver:
             )
             else defaults.rdma
         )
-        should_rebuild_arts = should_rebuild_arts or step_rdma
-
         step_threads_spec = (
             step_def.threads
             if self._uses_step_override(

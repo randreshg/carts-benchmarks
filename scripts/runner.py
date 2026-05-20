@@ -54,10 +54,14 @@ from arts_config import (
     KEY_MASTER_NODE,
     KEY_NODE_COUNT,
     KEY_NODES,
+    KEY_PROTOCOL,
     KEY_WORKER_THREADS,
+    PROTOCOL_TCP,
+    compile_args_for_node_count,
     get_cfg_int as get_arts_cfg_int,
     get_cfg_str as get_arts_cfg_str,
     get_cfg_nodes as get_arts_cfg_nodes,
+    protocol_for_node_count,
     protocol_for_rdma,
     upsert_cfg_value as _upsert_arts_cfg_value,
     extract_embedded_cfg as _extract_embedded_arts_cfg,
@@ -575,6 +579,7 @@ def generate_arts_config(
     launcher: str = "ssh",
     nodes_override: Optional[int] = None,
     benchmark_name: Optional[str] = None,
+    rdma: bool = True,
 ) -> Path:
     """Generate temporary arts.cfg with specific configuration from a template.
 
@@ -598,9 +603,13 @@ def generate_arts_config(
         raise ValueError(f"Config template not found: {base_path}")
 
     content = base_path.read_text()
+    node_count = nodes_override if nodes_override else get_arts_cfg_int(
+        base_path, KEY_NODE_COUNT) or 1
+    protocol = protocol_for_node_count(rdma, node_count)
 
     # CLI --threads maps to ARTS worker_threads in the v2 runtime schema.
     content = _upsert_arts_cfg_value(content, KEY_WORKER_THREADS, threads)
+    content = _upsert_arts_cfg_value(content, KEY_PROTOCOL, protocol)
 
     # Handle node override.
     if nodes_override is not None:
@@ -630,10 +639,6 @@ def generate_arts_config(
     if counter_dir:
         content = _upsert_arts_cfg_value(content, KEY_COUNTER_FOLDER, counter_dir)
 
-    # Determine node count for filename
-    node_count = nodes_override if nodes_override else get_arts_cfg_int(
-        base_path, KEY_NODE_COUNT) or 1
-
     # Write to shared directory (NOT /tmp which is node-local in multi-node setups)
     # The carts-benchmarks directory is shared across all nodes via mounted volume.
     # Filename encodes the effective combination so configs are not overwritten
@@ -648,9 +653,10 @@ def generate_arts_config(
     )
     bench_tag = _sanitize_config_token(benchmark_name or "global")
     launcher_tag = _sanitize_config_token(launcher)
+    protocol_tag = _sanitize_config_token(protocol)
     temp_path = (
         generated_configs_dir
-        / f"arts_{bench_tag}_{launcher_tag}_{threads}t_{node_count}n_{source_hash}_{counter_tag}.cfg"
+        / f"arts_{bench_tag}_{launcher_tag}_{protocol_tag}_{threads}t_{node_count}n_{source_hash}_{counter_tag}.cfg"
     )
     temp_path.write_text(content)
     return temp_path
@@ -673,6 +679,37 @@ def _resolve_effective_arts_config(
             return candidate.resolve()
 
     return DEFAULT_ARTS_CONFIG.resolve()
+
+
+def _transport_display(rdma: bool, node_counts: Optional[List[int]]) -> str:
+    """Return a concise transport label for a possibly mixed node sweep."""
+    counts = node_counts or [1]
+    has_single = any(count <= 1 for count in counts)
+    has_multi = any(count > 1 for count in counts)
+    if has_single and has_multi:
+        multi_protocol = protocol_for_node_count(rdma, max(counts))
+        return f"{PROTOCOL_TCP}@1n,{multi_protocol}@multi"
+    return protocol_for_node_count(rdma, max(counts))
+
+
+def _compile_args_display(
+    compile_args: Optional[str],
+    node_counts: Optional[List[int]],
+) -> Optional[str]:
+    """Return CLI display text after applying node-count compile-arg policy."""
+    if not compile_args:
+        return None
+    counts = node_counts or [1]
+    effective = {
+        value
+        for count in counts
+        if (value := compile_args_for_node_count(compile_args, count))
+    }
+    if not effective:
+        return None
+    if len(effective) == 1:
+        return next(iter(effective))
+    return "node-specific"
 
 
 
@@ -1157,7 +1194,7 @@ class BenchmarkRunner:
                 f"OMP_BINARY={omp_output_path}",
             ]
             if cflags:
-                cmd.append(f"CFLAGS={cflags}")
+                cmd.append(f"EXTRA_CFLAGS={cflags}")
         else:
             # Build ARTS variant (full pipeline)
             # Use granular size-arts target for ARTS-only builds
@@ -1170,7 +1207,7 @@ class BenchmarkRunner:
                 f"ARTS_BINARY={arts_output_path}",
             ]
             if cflags:
-                cmd.append(f"CFLAGS={cflags}")
+                cmd.append(f"EXTRA_CFLAGS={cflags}")
             # Keep compiler intermediates out of source benchmark directories.
             env_overrides["CARTS_COMPILE_WORKDIR"] = str(output_root)
 
@@ -1515,6 +1552,7 @@ class BenchmarkRunner:
         report_speedup: bool,
         env_overrides: Dict[str, str],
         persisted_env_overrides: Optional[Dict[str, str]] = None,
+        arts_transport: Optional[str] = None,
         variant: Optional[str] = None,
     ) -> ConfigExecutionPlan:
         """Create the shared execution plan for one resolved benchmark config."""
@@ -1536,6 +1574,7 @@ class BenchmarkRunner:
                 if persisted_env_overrides is not None
                 else None
             ),
+            arts_transport=arts_transport,
             variant=variant,
         )
 
@@ -1558,6 +1597,7 @@ class BenchmarkRunner:
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
         variant: Optional[str] = None,
+        rdma: bool = True,
     ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
@@ -1606,6 +1646,11 @@ class BenchmarkRunner:
             for threads_or_none in threads_list:
                 threads = threads_or_none if threads_or_none is not None else base_threads
                 actual_omp_threads = omp_threads if omp_threads else threads
+                effective_compile_args = compile_args_for_node_count(
+                    compile_args,
+                    desired_nodes,
+                )
+                effective_protocol = protocol_for_node_count(rdma, desired_nodes)
                 config = BenchmarkConfig(
                     arts_threads=threads,
                     arts_nodes=desired_nodes,
@@ -1616,7 +1661,7 @@ class BenchmarkRunner:
                 # Generate arts.cfg with thread count, launcher, and node count.
                 arts_cfg = generate_arts_config(
                     effective_config, threads, None,
-                    desired_launcher, desired_nodes, benchmark_name=name
+                    desired_launcher, desired_nodes, benchmark_name=name, rdma=rdma
                 )
 
                 # Compute effective cflags (may include weak scaling size overrides)
@@ -1656,7 +1701,7 @@ class BenchmarkRunner:
                     execution=execution,
                     timeout=timeout,
                     run_numbers=tuple(range(1, runs + 1)),
-                    compile_args=compile_args,
+                    compile_args=effective_compile_args,
                     perf_enabled=perf_enabled,
                     perf_interval=perf_interval,
                     counter_dir=counter_dir,
@@ -1666,6 +1711,7 @@ class BenchmarkRunner:
                     report_speedup=(desired_nodes == 1),
                     env_overrides=env,
                     persisted_env_overrides=env,
+                    arts_transport=effective_protocol,
                     variant=variant,
                 )
                 results.extend(ConfigExecutionExecutor(self, plan).execute())
@@ -1988,6 +2034,7 @@ class BenchmarkRunner:
         perf_dir: Optional[Path] = None,
         cflags: str = "",
         variant: Optional[str] = None,
+        rdma: bool = True,
     ) -> BenchmarkResult:
         """Run complete pipeline for a single benchmark.
 
@@ -2005,10 +2052,16 @@ class BenchmarkRunner:
         base_threads = get_arts_cfg_int(effective_config, KEY_WORKER_THREADS) or 1
         base_nodes = get_arts_cfg_int(effective_config, KEY_NODE_COUNT) or 1
         base_launcher = get_arts_cfg_str(effective_config, KEY_LAUNCHER) or "ssh"
+        base_protocol = get_arts_cfg_str(effective_config, KEY_PROTOCOL)
 
         desired_threads = threads_override if threads_override is not None else base_threads
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
+        expected_protocol = protocol_for_node_count(rdma, desired_nodes)
+        effective_compile_args = compile_args_for_node_count(
+            compile_args,
+            desired_nodes,
+        )
 
         # Compute config early (needed by artifact_manager)
         actual_omp_threads = (
@@ -2043,6 +2096,8 @@ class BenchmarkRunner:
             need_generated = True
         if launcher_override is not None and launcher_override != base_launcher:
             need_generated = True
+        if base_protocol != expected_protocol:
+            need_generated = True
         effective_arts_cfg: Path
         if need_generated:
             effective_arts_cfg = generate_arts_config(
@@ -2052,6 +2107,7 @@ class BenchmarkRunner:
                 desired_launcher,
                 nodes_override,
                 benchmark_name=name,
+                rdma=rdma,
             )
         else:
             effective_arts_cfg = effective_config
@@ -2083,7 +2139,7 @@ class BenchmarkRunner:
             execution=execution,
             timeout=timeout,
             run_numbers=(run_number,),
-            compile_args=compile_args,
+            compile_args=effective_compile_args,
             perf_enabled=perf_enabled,
             perf_interval=perf_interval,
             counter_dir=counter_dir,
@@ -2092,6 +2148,7 @@ class BenchmarkRunner:
             sweep_log_names=False,
             report_speedup=(desired_nodes == 1),
             env_overrides=self._create_common_env(),
+            arts_transport=expected_protocol,
             variant=variant,
         )
         hooks = ExecutionHooks(
@@ -2119,6 +2176,7 @@ class BenchmarkRunner:
         perf_dir: Optional[Path] = None,
         cflags: str = "",
         variant: Optional[str] = None,
+        rdma: bool = True,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2148,6 +2206,7 @@ class BenchmarkRunner:
                         perf_dir=perf_dir,
                         cflags=cflags,
                         variant=variant,
+                        rdma=rdma,
                     )
                     results_list.append(result)
             self.results = results_list
@@ -2204,6 +2263,7 @@ class BenchmarkRunner:
                             perf_dir=perf_dir,
                             cflags=cflags,
                             variant=variant,
+                            rdma=rdma,
                         )
                     except Exception as e:
                         # Log error and continue to next benchmark
@@ -4055,7 +4115,7 @@ def _make_experiment_step(
         ),
         benchmarks=_parse_step_benchmarks(normalized.get("benchmarks")),
         profile=_resolve_path(normalized.get("profile"), "profile"),
-        rdma=_parse_bool_flag(normalized.get("rdma", False)),
+        rdma=_parse_bool_flag(normalized.get("rdma", True)),
         debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
         perf=_parse_bool_flag(normalized.get("perf", False)),
@@ -4132,7 +4192,7 @@ def _rebuild_arts(
     console: Console,
     debug: int = 0,
     profile: Path = PROFILES_DIR / "profile-none.cfg",
-    rdma: bool = False,
+    rdma: bool = True,
 ) -> None:
     """Rebuild ARTS runtime/compiler with requested instrumentation profile."""
     if not profile.exists():
@@ -4152,15 +4212,13 @@ def _rebuild_arts(
         f"--profile={profile}",
         f"--debug={debug}",
     ]
-    if rdma:
-        cmd.append("--rdma")
+    cmd.append("--rdma" if rdma else "--no-rdma")
 
     details: List[str] = []
     if debug > 0:
         details.append(f"debug={debug}")
     details.append(f"profile={profile}")
-    if rdma:
-        details.append("rdma=on")
+    details.append(f"transport={protocol_for_rdma(rdma)}")
 
     detail_text = ", ".join(details)
     print_warning(f"Rebuilding ARTS ({detail_text})")
@@ -4393,6 +4451,7 @@ def _run_step(
     cflags: Optional[str],
     quiet: bool,
     variant: Optional[str] = None,
+    rdma: bool = True,
 ) -> List[BenchmarkResult]:
     """Execute one resolved step using existing run dispatch rules."""
     has_thread_sweep = bool(threads_list and len(threads_list) > 1)
@@ -4427,6 +4486,7 @@ def _run_step(
             perf_enabled=perf,
             perf_interval=perf_interval,
             variant=variant,
+            rdma=rdma,
         )
 
     if len(bench_list) > 1 and has_sweep:
@@ -4468,6 +4528,7 @@ def _run_step(
                     run_timestamp=run_timestamp,
                     cflags=cflags or "",
                     variant=variant,
+                    rdma=rdma,
                 )
                 results.extend(config_results)
         return results
@@ -4488,6 +4549,7 @@ def _run_step(
         run_timestamp=run_timestamp,
         cflags=cflags or "",
         variant=variant,
+        rdma=rdma,
     )
 
 
@@ -4513,10 +4575,11 @@ def _run_step_slurm(
     step_name: Optional[str] = None,
     max_jobs: int = 0,
     report_steps: Optional[List[ExperimentStep]] = None,
-    rdma: bool = False,
+    rdma: bool = True,
     profile: Optional[Path] = None,
     variant: Optional[str] = None,
     cpu_pinning: str = CPU_PINNING_DEFAULT,
+    dry_run: bool = False,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
     if not node_counts:
@@ -4539,7 +4602,7 @@ def _run_step_slurm(
             threads=int(slurm_threads) if slurm_threads is not None else None,
             output_dir=results_dir,
             suite=None,
-            dry_run=False,
+            dry_run=dry_run,
             no_build=False,
             verbose=verbose,
             cflags=cflags,
@@ -4562,14 +4625,18 @@ def _run_step_slurm(
 
 
 def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
-    """Rebuild ARTS when a resolved step requests instrumentation changes."""
+    """Rebuild ARTS when a step needs a different runtime build."""
+    node_counts = step_config.node_counts or [1]
+    uses_multinode = any(count > 1 for count in node_counts)
+    requested_rdma = uses_multinode and step_config.rdma
     runtime_missing = not arts_runtime_is_installed()
     runtime_rdma = arts_runtime_uses_rdma()
-    transport_unknown = runtime_rdma is None
+    transport_unknown = uses_multinode and runtime_rdma is None
     transport_mismatch = (
-        not runtime_missing
+        uses_multinode
+        and not runtime_missing
         and runtime_rdma is not None
-        and runtime_rdma != step_config.rdma
+        and runtime_rdma != requested_rdma
     )
     if (
         not step_config.should_rebuild_arts
@@ -4584,7 +4651,7 @@ def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
         print_warning("ARTS runtime transport is unknown; forcing rebuild before benchmark step")
     elif transport_mismatch:
         current = protocol_for_rdma(runtime_rdma)
-        requested = protocol_for_rdma(step_config.rdma)
+        requested = protocol_for_rdma(requested_rdma)
         print_warning(
             f"ARTS runtime transport is {current}; rebuilding for requested {requested}"
         )
@@ -4592,7 +4659,7 @@ def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
         console,
         debug=step_config.debug,
         profile=step_config.profile_path,
-        rdma=step_config.rdma,
+        rdma=requested_rdma,
     )
 
 
@@ -4622,6 +4689,7 @@ def _run_local_resolved_step(
         cflags=step_config.cflags,
         quiet=request.quiet,
         variant=request.variant,
+        rdma=step_config.rdma,
     )
 
 
@@ -4658,6 +4726,7 @@ def _run_slurm_resolved_step(
         profile=step_config.requested_profile_path,
         variant=request.variant,
         cpu_pinning=request.cpu_pinning,
+        dry_run=request.dry_run,
     )
 
 
@@ -4733,15 +4802,15 @@ def run(
     cflags: Optional[str] = typer.Option(
         None, "--cflags", help="Additional CFLAGS: '-DNI=500 -DNJ=500'"),
     compile_args: Optional[str] = typer.Option(
-        None, "--compile-args", help="Extra carts compile args (e.g., '--distributed-db')"),
+        None, "--compile-args", help="Extra carts compile args (e.g., '--distributed-db'; stripped from single-node benchmark rows)"),
     debug_level: int = typer.Option(
         0, "--debug", "-d", help="Debug level: 0=off, 1=commands, 2=verbose console output"),
     profile: Optional[Path] = typer.Option(
         None, "--profile",
         help="Custom counter profile file. Triggers ARTS rebuild with this configuration."),
     rdma: bool = typer.Option(
-        False, "--rdma",
-        help="Rebuild/use ARTS with RDMA RSockets transport for all steps."),
+        True, "--rdma/--no-rdma",
+        help="Use RDMA RSockets transport for multinode configs; single-node configs use TCP."),
     cpu_pinning: str = typer.Option(
         CPU_PINNING_DEFAULT, "--cpu-pinning",
         help="CPU pinning mode for SLURM jobs: default, off, slurm, runtime, both"),
@@ -4785,6 +4854,9 @@ def run(
              "0 = unlimited (submit all at once). "
              "When set, new jobs are submitted as earlier ones finish. "
              "Only with --slurm"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Generate SLURM scripts and run metadata without submitting jobs. Only with --slurm."),
 ):
     """Run benchmarks with verification and timing."""
     try:
@@ -4796,6 +4868,9 @@ def run(
 
     if openmp and arts:
         print_error("Cannot use --openmp and --arts together.")
+        raise typer.Exit(2)
+    if dry_run and not slurm:
+        print_error("--dry-run is only supported with --slurm.")
         raise typer.Exit(2)
     variant: Optional[str] = VARIANT_OPENMP if openmp else (VARIANT_ARTS if arts else None)
 
@@ -4960,6 +5035,7 @@ def run(
                     max_jobs=max_jobs,
                     variant=variant,
                     cpu_pinning=cpu_pinning,
+                    dry_run=dry_run,
                 ),
             )
         except ValueError as e:
@@ -4987,14 +5063,14 @@ def run(
             config_items.append(f"runs={runs}")
         if cflags:
             config_items.append(f"cflags={cflags}")
-        if compile_args:
-            config_items.append(f"compile-args={compile_args}")
+        compile_args_text = _compile_args_display(compile_args, base_node_counts)
+        if compile_args_text:
+            config_items.append(f"compile-args={compile_args_text}")
         if debug_level > 0:
             config_items.append(f"debug={debug_level}")
         if profile:
             config_items.append(f"profile={profile.name}")
-        if rdma:
-            config_items.append("rdma=on")
+        config_items.append(f"transport={_transport_display(rdma, base_node_counts)}")
         if cpu_pinning != CPU_PINNING_DEFAULT:
             config_items.append(f"cpu-pinning={cpu_pinning}")
         if perf:
@@ -5776,7 +5852,7 @@ def _execute_slurm_batch(
     artifact_manager: Optional[ArtifactManager] = None,
     step_name: Optional[str] = None,
     report_steps: Optional[List[ExperimentStep]] = None,
-    rdma: bool = False,
+    rdma: bool = True,
     variant: Optional[str] = None,
 ):
     """Submit benchmarks as SLURM batch jobs.
@@ -5810,7 +5886,7 @@ def _execute_slurm_batch(
     size = parse_size(size, "--size")
     cpu_pinning = normalize_cpu_pinning(cpu_pinning)
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
-    require_slurm_commands(dry_run)
+    require_slurm_commands(dry_run, probe_submission=False)
     resolved_time_limit = resolve_slurm_time_limit(timeout, time_limit)
 
     # Parse node counts from --nodes parameter
@@ -5838,6 +5914,7 @@ def _execute_slurm_batch(
     subtitle_parts = [
         f"Config: {config_display}",
         f"Nodes: {nodes_display}, Threads: {threads}",
+        f"Transport: {_transport_display(rdma, node_counts)}",
         f"Runs per benchmark: {runs}, Size: {size}",
         f"Timeout: {timeout}s (wall {resolved_time_limit})",
     ]

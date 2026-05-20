@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -62,7 +63,7 @@ from arts_config import (
     KEY_WORKER_THREADS,
     PROTOCOL_RDMA,
     parse_arts_cfg,
-    protocol_for_rdma,
+    protocol_for_node_count,
     upsert_cfg_value as _set_cfg_key,
     comment_cfg_key as _comment_cfg_key,
 )
@@ -562,13 +563,32 @@ def _slurm_cpu_preflight_section(
     if not _env_bool("CARTS_SLURM_CPU_PREFLIGHT", True):
         return '# SLURM CPU visibility preflight disabled by CARTS_SLURM_CPU_PREFLIGHT=0'
 
-    count_script = _count_cpus_script()
-    strict_default = "1" if strict_preflight_default else "0"
     return f"""echo ""
 echo "[SLURM] CPU visibility preflight..."
 echo "[SLURM] Runtime threads: worker={worker_threads} sender={sender_threads} receiver={receiver_threads} total={runtime_thread_count}"
-PREFLIGHT_EXIT=0
-timeout --signal=TERM --kill-after=10s 60s {srun_prefix} bash -lc '{count_script}
+echo "[SLURM] Thread budget: --threads maps to ARTS workers; TCP jobs also need sender/receiver threads and Slurm CPU headroom"
+echo "[SLURM] CPU request: required={required_cpu_count} requested={requested_cpu_count}; pinning cannot fix an undersized allocation"
+echo "[SLURM] CPU visibility preflight runs inside the ARTS srun step"
+"""
+
+
+def _slurm_cpu_preflight_inline_script(
+    *,
+    runtime_command: str,
+    runtime_thread_count: int,
+    required_cpu_count: int,
+    requested_cpu_count: int,
+    worker_threads: int,
+    sender_threads: int,
+    receiver_threads: int,
+    strict_preflight_default: bool,
+) -> str:
+    if not _env_bool("CARTS_SLURM_CPU_PREFLIGHT", True):
+        return f"exec {runtime_command}"
+
+    count_script = _count_cpus_script()
+    strict_default = "1" if strict_preflight_default else "0"
+    return f"""{count_script}
 allowed=$(awk "/Cpus_allowed_list/ {{print \\$2}}" /proc/self/status 2>/dev/null || true)
 visible=$(count_cpulist "${{allowed:-}}")
 nproc_value=$(nproc 2>/dev/null || echo unknown)
@@ -576,16 +596,40 @@ echo "[SLURM preflight] rank=${{SLURM_PROCID:-?}} host=$(hostname) cpus_per_task
 strict_preflight=$(printf "%s" "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-{strict_default}}}" | tr "[:upper:]" "[:lower:]")
 if [ "$strict_preflight" != "0" ] && [ "$strict_preflight" != "false" ] && [ "$strict_preflight" != "no" ] && [ "$strict_preflight" != "off" ] && [ "${{visible:-0}}" -lt {required_cpu_count} ]; then
     echo "[SLURM preflight] ERROR visible CPU count ${{visible:-0}} is below required CPUs {required_cpu_count}" >&2
+    echo "[SLURM preflight] --threads={worker_threads} means {worker_threads} ARTS workers; sender={sender_threads} receiver={receiver_threads} make runtime_required={runtime_thread_count}, and requested CPUs include headroom" >&2
+    echo "[SLURM preflight] Pinning cannot make hidden CPUs visible; use CARTS_SLURM_THREAD_BUDGET=total, reduce CARTS_SLURM_CPU_HEADROOM/CARTS_SLURM_NETWORK_THREADS, or lower --threads" >&2
     exit 66
-fi'
-PREFLIGHT_EXIT=$?
-if [ $PREFLIGHT_EXIT -ne 0 ]; then
-    echo "[SLURM] CPU visibility preflight failed with exit code $PREFLIGHT_EXIT" >&2
-    strict_preflight=$(printf "%s" "${{CARTS_SLURM_STRICT_CPU_PREFLIGHT:-{strict_default}}}" | tr "[:upper:]" "[:lower:]")
-    if [ "$strict_preflight" != "0" ] && [ "$strict_preflight" != "false" ] && [ "$strict_preflight" != "no" ] && [ "$strict_preflight" != "off" ]; then
-        exit $PREFLIGHT_EXIT
-    fi
-fi"""
+fi
+exec {runtime_command}
+"""
+
+
+def _srun_command_with_cpu_preflight(
+    *,
+    srun_prefix: str,
+    runtime_command: str,
+    runtime_thread_count: int,
+    required_cpu_count: int,
+    requested_cpu_count: int,
+    worker_threads: int,
+    sender_threads: int,
+    receiver_threads: int,
+    strict_preflight_default: bool,
+) -> str:
+    if not _env_bool("CARTS_SLURM_CPU_PREFLIGHT", True):
+        return f"{srun_prefix} {runtime_command}"
+
+    inline_script = _slurm_cpu_preflight_inline_script(
+        runtime_command=runtime_command,
+        runtime_thread_count=runtime_thread_count,
+        required_cpu_count=required_cpu_count,
+        requested_cpu_count=requested_cpu_count,
+        worker_threads=worker_threads,
+        sender_threads=sender_threads,
+        receiver_threads=receiver_threads,
+        strict_preflight_default=strict_preflight_default,
+    )
+    return f"{srun_prefix} bash -lc {shlex.quote(inline_script)}"
 
 
 def _runtime_library_section(config: SlurmJobConfig) -> Tuple[str, str]:
@@ -687,10 +731,11 @@ def _rdma_environment_section(config: SlurmJobConfig) -> str:
 export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"
 export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-1}"
 export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-0}"
-export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-4}"
+export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"
+export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"
 export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"
 export ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS="${ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS:-5000}"
-export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-3000}"
+export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-10000}"
 export ARTS_CONNECT_STEADY_BETWEEN_US="${ARTS_CONNECT_STEADY_BETWEEN_US:-1000}"
 export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"
 export ARTS_RDMA_RECEIVE_RPOLL="${ARTS_RDMA_RECEIVE_RPOLL:-0}"
@@ -843,23 +888,33 @@ def generate_sbatch_script(
         strict_preflight_default=strict_preflight_default,
     )
     if config.gdb:
-        srun_command = (
-            f"{srun_prefix} bash -c "
-            f"'{runtime_env_prefix}gdb --batch -ex run -ex \"thread apply all bt\" -ex quit --args {executable_arts_abs}'"
+        runtime_command = (
+            f'{runtime_env_prefix}gdb --batch -ex run '
+            f'-ex "thread apply all bt" -ex quit --args {executable_arts_abs}'
         )
     elif config.perf and perf_dir:
         events = ",".join(PERF_CACHE_EVENTS)
         interval_ms = int(config.perf_interval * 1000)
         # Single quotes: run_dir/perf is baked as absolute path at generation time,
         # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
-        srun_command = (
-            f"{srun_prefix} bash -c "
-            f"'{runtime_env_prefix}perf stat -e {events} -I {interval_ms} -x , "
+        runtime_command = (
+            f"{runtime_env_prefix}perf stat -e {events} -I {interval_ms} -x , "
             f"-o {run_dir}/perf/arts_node_${{SLURM_PROCID}}.csv "
-            f"-- {executable_arts_abs}'"
+            f"-- {executable_arts_abs}"
         )
     else:
-        srun_command = f"{srun_prefix} {runtime_env_prefix}{executable_arts_abs}"
+        runtime_command = f"{runtime_env_prefix}{executable_arts_abs}"
+    srun_command = _srun_command_with_cpu_preflight(
+        srun_prefix=srun_prefix,
+        runtime_command=runtime_command,
+        runtime_thread_count=runtime_thread_count,
+        required_cpu_count=required_cpu_count,
+        requested_cpu_count=cpus_per_task,
+        worker_threads=worker_threads,
+        sender_threads=sender_threads,
+        receiver_threads=receiver_threads,
+        strict_preflight_default=strict_preflight_default,
+    )
 
     arts_section = (
         ARTS_SECTION_TEMPLATE.format(
@@ -926,7 +981,7 @@ def generate_arts_config_for_node(
     node_count: int,
     threads: int,
     *,
-    rdma: bool = False,
+    rdma: bool = True,
     cpu_pinning: str = CPU_PINNING_DEFAULT,
 ) -> Path:
     """Generate a node-specific arts.cfg for compilation (goes in build/ directory).
@@ -953,7 +1008,7 @@ def generate_arts_config_for_node(
     content = _set_cfg_key(content, KEY_COUNTER_FOLDER, str(counter_dir_placeholder))
     content = _set_cfg_key(content, KEY_NODE_COUNT, str(node_count))
     content = _set_cfg_key(content, KEY_LAUNCHER, "slurm")
-    content = _set_cfg_key(content, KEY_PROTOCOL, protocol_for_rdma(rdma))
+    content = _set_cfg_key(content, KEY_PROTOCOL, protocol_for_node_count(rdma, node_count))
     content = _set_cfg_key(content, KEY_COUNTER_CAPTURE_INTERVAL, "10")
     arts_pin = arts_pin_for_pinning(cpu_pinning, node_count)
     if arts_pin is not None:

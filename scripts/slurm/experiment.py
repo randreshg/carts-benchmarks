@@ -27,8 +27,9 @@ from arts_config import (
     KEY_COUNTER_FOLDER,
     KEY_PIN,
     KEY_PROTOCOL,
+    compile_args_for_node_count,
     get_cfg_str,
-    protocol_for_rdma,
+    protocol_for_node_count,
 )
 from formatting import format_summary_line, print_footer
 
@@ -56,6 +57,7 @@ from .models import (
 )
 
 BuildArtifacts = Tuple[Path, Optional[Path], Path]
+BUILD_CONFIG_JSON_FILENAME = "build_config.json"
 
 ARTS_RUNTIME_MODE_TASK = "arts_task_runtime"
 ARTS_RUNTIME_MODE_HOST_OPENMP = "host_openmp_fallback"
@@ -66,6 +68,67 @@ ARTS_RUNTIME_MODE_SOURCE_AMBIGUOUS = "llvm_ir_ambiguous"
 ARTS_EPOCH_SYMBOL = "arts_initialize_and_start_epoch"
 HOST_OPENMP_MARKER_SYMBOL = "carts_benchmarks_mark_host_openmp"
 OMP_DIALECT_TOKEN = "omp."
+
+
+def _sha1_file(path: Path) -> Optional[str]:
+    if not path.exists():
+        return None
+    try:
+        import hashlib
+
+        return hashlib.sha1(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _expected_build_config(
+    *,
+    bench: str,
+    size: str,
+    node_count: int,
+    threads: int,
+    cflags: Optional[str],
+    compile_args: Optional[str],
+    protocol: str,
+    cpu_pinning: str,
+    pin: Optional[str],
+    arts_cfg_path: Path,
+) -> Dict[str, Optional[object]]:
+    return {
+        "benchmark": bench,
+        "size": size,
+        "nodes": node_count,
+        "threads": threads,
+        "cflags": cflags or None,
+        "compile_args": compile_args or None,
+        "protocol": protocol,
+        "cpu_pinning": cpu_pinning,
+        "pin": pin,
+        "arts_cfg_sha1": _sha1_file(arts_cfg_path),
+    }
+
+
+def _build_config_matches(build_node_dir: Path,
+                          expected: Dict[str, Optional[object]]) -> bool:
+    config_path = build_node_dir / BUILD_CONFIG_JSON_FILENAME
+    if not config_path.exists():
+        return False
+    try:
+        cached = json.loads(config_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(cached, dict):
+        return False
+    return all(cached.get(key) == value for key, value in expected.items())
+
+
+def _write_build_config(build_node_dir: Path,
+                        expected: Dict[str, Optional[object]]) -> None:
+    payload = dict(expected)
+    payload["timestamp"] = datetime.now().isoformat()
+    (build_node_dir / BUILD_CONFIG_JSON_FILENAME).write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
 
 
 def infer_arts_runtime_mode(executable_arts: Path) -> Tuple[str, str]:
@@ -184,10 +247,16 @@ def compute_prebuild_worker_count(
     requested_threads: int,
     benchmark_count: int,
 ) -> int:
-    """Choose a build worker count that avoids oversubscribing OpenMP references."""
-    cpus = host_cpus or 1
-    threads = max(1, requested_threads)
-    return min(max(1, cpus // threads), benchmark_count)
+    """Choose a build worker count for the SLURM compile phase.
+
+    The SLURM path only invokes `host.build_benchmark` (pure compile),
+    never `ensure_omp_reference`, so we do not need to gate parallelism
+    on `requested_threads`. Use one worker per benchmark up to the
+    available host CPU count.
+    """
+    del requested_threads  # retained for callers / signature stability
+    cpus = max(1, host_cpus or 1)
+    return max(1, min(cpus, benchmark_count))
 
 
 def load_existing_job_statuses(
@@ -212,17 +281,97 @@ def load_existing_job_statuses(
         return {}
 
 
-def require_slurm_commands(dry_run: bool) -> None:
+def require_slurm_commands(
+    dry_run: bool,
+    probe_submission: bool = True,
+    *,
+    partition: Optional[str] = None,
+    account: Optional[str] = None,
+) -> None:
     """Validate that the required SLURM executables are available."""
     required_slurm_cmds = ["sbatch"]
     if not dry_run:
-        required_slurm_cmds.extend(["srun", "squeue", "sacct", "scontrol", "sinfo"])
+        required_slurm_cmds.extend([
+            "srun",
+            "squeue",
+            "sacct",
+            "scontrol",
+            "sinfo",
+            "scancel",
+        ])
     missing_slurm_cmds = [cmd for cmd in required_slurm_cmds if shutil.which(cmd) is None]
     if missing_slurm_cmds:
         raise ValueError(
             "Missing required SLURM command(s): "
             + ", ".join(missing_slurm_cmds)
             + ". Run this on a SLURM login node or add SLURM tools to PATH."
+        )
+    if not dry_run and probe_submission:
+        _probe_slurm_submission(partition=partition, account=account)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _probe_slurm_submission(
+    *,
+    partition: Optional[str] = None,
+    account: Optional[str] = None,
+) -> None:
+    """Verify that sbatch can create a held job, not just print help.
+
+    Some sites install the SLURM client tools on login nodes even when the
+    controller cannot currently write a submitted script/environment payload.
+    `sbatch --test-only` does not catch that failure mode, so use a held
+    no-op job and cancel it immediately. Set CARTS_SLURM_SUBMIT_PROBE=0 to
+    skip this probe when a site disallows held probe jobs.
+    """
+    if not _env_bool("CARTS_SLURM_SUBMIT_PROBE", True):
+        return
+
+    cmd = [
+        "sbatch",
+        "--hold",
+        "--parsable",
+        "--time=00:01:00",
+        "--job-name=carts_submit_probe",
+        "--wrap=true",
+    ]
+    if partition:
+        cmd.append(f"--partition={partition}")
+    if account:
+        cmd.append(f"--account={account}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        message = (
+            "SLURM commands are available, but sbatch cannot create a held "
+            "probe job. This usually indicates a site/controller submission "
+            "problem, not a CARTS benchmark or generated sbatch-script "
+            "problem. Retry later, contact the cluster administrator, use "
+            "`--dry-run` to generate scripts only, or set "
+            "CARTS_SLURM_SUBMIT_PROBE=0 to skip this preflight if your site "
+            "blocks held probe jobs."
+        )
+        if detail:
+            message += f"\n\nsbatch probe output:\n{detail}"
+        raise ValueError(message)
+
+    job_id = result.stdout.strip().split(";")[0]
+    if not job_id:
+        raise ValueError("SLURM sbatch probe did not return a job id.")
+
+    cancel = subprocess.run(["scancel", job_id], capture_output=True, text=True)
+    if cancel.returncode != 0:
+        detail = (cancel.stderr or cancel.stdout or "").strip()
+        raise ValueError(
+            "SLURM sbatch probe succeeded, but CARTS could not cancel held "
+            f"probe job {job_id}. Cancel it manually before continuing."
+            + (f"\n\nscancel output:\n{detail}" if detail else "")
         )
 
 
@@ -234,7 +383,10 @@ def _run_slurm_query(args: Sequence[str], label: str) -> str:
             capture_output=True,
             text=True,
             check=False,
+            timeout=float(os.environ.get("CARTS_SLURM_QUERY_TIMEOUT", "30")),
         )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"Timed out querying {label}") from exc
     except OSError as exc:
         raise ValueError(f"Failed to run {label}: {exc}") from exc
 
@@ -311,14 +463,39 @@ def validate_requested_node_counts(
     if not node_counts:
         return
 
-    effective_partition = get_effective_slurm_partition(partition)
+    strict = _env_bool("CARTS_SLURM_NODE_COUNT_VALIDATE_STRICT", False)
+    try:
+        effective_partition = get_effective_slurm_partition(partition)
+    except ValueError as exc:
+        if strict:
+            raise
+        print_warning(
+            "Skipping SLURM node-count validation because partition discovery "
+            f"failed: {exc}. SLURM will validate the request at submission."
+        )
+        return
+
     if effective_partition is None:
-        raise ValueError(
+        message = (
             "Cannot validate --nodes because SLURM does not expose a unique default "
             "partition. Pass --partition explicitly."
         )
+        if strict:
+            raise ValueError(message)
+        print_warning(f"{message} SLURM will validate the request at submission.")
+        return
 
-    available_nodes = get_slurm_partition_nodes(effective_partition)
+    try:
+        available_nodes = get_slurm_partition_nodes(effective_partition)
+    except ValueError as exc:
+        if strict:
+            raise
+        print_warning(
+            "Skipping SLURM node-count validation because node discovery "
+            f"failed: {exc}. SLURM will validate the request at submission."
+        )
+        return
+
     if not available_nodes:
         raise ValueError(f"No nodes are available in SLURM partition '{effective_partition}'.")
 
@@ -406,6 +583,11 @@ class SlurmBatchExecutor:
 
     def execute(self) -> None:
         slurm_start_time = time.time()
+        require_slurm_commands(
+            self.request.dry_run,
+            partition=self.request.partition,
+            account=self.request.account,
+        )
         am = self._prepare_artifact_manager()
         experiment_dir = am.experiment_dir
         scripts_dir = experiment_dir / "scripts"
@@ -451,8 +633,7 @@ class SlurmBatchExecutor:
         else:
             cmd = ["carts", "build"]
         cmd += ["--arts", f"--profile={profile}"]
-        if self.request.rdma:
-            cmd.append("--rdma")
+        cmd.append("--rdma" if self.request.rdma else "--no-rdma")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -499,10 +680,34 @@ class SlurmBatchExecutor:
                 else None
             )
             build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
-            expected_protocol = protocol_for_rdma(self.request.rdma)
+            expected_protocol = protocol_for_node_count(self.request.rdma, node_count)
+            effective_compile_args = compile_args_for_node_count(
+                self.request.compile_args,
+                node_count,
+            )
             expected_pin = slurm_batch.arts_pin_for_pinning(
                 self.request.cpu_pinning,
                 node_count,
+            )
+            build_arts_cfg = slurm_batch.generate_arts_config_for_node(
+                effective_base_config,
+                build_node_dir,
+                node_count,
+                self.request.threads,
+                rdma=self.request.rdma,
+                cpu_pinning=self.request.cpu_pinning,
+            )
+            expected_build_config = _expected_build_config(
+                bench=bench,
+                size=self.request.size,
+                node_count=node_count,
+                threads=self.request.threads,
+                cflags=self.request.cflags,
+                compile_args=effective_compile_args,
+                protocol=expected_protocol,
+                cpu_pinning=self.request.cpu_pinning,
+                pin=expected_pin,
+                arts_cfg_path=build_arts_cfg,
             )
             cached_protocol = (
                 get_cfg_str(build_arts_cfg, KEY_PROTOCOL)
@@ -520,6 +725,7 @@ class SlurmBatchExecutor:
                 and build_arts_cfg.exists()
                 and cached_protocol == expected_protocol
                 and (expected_pin is None or cached_pin == expected_pin)
+                and _build_config_matches(build_node_dir, expected_build_config)
             ):
                 with print_lock:
                     console.print(
@@ -554,21 +760,13 @@ class SlurmBatchExecutor:
                     )
                 continue
 
-            build_arts_cfg = slurm_batch.generate_arts_config_for_node(
-                effective_base_config,
-                build_node_dir,
-                node_count,
-                self.request.threads,
-                rdma=self.request.rdma,
-                cpu_pinning=self.request.cpu_pinning,
-            )
             build_arts = self.host.build_benchmark(
                 bench,
                 self.request.size,
                 variant=VARIANT_ARTS,
                 arts_config=build_arts_cfg,
                 cflags=self.request.cflags or "",
-                compile_args=self.request.compile_args,
+                compile_args=effective_compile_args,
                 build_output_dir=build_node_dir,
             )
             if build_arts.status != Status.PASS:
@@ -600,6 +798,7 @@ class SlurmBatchExecutor:
                 if build_omp.status == Status.PASS and cached_omp.exists():
                     dst_omp = cached_omp
 
+            _write_build_config(build_node_dir, expected_build_config)
             with print_lock:
                 console.print(
                     f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
@@ -663,10 +862,37 @@ class SlurmBatchExecutor:
                     else None
                 )
                 build_arts_cfg = build_node_dir / ARTS_CFG_FILENAME
-                expected_protocol = protocol_for_rdma(self.request.rdma)
+                expected_protocol = protocol_for_node_count(
+                    self.request.rdma,
+                    node_count,
+                )
+                effective_compile_args = compile_args_for_node_count(
+                    self.request.compile_args,
+                    node_count,
+                )
                 expected_pin = slurm_batch.arts_pin_for_pinning(
                     self.request.cpu_pinning,
                     node_count,
+                )
+                build_arts_cfg = slurm_batch.generate_arts_config_for_node(
+                    effective_base_config,
+                    build_node_dir,
+                    node_count,
+                    self.request.threads,
+                    rdma=self.request.rdma,
+                    cpu_pinning=self.request.cpu_pinning,
+                )
+                expected_build_config = _expected_build_config(
+                    bench=bench,
+                    size=self.request.size,
+                    node_count=node_count,
+                    threads=self.request.threads,
+                    cflags=self.request.cflags,
+                    compile_args=effective_compile_args,
+                    protocol=expected_protocol,
+                    cpu_pinning=self.request.cpu_pinning,
+                    pin=expected_pin,
+                    arts_cfg_path=build_arts_cfg,
                 )
                 cached_protocol = (
                     get_cfg_str(build_arts_cfg, KEY_PROTOCOL)
@@ -684,6 +910,7 @@ class SlurmBatchExecutor:
                     and build_arts_cfg.exists()
                     and cached_protocol == expected_protocol
                     and (expected_pin is None or cached_pin == expected_pin)
+                    and _build_config_matches(build_node_dir, expected_build_config)
                 ):
                     with print_lock:
                         console.print(
@@ -718,21 +945,13 @@ class SlurmBatchExecutor:
                         )
                     continue
 
-                build_arts_cfg = slurm_batch.generate_arts_config_for_node(
-                    effective_base_config,
-                    build_node_dir,
-                    node_count,
-                    self.request.threads,
-                    rdma=self.request.rdma,
-                    cpu_pinning=self.request.cpu_pinning,
-                )
                 build_arts = self.host.build_benchmark(
                     bench,
                     self.request.size,
                     variant=VARIANT_ARTS,
                     arts_config=build_arts_cfg,
                     cflags=self.request.cflags or "",
-                    compile_args=self.request.compile_args,
+                    compile_args=effective_compile_args,
                     build_output_dir=build_node_dir,
                 )
                 if build_arts.status != Status.PASS:
@@ -764,6 +983,7 @@ class SlurmBatchExecutor:
                     if build_omp.status == Status.PASS and cached_omp.exists():
                         dst_omp = cached_omp
 
+                _write_build_config(build_node_dir, expected_build_config)
                 with print_lock:
                     console.print(
                         f"  {bench} (nodes={node_count}, threads={self.request.threads})... [{Colors.SUCCESS}]OK[/{Colors.SUCCESS}]"
@@ -844,7 +1064,10 @@ class SlurmBatchExecutor:
                     },
                     size=self.request.size,
                     cflags=self.request.cflags,
-                    compile_args=self.request.compile_args,
+                    compile_args=compile_args_for_node_count(
+                        self.request.compile_args,
+                        node_count,
+                    ),
                     run_phase=self.request.step_name or "default",
                     profile=str(self.request.profile) if self.request.profile else None,
                     perf=self.request.perf,
@@ -856,6 +1079,10 @@ class SlurmBatchExecutor:
                         self.request.cpu_pinning
                     ),
                     runtime_library_dirs=list(runtime_library_dirs),
+                    arts_transport=protocol_for_node_count(
+                        self.request.rdma,
+                        node_count,
+                    ),
                     arts_runtime_mode=arts_runtime_mode,
                     arts_runtime_mode_source=arts_runtime_mode_source,
                 )

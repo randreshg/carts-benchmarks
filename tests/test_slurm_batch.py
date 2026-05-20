@@ -387,6 +387,18 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 threads=16,
                 rdma=False,
             )
+            default_cfg = generate_arts_config_for_node(
+                template,
+                root / "default-build",
+                node_count=2,
+                threads=16,
+            )
+            single_default_cfg = generate_arts_config_for_node(
+                template,
+                root / "single-default-build",
+                node_count=1,
+                threads=16,
+            )
             rdma_cfg = generate_arts_config_for_node(
                 template,
                 root / "rdma-build",
@@ -417,12 +429,16 @@ class SlurmBatchPollingTest(unittest.TestCase):
             )
 
             tcp_values = parse_arts_cfg(tcp_cfg)
+            default_values = parse_arts_cfg(default_cfg)
+            single_default_values = parse_arts_cfg(single_default_cfg)
             rdma_values = parse_arts_cfg(rdma_cfg)
             rdma_8_values = parse_arts_cfg(rdma_8_cfg)
             rdma_32_values = parse_arts_cfg(rdma_32_cfg)
             rdma_64_values = parse_arts_cfg(rdma_64_cfg)
 
             self.assertEqual(tcp_values["protocol"], PROTOCOL_TCP)
+            self.assertEqual(default_values["protocol"], PROTOCOL_RDMA)
+            self.assertEqual(single_default_values["protocol"], PROTOCOL_TCP)
             self.assertEqual(rdma_values["protocol"], PROTOCOL_RDMA)
             self.assertEqual(rdma_8_values["protocol"], PROTOCOL_RDMA)
             self.assertEqual(rdma_32_values["protocol"], PROTOCOL_RDMA)
@@ -714,7 +730,11 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 content,
             )
             self.assertIn(
-                'export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-4}"',
+                'export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"',
                 content,
             )
             self.assertIn(
@@ -726,7 +746,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 content,
             )
             self.assertIn(
-                'export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-3000}"',
+                'export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-10000}"',
                 content,
             )
             self.assertIn(
@@ -891,6 +911,28 @@ class SlurmBatchPollingTest(unittest.TestCase):
             content = script_path.read_text()
             self.assertIn("#SBATCH --cpus-per-task=70", content)
             self.assertIn("required=66 runtime_required=66 requested=70", content)
+            self.assertIn(
+                "[SLURM] Thread budget: --threads maps to ARTS workers; "
+                "TCP jobs also need sender/receiver threads and Slurm CPU headroom",
+                content,
+            )
+            self.assertIn(
+                "[SLURM] CPU request: required=66 requested=70; pinning cannot "
+                "fix an undersized allocation",
+                content,
+            )
+            self.assertIn(
+                "[SLURM preflight] --threads=64 means 64 ARTS workers; "
+                "sender=1 receiver=1 make runtime_required=66, and requested "
+                "CPUs include headroom",
+                content,
+            )
+            self.assertIn(
+                "use CARTS_SLURM_THREAD_BUDGET=total, reduce "
+                "CARTS_SLURM_CPU_HEADROOM/CARTS_SLURM_NETWORK_THREADS, or lower "
+                "--threads",
+                content,
+            )
             self.assertIn("--cpus-per-task=70 --cpu-bind=none", content)
 
     def test_generate_sbatch_script_can_disable_single_node_cpu_headroom(self) -> None:

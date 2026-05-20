@@ -106,6 +106,8 @@ def _apply_run_config(result: Dict[str, Any], run_config: Dict[str, Any]) -> Non
         result["arts_runtime_mode_source"] = run_config.get(
             "arts_runtime_mode_source"
         )
+    if "arts_transport" in run_config:
+        result["arts_transport"] = run_config.get("arts_transport")
     if "reporting" in run_config:
         result["reporting"] = run_config.get("reporting")
     if "config" in run_config and isinstance(run_config["config"], dict):

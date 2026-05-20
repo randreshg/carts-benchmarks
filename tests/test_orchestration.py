@@ -163,6 +163,39 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
         self.assertEqual(resolved.requested_profile_path, profile.resolve())
         self.assertTrue(resolved.should_rebuild_arts)
 
+    def test_default_rdma_does_not_force_step_rebuild(self) -> None:
+        step = ExperimentStep(name="default")
+
+        defaults = StepCliDefaults(
+            size="small",
+            timeout=10,
+            threads_spec=None,
+            nodes_spec="2",
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            cflags=None,
+            compile_args=None,
+            debug=0,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher="slurm",
+            explicit_step_mode=True,
+            size_from_cli=False,
+            rdma=True,
+        )
+
+        resolved = self.resolver.resolve_step_config(
+            step,
+            1,
+            ["polybench/gemm"],
+            defaults,
+        )
+
+        self.assertTrue(resolved.rdma)
+        self.assertFalse(resolved.should_rebuild_arts)
+
     def test_local_execution_orchestrator_sets_phase_and_result_phase(self) -> None:
         artifact_manager = _FakeArtifactManager()
         runner = types.SimpleNamespace(clean=False)
@@ -276,6 +309,7 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
                 quiet=False,
                 artifact_manager=_FakeArtifactManager(),
                 max_jobs=2,
+                dry_run=True,
             ),
         )
 

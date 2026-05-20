@@ -64,6 +64,7 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--launcher` | `-l` | Override ARTS `launcher` (default: from benchmark `arts.cfg`) |
 | `--nodes` | `-n` | Node counts: single (`2`), list (`1,2,4`), range (`1:8:2`) |
 | `--results-dir` | | Base directory for experiment output (default: `carts-benchmarks/results/`) |
+| `--dry-run` | | Generate SLURM scripts and run metadata without submitting jobs (`--slurm` only) |
 | `--trace` | | Show benchmark output (kernel timing and checksum) |
 | `--verbose` | `-v` | Verbose output |
 | `--quiet` | `-q` | Minimal output (CI mode) |
@@ -76,11 +77,18 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--weak-scaling` | | Enable weak scaling (auto-scale problem size) |
 | `--base-size` | | Base problem size for weak scaling |
 | `--arts-config` | | Custom arts.cfg file |
+| `--rdma/--no-rdma` | | Use RDMA/RoCE RSockets transport for multinode configs by default; opt out with `--no-rdma` for TCP fallback |
 
 ARTS rebuild notes:
 - Runner `--debug` controls benchmark-runner verbosity only: `0`=quiet, `1`=show commands, `2`=verbose console output.
 - Experiment-step `debug` values are raw ARTS runtime levels when a step rebuilds ARTS: `0`=errors only, `1`=warnings, `2`=info, `3`=debug.
+- Single-node benchmark configs use TCP. Multinode benchmark configs default to
+  RDMA/RoCE; use `--no-rdma` for multinode TCP fallback experiments.
+- `--distributed-db` is a multinode ownership mode. The runner strips that
+  compile arg from single-node benchmark builds, including the 1-node row of a
+  mixed node sweep.
 - If the installed ARTS runtime is missing, the benchmark runner now forces `carts build --arts` before executing the step, even when the step did not explicitly request a rebuild.
+- If the installed runtime transport is unknown, the runner rebuilds ARTS before the step. If the installed transport is known but does not match the requested benchmark transport, the runner fails early unless the step already requests an ARTS rebuild through a profile or ARTS debug setting.
 
 ### `carts benchmarks perf-gate`
 
@@ -170,6 +178,9 @@ carts benchmarks run polybench/gemm --nodes 1,2,4
 
 # 2D sweep: thread x node (4 configs: 1t_1n, 2t_1n, 1t_2n, 2t_2n)
 carts benchmarks run polybench/gemm --threads 1,2 --nodes 1,2
+
+# TCP fallback experiment
+carts benchmarks run polybench/gemm --threads 4 --nodes 2 --no-rdma
 ```
 
 ### Multiple Runs for Statistics
@@ -353,6 +364,7 @@ carts benchmarks run polybench/gemm --arts-config multi.cfg
 | `launcher` | `--launcher` | Job launcher (ssh, slurm, lsf) |
 | `node_count` | `--nodes`, `-n` | Number of compute nodes (supports sweep) |
 | `worker_threads` | `--threads` | ARTS worker threads per node |
+| `protocol` | `--rdma/--no-rdma` | Runtime transport; generated benchmark and SLURM configs use TCP for single-node configs and use RDMA by default only for multinode configs |
 | `omp-threads` | `--omp-threads` | OpenMP threads (separate from ARTS threads) |
 
 Command-line options take precedence over any configuration file settings.
@@ -425,6 +437,7 @@ context — everything needed to reproduce that specific run:
   "size": "medium",
   "cflags": "-DNI=2000 -DNJ=2000",
   "arts_cfg_source": "/path/to/arts.cfg",
+  "arts_transport": "tcp",
   "timestamp": "2026-02-24T10:30:00.000000"
 }
 ```
@@ -440,6 +453,7 @@ context — everything needed to reproduce that specific run:
 | `command` | CLI command that triggered this run |
 | `env_overrides` | Environment variables set for this run |
 | `arts_cfg_source` | Path to the arts.cfg file used |
+| `arts_transport` | Requested ARTS runtime transport for the concrete node count (`tcp` for single-node, `rdma` by default for multinode) |
 | `timestamp` | ISO timestamp of when the run was recorded |
 
 ### Key Properties
@@ -540,9 +554,10 @@ carts compile polybench/gemm/gemm.c --pipeline concurrency
 
 ### Port conflicts
 
-ARTS uses TCP port 34739 by default. If a previous run left lingering processes,
-the next run may fail with a port-in-use error. The runner automatically kills
-processes on the ARTS port before each run. To manually clear:
+TCP fallback runs use TCP port 34739 by default. If a previous TCP run left
+lingering processes, the next TCP fallback run may fail with a port-in-use
+error. The runner automatically kills processes on the ARTS port before each
+run. To manually clear:
 
 ```bash
 fuser -k 34739/tcp

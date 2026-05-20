@@ -217,6 +217,7 @@ class ArtifactManager:
         reference_checksum: Optional[str] = None,
         reference_source: Optional[str] = None,
         reference_threads: Optional[int] = None,
+        arts_transport: Optional[str] = None,
         arts_runtime_mode: Optional[str] = None,
         arts_runtime_mode_source: Optional[str] = None,
         reporting: Optional[Dict[str, Any]] = None,
@@ -294,6 +295,8 @@ class ArtifactManager:
             run_config["env_overrides"] = env_overrides
         if arts_cfg_path:
             run_config["arts_cfg_source"] = str(arts_cfg_path)
+        if arts_transport:
+            run_config["arts_transport"] = arts_transport
         if runtime_library_dirs:
             run_config["runtime_library_dirs"] = [str(path) for path in runtime_library_dirs]
         if arts_runtime_mode:

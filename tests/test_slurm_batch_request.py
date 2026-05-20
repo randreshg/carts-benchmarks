@@ -41,7 +41,7 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
         profile = Path("configs/profiles/profile-comm.cfg")
         with mock.patch.object(runner, "BenchmarkRunner", _FakeRunner), mock.patch.object(
             runner, "SlurmBatchExecutor", _CapturingExecutor
-        ), mock.patch.object(runner, "require_slurm_commands", lambda dry_run: None), mock.patch.object(
+        ), mock.patch.object(runner, "require_slurm_commands", lambda *args, **kwargs: None), mock.patch.object(
             runner, "find_invalid_benchmarks", lambda runner, requested: []
         ), mock.patch.object(
             runner, "find_multinode_disabled_benchmarks", lambda runner, bench_list: set()
@@ -73,6 +73,7 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
                 profile=profile,
                 perf=False,
                 perf_interval=0.1,
+                cpu_pinning="default",
                 exclude_nodes=None,
                 nodelist="b05u[01,07]",
                 exclude=None,
@@ -120,11 +121,13 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
                 profile=profile,
                 rdma=True,
                 variant="arts",
+                dry_run=True,
             )
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["profile"], profile)
         self.assertTrue(calls[0]["rdma"])
+        self.assertTrue(calls[0]["dry_run"])
 
     def test_run_slurm_resolved_step_uses_requested_profile(self) -> None:
         profile = Path("configs/profiles/profile-comm.cfg")
@@ -176,6 +179,74 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
 
         self.assertEqual(captured["profile"], profile)
         self.assertTrue(captured["rdma"])
+
+    def test_rebuild_arts_for_step_rebuilds_transport_mismatch(self) -> None:
+        step_config = runner.ResolvedStepConfig(
+            name="transport",
+            bench_list=["polybench/gemm"],
+            profile_path=Path("configs/profiles/profile-none.cfg"),
+            requested_profile_path=None,
+            rdma=True,
+            debug=0,
+            should_rebuild_arts=False,
+            threads_list=[64],
+            node_counts=[2],
+            timeout=30,
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            size="small",
+            cflags=None,
+            compile_args=None,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher=None,
+        )
+
+        with mock.patch.object(runner, "arts_runtime_is_installed", lambda: True), \
+                mock.patch.object(runner, "arts_runtime_uses_rdma", lambda: False), \
+                mock.patch.object(runner, "_rebuild_arts") as rebuild, \
+                mock.patch.object(runner, "print_warning") as print_warning:
+            runner._rebuild_arts_for_step(step_config)
+
+        rebuild.assert_called_once()
+        self.assertTrue(rebuild.call_args.kwargs["rdma"])
+        self.assertIn(
+            "ARTS runtime transport is tcp; rebuilding for requested rdma",
+            print_warning.call_args.args[0],
+        )
+
+    def test_rebuild_arts_for_step_treats_single_node_as_tcp(self) -> None:
+        step_config = runner.ResolvedStepConfig(
+            name="single",
+            bench_list=["polybench/gemm"],
+            profile_path=Path("configs/profiles/profile-none.cfg"),
+            requested_profile_path=None,
+            rdma=True,
+            debug=0,
+            should_rebuild_arts=False,
+            threads_list=[64],
+            node_counts=[1],
+            timeout=30,
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            size="small",
+            cflags=None,
+            compile_args=None,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher=None,
+        )
+
+        with mock.patch.object(runner, "arts_runtime_is_installed", lambda: True), \
+                mock.patch.object(runner, "arts_runtime_uses_rdma", lambda: False), \
+                mock.patch.object(runner, "_rebuild_arts") as rebuild:
+            runner._rebuild_arts_for_step(step_config)
+
+        rebuild.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -79,6 +80,36 @@ SUPPORTED_PROTOCOLS = frozenset(
 def protocol_for_rdma(enabled: bool) -> str:
     """Return the benchmark runtime protocol for an RDMA toggle."""
     return PROTOCOL_RDMA if enabled else PROTOCOL_TCP
+
+
+def rdma_for_node_count(enabled: bool, node_count: int) -> bool:
+    """Return whether a run should request RDMA transport for this node count."""
+    return enabled and node_count > 1
+
+
+def protocol_for_node_count(enabled: bool, node_count: int) -> str:
+    """Return the transport protocol to write into arts.cfg for a node count."""
+    return protocol_for_rdma(rdma_for_node_count(enabled, node_count))
+
+
+def compile_args_for_node_count(
+    compile_args: Optional[str],
+    node_count: int,
+) -> Optional[str]:
+    """Remove multinode-only compiler flags for single-node benchmark builds."""
+    if not compile_args:
+        return compile_args
+    if node_count > 1:
+        return compile_args
+
+    try:
+        tokens = shlex.split(compile_args)
+    except ValueError:
+        tokens = compile_args.split()
+    filtered = [token for token in tokens if token != "--distributed-db"]
+    if not filtered:
+        return None
+    return shlex.join(filtered)
 
 EMBEDDED_KEYS: List[str] = [
     KEY_WORKER_THREADS,

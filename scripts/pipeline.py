@@ -39,6 +39,7 @@ class ConfigExecutionPlan:
     report_speedup: bool = True
     env_overrides: Dict[str, str] = field(default_factory=dict)
     persisted_env_overrides: Optional[Dict[str, str]] = None
+    arts_transport: Optional[str] = None
     variant: Optional[str] = None  # None=both, "arts", "openmp"
 
 
@@ -448,6 +449,7 @@ class ConfigExecutionExecutor:
             compile_args=self.plan.compile_args or None,
             perf=perf_enabled,
             timeout=self.plan.timeout,
+            arts_transport=self.plan.arts_transport,
         )
         return artifacts
 

@@ -240,7 +240,7 @@ class ExperimentStep:
     description: Optional[str] = None
     benchmarks: Optional[List[str]] = None
     profile: Optional[str] = None
-    rdma: bool = False
+    rdma: bool = True
     debug: int = 0
     runs: int = 1
     perf: bool = False

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
+import threading
+import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -14,7 +19,7 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from arts_config import KEY_PROTOCOL, PROTOCOL_TCP  # noqa: E402
+from arts_config import KEY_PROTOCOL, PROTOCOL_TCP, parse_arts_cfg  # noqa: E402
 from artifacts import ArtifactManager  # noqa: E402
 from models import BenchmarkConfig, BuildResult, ReferenceChecksum, Status  # noqa: E402
 from slurm.experiment import (  # noqa: E402
@@ -30,6 +35,8 @@ from slurm.experiment import (  # noqa: E402
     infer_arts_runtime_mode,
     load_existing_job_statuses,
     merge_result_rows,
+    require_slurm_commands,
+    validate_requested_node_counts,
 )
 
 
@@ -38,6 +45,7 @@ class _FakeHost:
         self.benchmarks_dir = benchmarks_dir
         self.artifact_manager = None
         self.reference_calls = 0
+        self.build_calls = []
 
     def get_executable_paths(self, bench_path: Path) -> tuple[Path, Path]:
         return bench_path / "bench_arts", bench_path / "bench_omp"
@@ -52,7 +60,15 @@ class _FakeHost:
         compile_args: str | None = None,
         build_output_dir: Path | None = None,
     ) -> BuildResult:
-        del name, size, cflags, compile_args, arts_config
+        del size, cflags
+        self.build_calls.append(
+            {
+                "name": name,
+                "variant": variant,
+                "arts_config": arts_config,
+                "compile_args": compile_args,
+            }
+        )
         assert build_output_dir is not None
         executable = build_output_dir / ("bench_omp" if variant == "openmp" else "bench_arts")
         executable.write_text("#!/bin/sh\n")
@@ -78,6 +94,142 @@ class _FakeHost:
 
 
 class SlurmExperimentHelpersTest(unittest.TestCase):
+    def test_require_slurm_commands_reports_failed_submit_probe(self) -> None:
+        failed_submit = types.SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Batch job submission failed: I/O error writing "
+                "script/environment to file"
+            ),
+        )
+
+        with mock.patch(
+            "slurm.experiment.shutil.which", return_value="/usr/bin/tool"
+        ), mock.patch(
+            "slurm.experiment.subprocess.run", return_value=failed_submit
+        ):
+            with self.assertRaisesRegex(ValueError, "sbatch cannot create"):
+                require_slurm_commands(dry_run=False)
+
+    def test_require_slurm_commands_can_skip_submit_probe(self) -> None:
+        with mock.patch(
+            "slurm.experiment.shutil.which", return_value="/usr/bin/tool"
+        ), mock.patch(
+            "slurm.experiment.subprocess.run"
+        ) as run, mock.patch.dict(
+            os.environ, {"CARTS_SLURM_SUBMIT_PROBE": "0"}
+        ):
+            require_slurm_commands(dry_run=False)
+
+        run.assert_not_called()
+
+    def test_require_slurm_commands_probe_uses_requested_partition_and_account(self) -> None:
+        submitted = types.SimpleNamespace(
+            returncode=0,
+            stdout="12345\n",
+            stderr="",
+        )
+        cancelled = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch(
+            "slurm.experiment.shutil.which", return_value="/usr/bin/tool"
+        ), mock.patch(
+            "slurm.experiment.subprocess.run",
+            side_effect=[submitted, cancelled],
+        ) as run:
+            require_slurm_commands(
+                dry_run=False,
+                partition="mi300x",
+                account="acct",
+            )
+
+        submit_cmd = run.call_args_list[0].args[0]
+        self.assertIn("--partition=mi300x", submit_cmd)
+        self.assertIn("--account=acct", submit_cmd)
+
+    def test_validate_requested_node_counts_skips_partition_query_failure_by_default(self) -> None:
+        with mock.patch(
+            "slurm.experiment._run_slurm_query",
+            side_effect=ValueError("slurm_load_partitions timed out"),
+        ), mock.patch("slurm.experiment.print_warning") as warning:
+            validate_requested_node_counts([2], partition=None)
+
+        warning.assert_called_once()
+        self.assertIn("Skipping SLURM node-count validation", warning.call_args[0][0])
+
+    def test_validate_requested_node_counts_strict_partition_query_failure_raises(self) -> None:
+        with mock.patch(
+            "slurm.experiment._run_slurm_query",
+            side_effect=ValueError("slurm_load_partitions timed out"),
+        ), mock.patch.dict(
+            os.environ, {"CARTS_SLURM_NODE_COUNT_VALIDATE_STRICT": "1"}
+        ):
+            with self.assertRaisesRegex(ValueError, "slurm_load_partitions timed out"):
+                validate_requested_node_counts([2], partition=None)
+
+    def test_streaming_executor_runs_slurm_preflight_before_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            (bench_root / "suite" / "a").mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(f"[ARTS]\nworker_threads=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n")
+            carts_root = root / "carts"
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step or "default",
+            )
+            am = ArtifactManager(root / "results", "ts")
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[1],
+                size="small",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=1,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=False,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args=None,
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=False,
+                artifact_manager=am,
+                step_name="default",
+                report_steps=None,
+                command_str="test",
+            )
+
+            with mock.patch(
+                "slurm.experiment.require_slurm_commands",
+                side_effect=ValueError("probe failed"),
+            ) as preflight:
+                with self.assertRaisesRegex(ValueError, "probe failed"):
+                    SlurmBatchExecutor(_FakeHost(bench_root), request, deps).execute()
+
+            preflight.assert_called_once_with(
+                False,
+                partition=None,
+                account=None,
+            )
+            self.assertFalse((am.experiment_dir / "scripts").exists())
+
     def test_format_node_counts_display(self) -> None:
         self.assertEqual(format_node_counts_display([4]), "4")
         self.assertEqual(format_node_counts_display([1, 2, 4]), "1, 2, 4")
@@ -95,14 +247,14 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
         )
         self.assertEqual(total, 14)
 
-    def test_compute_prebuild_worker_count_caps_by_requested_threads(self) -> None:
+    def test_compute_prebuild_worker_count_uses_host_cpus(self) -> None:
         self.assertEqual(
             compute_prebuild_worker_count(
                 host_cpus=128,
                 requested_threads=64,
                 benchmark_count=23,
             ),
-            2,
+            23,
         )
         self.assertEqual(
             compute_prebuild_worker_count(
@@ -110,7 +262,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 requested_threads=64,
                 benchmark_count=23,
             ),
-            1,
+            16,
         )
         self.assertEqual(
             compute_prebuild_worker_count(
@@ -280,6 +432,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                     profile=None,
                     perf=False,
                     perf_interval=0.1,
+                    cpu_pinning="default",
                     exclude_nodes=None,
                     nodelist=None,
                     rdma=False,
@@ -318,6 +471,174 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 Path(path) for path in alpha_run_config["runtime_library_dirs"]
             ]
             self.assertIn(runtime_lib_dir.resolve(), runtime_dirs)
+            self.assertEqual(alpha_run_config["arts_transport"], PROTOCOL_TCP)
+
+    def test_single_node_slurm_dry_run_uses_tcp_and_strips_distributed_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            (bench_root / "suite" / "a").mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(f"[ARTS]\nworker_threads=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n")
+            carts_root = root / "carts"
+            (carts_root / ".install" / "arts" / "lib").mkdir(parents=True)
+            (carts_root / ".install" / "arts" / "lib" / "libarts.so.2").write_text(
+                "fake arts runtime\n"
+            )
+            (carts_root / ".install" / "carts" / "lib").mkdir(parents=True)
+            (carts_root / ".install" / "llvm" / "lib").mkdir(parents=True)
+            host = _FakeHost(bench_root)
+            am = ArtifactManager(root / "results", "ts")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[1],
+                size="small",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=1,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=True,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args="--distributed-db",
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=True,
+                artifact_manager=am,
+                step_name="single",
+                report_steps=None,
+                command_str="test",
+            )
+
+            SlurmBatchExecutor(host, request, deps).execute()
+
+            run_config = json.loads(
+                (
+                    am.experiment_dir
+                    / "single"
+                    / "suite"
+                    / "a"
+                    / "1t_1n"
+                    / "run_1"
+                    / "run_config.json"
+                ).read_text()
+            )
+            arts_cfg = (
+                am.experiment_dir
+                / "single"
+                / "suite"
+                / "a"
+                / "1t_1n"
+                / "artifacts"
+                / "arts.cfg"
+            )
+            self.assertEqual(run_config["arts_transport"], PROTOCOL_TCP)
+            self.assertNotIn("compile_args", run_config)
+            self.assertEqual(parse_arts_cfg(arts_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
+            arts_builds = [
+                call for call in host.build_calls if call["variant"] == "arts"
+            ]
+            self.assertEqual(arts_builds[0]["compile_args"], None)
+
+    def test_slurm_build_cache_tracks_effective_compile_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            (bench_root / "suite" / "a").mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(f"[ARTS]\nworker_threads=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n")
+            carts_root = root / "carts"
+            host = _FakeHost(bench_root)
+            am = ArtifactManager(root / "results", "ts")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[2],
+                size="small",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=1,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=True,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args="--distributed-db",
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=True,
+                artifact_manager=am,
+                step_name="scale",
+                report_steps=None,
+                command_str="test",
+            )
+            executor = SlurmBatchExecutor(host, request, deps)
+
+            executor._build_one_bench(
+                am=am,
+                bench="suite/a",
+                multinode_disabled=set(),
+                print_lock=threading.Lock(),
+            )
+            executor_no_args = SlurmBatchExecutor(
+                host,
+                replace(request, compile_args=None),
+                deps,
+            )
+            executor_no_args._build_one_bench(
+                am=am,
+                bench="suite/a",
+                multinode_disabled=set(),
+                print_lock=threading.Lock(),
+            )
+            executor_no_args._build_one_bench(
+                am=am,
+                bench="suite/a",
+                multinode_disabled=set(),
+                print_lock=threading.Lock(),
+            )
+
+            arts_builds = [
+                call for call in host.build_calls if call["variant"] == "arts"
+            ]
+            self.assertEqual(
+                [call["compile_args"] for call in arts_builds],
+                ["--distributed-db", None],
+            )
 
     def test_multinode_dry_run_is_arts_only_without_openmp_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,6 +685,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 profile=None,
                 perf=False,
                 perf_interval=0.1,
+                cpu_pinning="default",
                 exclude_nodes=None,
                 nodelist=None,
                 rdma=False,
@@ -388,6 +710,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 ).read_text()
             )
             self.assertNotIn("reference", run_config)
+            self.assertEqual(run_config["arts_transport"], PROTOCOL_TCP)
             script = (
                 am.experiment_dir
                 / "scripts"
