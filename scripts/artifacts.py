@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 import shutil
 import hashlib
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from arts_runtime_modes import apply_arts_cfg_overrides
 from common import (
     ARTS_CFG_FILENAME,
     COUNTERS_DIR_NAME,
@@ -37,18 +37,7 @@ def _get_benchmarks_dir() -> Path:
 
 def _apply_arts_cfg_overrides(content: str, overrides: Dict[str, str]) -> str:
     """Apply simple key=value overrides to an arts.cfg payload."""
-    updated = content
-    for key, value in overrides.items():
-        replacement = f"{key}={value}"
-        pattern = rf"^{re.escape(key)}\s*=.*$"
-        if re.search(pattern, updated, re.MULTILINE):
-            updated = re.sub(pattern, replacement, updated, flags=re.MULTILINE)
-        elif "[ARTS]" in updated:
-            updated = updated.replace("[ARTS]", f"[ARTS]\n{replacement}", 1)
-        else:
-            suffix = "" if updated.endswith("\n") else "\n"
-            updated = f"{updated}{suffix}{replacement}\n"
-    return updated
+    return apply_arts_cfg_overrides(content, overrides)
 
 
 class ArtifactManager:
@@ -289,6 +278,8 @@ class ArtifactManager:
             run_config["cpu_pinning"] = cpu_pinning
         if slurm_cpu_bind is not None:
             run_config["slurm_cpu_bind"] = slurm_cpu_bind
+        if runtime_arts_overrides:
+            run_config["runtime_arts_overrides"] = runtime_arts_overrides
         if command:
             run_config["command"] = command
         if env_overrides:

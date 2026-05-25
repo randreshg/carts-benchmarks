@@ -52,12 +52,14 @@ from common import (
     parse_verification_timings,
     parse_cleanup_timings,
 )
+from arts_runtime_modes import (
+    ARTS_RUNTIME_MODE_HOST_OPENMP,
+    ARTS_RUNTIME_MODE_HOST_SERIAL,
+    ARTS_RUNTIME_MODE_TASK,
+)
 from models import Status, VerificationMode, VerificationResult
 from verification import verify_against_omp, verify_against_reference
 
-ARTS_RUNTIME_MODE_TASK = "arts_task_runtime"
-ARTS_RUNTIME_MODE_HOST_OPENMP = "host_openmp_fallback"
-ARTS_RUNTIME_MODE_HOST_SERIAL = "host_serial_fallback"
 COUNTER_REASON_AVAILABLE = "available"
 COUNTER_REASON_NOT_REQUESTED = "not_requested"
 COUNTER_REASON_MISSING_CLUSTER = "missing_cluster_json"

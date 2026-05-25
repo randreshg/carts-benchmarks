@@ -7,6 +7,7 @@ import tempfile
 import threading
 import types
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -19,7 +20,13 @@ TOOLS_DIR = REPO_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from arts_config import KEY_PROTOCOL, PROTOCOL_TCP, parse_arts_cfg  # noqa: E402
+from arts_config import (  # noqa: E402
+    KEY_PIN,
+    KEY_PROTOCOL,
+    KEY_WORKER_THREADS,
+    PROTOCOL_TCP,
+    parse_arts_cfg,
+)
 from artifacts import ArtifactManager  # noqa: E402
 from models import BenchmarkConfig, BuildResult, ReferenceChecksum, Status  # noqa: E402
 from slurm.experiment import (  # noqa: E402
@@ -40,12 +47,28 @@ from slurm.experiment import (  # noqa: E402
 )
 
 
+@contextmanager
+def isolated_carts_env(carts_root: Path):
+    """Run fake-checkout tests without inherited Dekk CARTS path overrides."""
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CARTS_DIR": str(carts_root),
+            "CARTS_CONFIG": str(carts_root / "carts.config"),
+        },
+    ):
+        for key in ("CARTS_HOME", "CARTS_BUILD_ROOT", "CARTS_INSTALL_ROOT"):
+            os.environ.pop(key, None)
+        yield
+
+
 class _FakeHost:
-    def __init__(self, benchmarks_dir: Path) -> None:
+    def __init__(self, benchmarks_dir: Path, runtime_ir_text: str = "") -> None:
         self.benchmarks_dir = benchmarks_dir
         self.artifact_manager = None
         self.reference_calls = 0
         self.build_calls = []
+        self.runtime_ir_text = runtime_ir_text
 
     def get_executable_paths(self, bench_path: Path) -> tuple[Path, Path]:
         return bench_path / "bench_arts", bench_path / "bench_omp"
@@ -72,6 +95,8 @@ class _FakeHost:
         assert build_output_dir is not None
         executable = build_output_dir / ("bench_omp" if variant == "openmp" else "bench_arts")
         executable.write_text("#!/bin/sh\n")
+        if variant == "arts" and self.runtime_ir_text:
+            (build_output_dir / "bench-arts.ll").write_text(self.runtime_ir_text)
         return BuildResult(Status.PASS, 0.0, "", str(executable))
 
     def ensure_omp_reference(
@@ -313,6 +338,201 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
 
             self.assertEqual(mode, ARTS_RUNTIME_MODE_HOST_OPENMP)
 
+    def test_host_openmp_fallback_uses_runtime_isolated_arts_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            (bench_root / "suite" / "a").mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(
+                f"[ARTS]\n{KEY_WORKER_THREADS}=64\n{KEY_PIN}=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n"
+            )
+            carts_root = root / "carts"
+            runtime_lib_dir = carts_root / ".install" / "arts" / "lib"
+            runtime_lib_dir.mkdir(parents=True)
+            (runtime_lib_dir / "libarts.so.2").write_text("fake arts runtime\n")
+            (carts_root / ".install" / "carts" / "lib").mkdir(parents=True)
+            (carts_root / ".install" / "llvm" / "lib").mkdir(parents=True)
+            host = _FakeHost(
+                bench_root,
+                runtime_ir_text="declare void @carts_benchmarks_mark_host_openmp()\n",
+            )
+            am = ArtifactManager(root / "results", "ts")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[1],
+                size="large",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=64,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=True,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args=None,
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=False,
+                artifact_manager=am,
+                step_name="single",
+                report_steps=None,
+                command_str="test",
+            )
+
+            SlurmBatchExecutor(host, request, deps).execute()
+
+            run_root = am.experiment_dir / "single" / "suite" / "a" / "64t_1n"
+            run_config = json.loads((run_root / "run_1" / "run_config.json").read_text())
+            run_cfg = parse_arts_cfg(run_root / "run_1" / "arts.cfg")
+            build_cfg = parse_arts_cfg(run_root / "artifacts" / "arts.cfg")
+            script = (
+                am.experiment_dir
+                / "scripts"
+                / "single__suite_a_64t_1n_run1.sbatch"
+            ).read_text()
+
+            self.assertEqual(run_config["arts_runtime_mode"], ARTS_RUNTIME_MODE_HOST_OPENMP)
+            self.assertEqual(run_cfg[KEY_WORKER_THREADS], "1")
+            self.assertEqual(run_cfg[KEY_PIN], "0")
+            self.assertEqual(build_cfg[KEY_WORKER_THREADS], "64")
+            self.assertEqual(build_cfg[KEY_PIN], "1")
+            self.assertEqual(run_config["env_overrides"]["KMP_BLOCKTIME"], "0")
+            self.assertEqual(
+                run_config["env_overrides"]["KMP_AFFINITY"],
+                "granularity=fine,compact",
+            )
+            self.assertEqual(
+                run_config["env_overrides"]["ARTS_CONFIG"],
+                str((run_root / "run_1" / "arts.cfg").resolve()),
+            )
+            self.assertEqual(
+                run_config["runtime_arts_overrides"][KEY_WORKER_THREADS],
+                "1",
+            )
+            self.assertEqual(run_config["runtime_arts_overrides"][KEY_PIN], "0")
+            self.assertIn("arts.runtime-template.cfg", script)
+            self.assertIn(
+                f'export ARTS_CONFIG="{(run_root / "run_1" / "arts.cfg").resolve()}"',
+                script,
+            )
+            self.assertIn("KMP_BLOCKTIME=0", script)
+            self.assertIn("KMP_AFFINITY=granularity=fine,compact", script)
+            self.assertIn("--cpus-per-task=68", script)
+
+    def test_host_openmp_fallback_skips_multinode_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            (bench_root / "suite" / "a").mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(
+                f"[ARTS]\n{KEY_WORKER_THREADS}=64\n{KEY_PIN}=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n"
+            )
+            carts_root = root / "carts"
+            for rel in (
+                ".install/arts/lib/libarts.so.2",
+                ".install/carts/lib/libcartstest.so",
+                ".install/llvm/lib/libLLVM.so",
+            ):
+                path = carts_root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fake\n")
+            host = _FakeHost(
+                bench_root,
+                runtime_ir_text="declare void @carts_benchmarks_mark_host_openmp()\n",
+            )
+            am = ArtifactManager(root / "results", "ts")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[1, 2, 4],
+                size="large",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=64,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=True,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args=None,
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=False,
+                artifact_manager=am,
+                step_name="scale",
+                report_steps=None,
+                command_str="test",
+            )
+
+            SlurmBatchExecutor(host, request, deps).execute()
+
+            scripts = sorted((am.experiment_dir / "scripts").glob("*.sbatch"))
+            self.assertEqual(
+                [script.name for script in scripts],
+                ["scale__suite_a_64t_1n_run1.sbatch"],
+            )
+            self.assertTrue(
+                (
+                    am.experiment_dir
+                    / "scale"
+                    / "suite"
+                    / "a"
+                    / "64t_1n"
+                    / "run_1"
+                    / "run_config.json"
+                ).exists()
+            )
+            self.assertFalse(
+                (
+                    am.experiment_dir
+                    / "scale"
+                    / "suite"
+                    / "a"
+                    / "64t_2n"
+                    / "run_1"
+                    / "run_config.json"
+                ).exists()
+            )
+            arts_builds = [
+                call for call in host.build_calls if call["variant"] == "arts"
+            ]
+            self.assertEqual(len(arts_builds), 1)
+
     def test_merge_result_rows_prefers_first_seen_key(self) -> None:
         merged = merge_result_rows(
             existing_results=[
@@ -409,39 +629,40 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 step_name_to_token=lambda step: step,
             )
 
-            for step_name in ("alpha", "beta"):
-                request = SlurmBatchRequest(
-                    bench_list=["suite/a"],
-                    node_counts=[1],
-                    size="small",
-                    runs=1,
-                    timeout=30,
-                    partition=None,
-                    time_limit="00:01:00",
-                    account=None,
-                    explicit_arts_config=base_cfg,
-                    threads=1,
-                    output_dir=root / "results",
-                    max_jobs=1,
-                    dry_run=True,
-                    no_build=False,
-                    verbose=False,
-                    cflags=None,
-                    compile_args=None,
-                    gdb=False,
-                    profile=None,
-                    perf=False,
-                    perf_interval=0.1,
-                    cpu_pinning="default",
-                    exclude_nodes=None,
-                    nodelist=None,
-                    rdma=False,
-                    artifact_manager=am,
-                    step_name=step_name,
-                    report_steps=None,
-                    command_str="test",
-                )
-                SlurmBatchExecutor(_FakeHost(bench_root), request, deps).execute()
+            with isolated_carts_env(carts_root):
+                for step_name in ("alpha", "beta"):
+                    request = SlurmBatchRequest(
+                        bench_list=["suite/a"],
+                        node_counts=[1],
+                        size="small",
+                        runs=1,
+                        timeout=30,
+                        partition=None,
+                        time_limit="00:01:00",
+                        account=None,
+                        explicit_arts_config=base_cfg,
+                        threads=1,
+                        output_dir=root / "results",
+                        max_jobs=1,
+                        dry_run=True,
+                        no_build=False,
+                        verbose=False,
+                        cflags=None,
+                        compile_args=None,
+                        gdb=False,
+                        profile=None,
+                        perf=False,
+                        perf_interval=0.1,
+                        cpu_pinning="default",
+                        exclude_nodes=None,
+                        nodelist=None,
+                        rdma=False,
+                        artifact_manager=am,
+                        step_name=step_name,
+                        report_steps=None,
+                        command_str="test",
+                    )
+                    SlurmBatchExecutor(_FakeHost(bench_root), request, deps).execute()
 
             manifest = json.loads((am.experiment_dir / "job_manifest.json").read_text())
             self.assertEqual(manifest["metadata"]["total_jobs"], 2)

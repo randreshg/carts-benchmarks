@@ -67,6 +67,7 @@ from arts_config import (
     upsert_cfg_value as _set_cfg_key,
     comment_cfg_key as _comment_cfg_key,
 )
+from arts_runtime_modes import apply_arts_cfg_overrides
 
 from rich.console import Console
 from rich.live import Live
@@ -275,6 +276,7 @@ mkdir -p "$COUNTER_DIR"
 
 # Generate a recorded per-run arts.cfg with the resolved counter folder.
 sed -e "s|^counter_folder=.*|counter_folder=$COUNTER_DIR|" "{arts_config_path}" > "{runtime_arts_cfg}"
+export ARTS_CONFIG="{runtime_arts_cfg}"
 export counter_folder="$COUNTER_DIR"
 
 {runtime_library_section}
@@ -502,10 +504,14 @@ def _worker_threads_for_budget(
     return requested_threads - network_threads
 
 
-def _worker_threads_from_config(config: SlurmJobConfig) -> int:
-    if config.arts_config_path is None:
+def _worker_threads_from_config(
+    config: SlurmJobConfig,
+    arts_config_path: Optional[Path] = None,
+) -> int:
+    config_path = arts_config_path or config.arts_config_path
+    if config_path is None:
         return max(1, config.threads)
-    values = parse_arts_cfg(config.arts_config_path)
+    values = parse_arts_cfg(config_path)
     try:
         worker_threads = int(values.get(KEY_WORKER_THREADS, str(config.threads)))
     except ValueError:
@@ -513,10 +519,14 @@ def _worker_threads_from_config(config: SlurmJobConfig) -> int:
     return max(1, worker_threads)
 
 
-def _network_threads_from_config(config: SlurmJobConfig) -> Tuple[int, int]:
-    if config.node_count <= 1 or config.arts_config_path is None:
+def _network_threads_from_config(
+    config: SlurmJobConfig,
+    arts_config_path: Optional[Path] = None,
+) -> Tuple[int, int]:
+    config_path = arts_config_path or config.arts_config_path
+    if config.node_count <= 1 or config_path is None:
         return 0, 0
-    values = parse_arts_cfg(config.arts_config_path)
+    values = parse_arts_cfg(config_path)
     try:
         sender_threads = int(values.get(KEY_SENDER_THREADS, "1"))
     except ValueError:
@@ -748,7 +758,16 @@ export ARTS_TRACE_RDMA_SUMMARY_INTERVAL_US="${ARTS_TRACE_RDMA_SUMMARY_INTERVAL_U
 export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-1048576}"
 export ARTS_RDMA_SEND_MAX_ITERS="${ARTS_RDMA_SEND_MAX_ITERS:-256}"
 export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-16}"
-"""
+    """
+
+
+def _shell_env_prefix(overrides: Dict[str, str]) -> str:
+    if not overrides:
+        return ""
+    return "env " + " ".join(
+        f"{shlex.quote(str(key))}={shlex.quote(str(value))}"
+        for key, value in overrides.items()
+    ) + " "
 
 
 def generate_sbatch_script(
@@ -779,8 +798,6 @@ def generate_sbatch_script(
     """
     cpu_pinning = normalize_cpu_pinning(config.cpu_pinning)
     srun_cpu_bind = srun_cpu_bind_for_pinning(cpu_pinning)
-    arts_pin = parse_arts_cfg(config.arts_config_path).get(KEY_PIN, "template")
-
     # Build partition and account lines (only if specified)
     partition_line = f"#SBATCH --partition={config.partition}" if config.partition else ""
     account_line = f"#SBATCH --account={config.account}" if config.account else ""
@@ -789,6 +806,9 @@ def generate_sbatch_script(
 
     # CRITICAL: Use absolute paths - jobs may run from different working directories
     run_dir = config.run_dir.resolve()
+    # Slurm opens stdout/stderr before the script body runs; create this early so
+    # generated runtime templates and job output paths have a stable parent.
+    run_dir.mkdir(parents=True, exist_ok=True)
     counter_dir = run_dir / COUNTERS_DIR_NAME
     result_json = run_dir / RESULT_JSON_FILENAME
     runtime_arts_cfg = run_dir / ARTS_CFG_FILENAME
@@ -853,23 +873,44 @@ def generate_sbatch_script(
     job_prefix = "__".join(prefix_parts) if prefix_parts else "job"
     max_prefix_len = max(1, 64 - len(job_suffix))
     job_name = f"{job_prefix[:max_prefix_len]}{job_suffix}"
-    worker_threads = _worker_threads_from_config(config)
-    sender_threads, receiver_threads = _network_threads_from_config(config)
-    runtime_thread_count = worker_threads + sender_threads + receiver_threads
-    cpu_headroom = _slurm_cpu_headroom(config.node_count)
-    cpus_per_task = runtime_thread_count + cpu_headroom
-    strict_headroom = _env_bool("CARTS_SLURM_STRICT_CPU_HEADROOM", False)
-    required_cpu_count = (
-        cpus_per_task
-        if strict_headroom
-        else runtime_thread_count
-    )
-    strict_preflight_default = True
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
     arts_only_arg = '    --arts-only \\\n' if config.run_arts and not should_run_openmp else ''
     openmp_only_arg = '    --openmp-only \\\n' if (not config.run_arts and should_run_openmp) else ''
     initial_arts_exit = 125 if config.run_arts else -1
+
+    runtime_config_source = arts_config_abs
+    if config.runtime_arts_overrides and arts_config_abs:
+        content = apply_arts_cfg_overrides(
+            arts_config_abs.read_text(),
+            {key: str(value) for key, value in config.runtime_arts_overrides.items()},
+        )
+        runtime_config_source = run_dir / "arts.runtime-template.cfg"
+        runtime_config_source.write_text(content)
+    arts_pin = parse_arts_cfg(runtime_config_source).get(KEY_PIN, "template")
+    worker_threads = _worker_threads_from_config(config, runtime_config_source)
+    sender_threads, receiver_threads = _network_threads_from_config(
+        config, runtime_config_source,
+    )
+    runtime_thread_count = worker_threads + sender_threads + receiver_threads
+    # Host-OpenMP fallback binaries use libomp for the benchmark work even when
+    # ARTS is isolated to one worker. Keep the CPU reservation tied to the
+    # requested benchmark thread count while reporting/preflighting the actual
+    # ARTS runtime thread shape separately.
+    cpu_thread_count = (
+        max(config.threads, runtime_thread_count)
+        if config.node_count == 1
+        else runtime_thread_count
+    )
+    cpu_headroom = _slurm_cpu_headroom(config.node_count)
+    cpus_per_task = cpu_thread_count + cpu_headroom
+    strict_headroom = _env_bool("CARTS_SLURM_STRICT_CPU_HEADROOM", False)
+    required_cpu_count = (
+        cpus_per_task
+        if strict_headroom
+        else cpu_thread_count
+    )
+    strict_preflight_default = True
 
     # Build srun command: gdb, perf, or plain (mutually exclusive)
     srun_prefix = (
@@ -889,7 +930,8 @@ def generate_sbatch_script(
     )
     if config.gdb:
         runtime_command = (
-            f'{runtime_env_prefix}gdb --batch -ex run '
+            f'{runtime_env_prefix}{_shell_env_prefix(config.runtime_env_overrides)}'
+            f'gdb --batch -ex run '
             f'-ex "thread apply all bt" -ex quit --args {executable_arts_abs}'
         )
     elif config.perf and perf_dir:
@@ -898,12 +940,16 @@ def generate_sbatch_script(
         # Single quotes: run_dir/perf is baked as absolute path at generation time,
         # ${SLURM_PROCID} is expanded by the inner bash (set per-task by srun)
         runtime_command = (
-            f"{runtime_env_prefix}perf stat -e {events} -I {interval_ms} -x , "
+            f"{runtime_env_prefix}{_shell_env_prefix(config.runtime_env_overrides)}"
+            f"perf stat -e {events} -I {interval_ms} -x , "
             f"-o {run_dir}/perf/arts_node_${{SLURM_PROCID}}.csv "
             f"-- {executable_arts_abs}"
         )
     else:
-        runtime_command = f"{runtime_env_prefix}{executable_arts_abs}"
+        runtime_command = (
+            f"{runtime_env_prefix}{_shell_env_prefix(config.runtime_env_overrides)}"
+            f"{executable_arts_abs}"
+        )
     srun_command = _srun_command_with_cpu_preflight(
         srun_prefix=srun_prefix,
         runtime_command=runtime_command,
@@ -942,7 +988,7 @@ def generate_sbatch_script(
         srun_cpu_bind=srun_cpu_bind,
         arts_pin=arts_pin,
         timestamp=datetime.now().isoformat(),
-        arts_config_path=arts_config_abs,
+        arts_config_path=runtime_config_source,
         runtime_arts_cfg=runtime_arts_cfg,
         perf_dir_section=perf_dir_section,
         runtime_library_section=runtime_library_section,
@@ -963,12 +1009,6 @@ def generate_sbatch_script(
         openmp_only_arg=openmp_only_arg,
         exit_status=exit_status,
     )
-
-    # Create run directory
-    # CRITICAL: run_dir must exist before sbatch submission because
-    # Slurm opens --output/--error files before executing the script body.
-    # Slurm 21.08+ does not auto-create parent directories for output paths.
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     # Write script
     script_path.write_text(script_content)

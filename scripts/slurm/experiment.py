@@ -31,6 +31,13 @@ from arts_config import (
     get_cfg_str,
     protocol_for_node_count,
 )
+from arts_runtime_modes import (
+    ARTS_RUNTIME_MODE_HOST_OPENMP,
+    ARTS_RUNTIME_MODE_TASK,
+    infer_arts_runtime_mode,
+    is_host_fallback_runtime_mode,
+    runtime_overrides_for_arts_mode,
+)
 from formatting import format_summary_line, print_footer
 
 from artifacts import ArtifactManager
@@ -58,17 +65,6 @@ from .models import (
 
 BuildArtifacts = Tuple[Path, Optional[Path], Path]
 BUILD_CONFIG_JSON_FILENAME = "build_config.json"
-
-ARTS_RUNTIME_MODE_TASK = "arts_task_runtime"
-ARTS_RUNTIME_MODE_HOST_OPENMP = "host_openmp_fallback"
-ARTS_RUNTIME_MODE_HOST_SERIAL = "host_serial_fallback"
-ARTS_RUNTIME_MODE_UNKNOWN = "unknown"
-ARTS_RUNTIME_MODE_SOURCE_MISSING = "llvm_ir_missing"
-ARTS_RUNTIME_MODE_SOURCE_AMBIGUOUS = "llvm_ir_ambiguous"
-ARTS_EPOCH_SYMBOL = "arts_initialize_and_start_epoch"
-HOST_OPENMP_MARKER_SYMBOL = "carts_benchmarks_mark_host_openmp"
-OMP_DIALECT_TOKEN = "omp."
-
 
 def _sha1_file(path: Path) -> Optional[str]:
     if not path.exists():
@@ -129,41 +125,6 @@ def _write_build_config(build_node_dir: Path,
     (build_node_dir / BUILD_CONFIG_JSON_FILENAME).write_text(
         json.dumps(payload, indent=2, default=str)
     )
-
-
-def infer_arts_runtime_mode(executable_arts: Path) -> Tuple[str, str]:
-    """Infer whether a CARTS artifact really enters the ARTS task runtime.
-
-    Some benchmark sources intentionally keep unsupported OpenMP regions on the
-    host.  They still produce a ``*_arts`` executable for apples-to-apples
-    compile plumbing, but multinode Slurm runs of those binaries execute one
-    independent host process per rank and cannot produce ARTS communication
-    counters.  Persisting this mode keeps reports honest.
-    """
-    build_dir = executable_arts.parent
-    ir_files = sorted(build_dir.glob("*-arts.ll"))
-    if not ir_files:
-        return ARTS_RUNTIME_MODE_UNKNOWN, ARTS_RUNTIME_MODE_SOURCE_MISSING
-    if len(ir_files) > 1:
-        executable_stem = executable_arts.name
-        if executable_stem.endswith("_arts"):
-            candidate = build_dir / f"{executable_stem[:-5]}-arts.ll"
-            if candidate.exists():
-                ir_files = [candidate]
-            else:
-                return ARTS_RUNTIME_MODE_UNKNOWN, ARTS_RUNTIME_MODE_SOURCE_AMBIGUOUS
-
-    ir_path = ir_files[0]
-    try:
-        text = ir_path.read_text(errors="replace")
-    except OSError:
-        return ARTS_RUNTIME_MODE_UNKNOWN, str(ir_path)
-
-    if ARTS_EPOCH_SYMBOL in text:
-        return ARTS_RUNTIME_MODE_TASK, str(ir_path)
-    if HOST_OPENMP_MARKER_SYMBOL in text or OMP_DIALECT_TOKEN in text:
-        return ARTS_RUNTIME_MODE_HOST_OPENMP, str(ir_path)
-    return ARTS_RUNTIME_MODE_HOST_SERIAL, str(ir_path)
 
 
 @dataclass(frozen=True)
@@ -530,6 +491,23 @@ def find_multinode_disabled_benchmarks(
     return disabled
 
 
+def should_skip_multinode_runtime_mode(node_count: int, arts_runtime_mode: str) -> bool:
+    """Return true for artifacts that are valid only as single-host runs."""
+    return node_count > 1 and is_host_fallback_runtime_mode(arts_runtime_mode)
+
+
+def print_multinode_runtime_skip(
+    bench: str,
+    node_count: int,
+    threads: int,
+    arts_runtime_mode: str,
+) -> None:
+    console.print(
+        f"  {bench} (nodes={node_count}, threads={threads})... "
+        f"[{Colors.INFO}]SKIP ({arts_runtime_mode} is single-node only)[/{Colors.INFO}]"
+    )
+
+
 def count_total_slurm_jobs(
     bench_list: Sequence[str],
     node_counts: Sequence[int],
@@ -659,9 +637,22 @@ class SlurmBatchExecutor:
         src_arts, src_omp = self.host.get_executable_paths(bench_path)
         results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
         include_openmp = self.request.variant != VARIANT_ARTS
+        known_arts_runtime_mode: Optional[str] = None
 
         for node_count in self.request.node_counts:
             if node_count > 1 and bench in multinode_disabled:
+                continue
+            if known_arts_runtime_mode and should_skip_multinode_runtime_mode(
+                node_count,
+                known_arts_runtime_mode,
+            ):
+                with print_lock:
+                    print_multinode_runtime_skip(
+                        bench,
+                        node_count,
+                        self.request.threads,
+                        known_arts_runtime_mode,
+                    )
                 continue
 
             bench_config = BenchmarkConfig(
@@ -727,6 +718,17 @@ class SlurmBatchExecutor:
                 and (expected_pin is None or cached_pin == expected_pin)
                 and _build_config_matches(build_node_dir, expected_build_config)
             ):
+                arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
+                known_arts_runtime_mode = arts_runtime_mode
+                if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
+                    with print_lock:
+                        print_multinode_runtime_skip(
+                            bench,
+                            node_count,
+                            self.request.threads,
+                            arts_runtime_mode,
+                        )
+                    continue
                 with print_lock:
                     console.print(
                         f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
@@ -782,6 +784,19 @@ class SlurmBatchExecutor:
                     console.print(
                         f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
                         f"[{Colors.ERROR}]FAILED (missing ARTS executable in artifacts dir)[/{Colors.ERROR}]"
+                    )
+                continue
+
+            arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
+            known_arts_runtime_mode = arts_runtime_mode
+            if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
+                _write_build_config(build_node_dir, expected_build_config)
+                with print_lock:
+                    print_multinode_runtime_skip(
+                        bench,
+                        node_count,
+                        self.request.threads,
+                        arts_runtime_mode,
                     )
                 continue
 
@@ -841,9 +856,22 @@ class SlurmBatchExecutor:
             src_arts, src_omp = self.host.get_executable_paths(bench_path)
             results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
             include_openmp = self.request.variant != VARIANT_ARTS
+            known_arts_runtime_mode: Optional[str] = None
 
             for node_count in self.request.node_counts:
                 if node_count > 1 and bench in multinode_disabled:
+                    continue
+                if known_arts_runtime_mode and should_skip_multinode_runtime_mode(
+                    node_count,
+                    known_arts_runtime_mode,
+                ):
+                    with print_lock:
+                        print_multinode_runtime_skip(
+                            bench,
+                            node_count,
+                            self.request.threads,
+                            known_arts_runtime_mode,
+                        )
                     continue
 
                 bench_config = BenchmarkConfig(
@@ -912,6 +940,17 @@ class SlurmBatchExecutor:
                     and (expected_pin is None or cached_pin == expected_pin)
                     and _build_config_matches(build_node_dir, expected_build_config)
                 ):
+                    arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
+                    known_arts_runtime_mode = arts_runtime_mode
+                    if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
+                        with print_lock:
+                            print_multinode_runtime_skip(
+                                bench,
+                                node_count,
+                                self.request.threads,
+                                arts_runtime_mode,
+                            )
+                        continue
                     with print_lock:
                         console.print(
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
@@ -967,6 +1006,19 @@ class SlurmBatchExecutor:
                         console.print(
                             f"  {bench} (nodes={node_count}, threads={self.request.threads})... "
                             f"[{Colors.ERROR}]FAILED (missing ARTS executable in artifacts dir)[/{Colors.ERROR}]"
+                        )
+                    continue
+
+                arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
+                known_arts_runtime_mode = arts_runtime_mode
+                if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
+                    _write_build_config(build_node_dir, expected_build_config)
+                    with print_lock:
+                        print_multinode_runtime_skip(
+                            bench,
+                            node_count,
+                            self.request.threads,
+                            arts_runtime_mode,
                         )
                     continue
 
@@ -1036,8 +1088,22 @@ class SlurmBatchExecutor:
             arts_runtime_mode, arts_runtime_mode_source = infer_arts_runtime_mode(
                 arts_exe
             )
+            runtime_arts_overrides, runtime_env_overrides = (
+                runtime_overrides_for_arts_mode(arts_runtime_mode)
+            )
             safe_name = bench.replace("/", "_")
             run_arts = self.request.variant != VARIANT_OPENMP
+            if run_arts and should_skip_multinode_runtime_mode(
+                node_count,
+                arts_runtime_mode,
+            ):
+                print_multinode_runtime_skip(
+                    bench,
+                    node_count,
+                    self.request.threads,
+                    arts_runtime_mode,
+                )
+                continue
             run_openmp = self.request.variant != VARIANT_ARTS and node_count == 1
             for run_num in range(1, self.request.runs + 1):
                 bench_config = BenchmarkConfig(
@@ -1054,14 +1120,21 @@ class SlurmBatchExecutor:
                         "Ensure step names and benchmark/config combinations are unique."
                     )
                 seen_run_dirs.add(run_dir_resolved)
+                runtime_env_for_run = dict(runtime_env_overrides)
+                if run_arts:
+                    runtime_env_for_run["ARTS_CONFIG"] = str(
+                        (run_dir / ARTS_CFG_FILENAME).resolve()
+                    )
                 am.save_run_config(
                     bench,
                     bench_config,
                     run_num,
                     arts_cfg_path=build_arts_cfg,
                     runtime_arts_overrides={
+                        **runtime_arts_overrides,
                         KEY_COUNTER_FOLDER: str((run_dir / COUNTERS_DIR_NAME).resolve()),
                     },
+                    env_overrides=runtime_env_for_run or None,
                     size=self.request.size,
                     cflags=self.request.cflags,
                     compile_args=compile_args_for_node_count(
@@ -1119,6 +1192,8 @@ class SlurmBatchExecutor:
                     run_arts=run_arts,
                     run_openmp=run_openmp,
                     cpu_pinning=self.request.cpu_pinning,
+                    runtime_arts_overrides=runtime_arts_overrides,
+                    runtime_env_overrides=runtime_env_for_run,
                 )
                 script_path = (
                     scripts_dir

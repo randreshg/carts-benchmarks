@@ -59,6 +59,8 @@ class SlurmJobConfig:
     run_arts: bool = True
     run_openmp: bool = True
     cpu_pinning: str = "default"
+    runtime_arts_overrides: Dict[str, str] = field(default_factory=dict)
+    runtime_env_overrides: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

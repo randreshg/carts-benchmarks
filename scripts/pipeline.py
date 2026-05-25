@@ -9,7 +9,17 @@ from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol
 
 from dekk import Colors
 from arts_config import KEY_COUNTER_FOLDER
-from common import VARIANT_ARTS, VARIANT_OPENMP, filter_benchmark_output
+from arts_runtime_modes import (
+    infer_arts_runtime_mode,
+    runtime_overrides_for_arts_mode,
+    write_runtime_arts_config,
+)
+from common import (
+    ARTS_CFG_FILENAME,
+    VARIANT_ARTS,
+    VARIANT_OPENMP,
+    filter_benchmark_output,
+)
 from execution import BenchmarkExecutionContext, BenchmarkRunFiles
 from models import (
     Artifacts,
@@ -238,6 +248,7 @@ class ConfigExecutionExecutor:
             run_files=run_files,
             run_number=run_number,
             perf_enabled=self.plan.perf_enabled,
+            build_arts=build_outputs.build_arts,
         )
 
         total_duration = (
@@ -289,8 +300,30 @@ class ConfigExecutionExecutor:
                 stderr="Build failed",
             )
         arts_env = dict(self.plan.env_overrides)
+        arts_runtime_mode, _ = infer_arts_runtime_mode(build_arts.executable)
+        runtime_arts_overrides, runtime_env_overrides = (
+            runtime_overrides_for_arts_mode(arts_runtime_mode)
+        )
+        arts_env.update(runtime_env_overrides)
         if execution.effective_arts_cfg:
-            arts_env["ARTS_CONFIG"] = str(Path(execution.effective_arts_cfg).resolve())
+            arts_cfg_path = Path(execution.effective_arts_cfg).resolve()
+            if runtime_arts_overrides and run_files.run_dir:
+                run_files.run_dir.mkdir(parents=True, exist_ok=True)
+                cfg_overrides = dict(runtime_arts_overrides)
+                if run_files.counter_dir:
+                    cfg_overrides[KEY_COUNTER_FOLDER] = str(run_files.counter_dir)
+                arts_cfg_path = write_runtime_arts_config(
+                    arts_cfg_path,
+                    run_files.run_dir / ARTS_CFG_FILENAME,
+                    cfg_overrides,
+                ).resolve()
+            elif run_files.run_dir and run_files.counter_dir:
+                arts_cfg_path = write_runtime_arts_config(
+                    arts_cfg_path,
+                    run_files.run_dir / ARTS_CFG_FILENAME,
+                    {KEY_COUNTER_FOLDER: str(run_files.counter_dir)},
+                ).resolve()
+            arts_env["ARTS_CONFIG"] = str(arts_cfg_path)
         return self.host.run_benchmark(
             build_arts.executable,
             self.plan.timeout,
@@ -362,6 +395,7 @@ class ConfigExecutionExecutor:
         run_files: BenchmarkRunFiles,
         run_number: int,
         perf_enabled: bool,
+        build_arts: BuildResult,
     ) -> Artifacts:
         artifacts = self.host.collect_artifacts(execution.bench_path)
         am = self.host.artifact_manager
@@ -418,7 +452,7 @@ class ConfigExecutionExecutor:
             has_perf=has_perf,
         )
 
-        run_cfg_path = (
+        source_cfg_path = (
             Path(artifact_paths["arts_config"])
             if artifact_paths.get("arts_config")
             else execution.effective_arts_cfg
@@ -429,20 +463,29 @@ class ConfigExecutionExecutor:
             else self.plan.env_overrides
         )
         saved_env_overrides = dict(saved_env_overrides)
-        if execution.effective_arts_cfg:
-            saved_env_overrides["ARTS_CONFIG"] = str(
-                Path(execution.effective_arts_cfg).resolve()
-            )
+        arts_runtime_mode, arts_runtime_mode_source = infer_arts_runtime_mode(
+            build_arts.executable
+        )
+        runtime_arts_overrides, runtime_env_overrides = (
+            runtime_overrides_for_arts_mode(arts_runtime_mode)
+        )
+        saved_env_overrides.update(runtime_env_overrides)
+        cfg_overrides = dict(runtime_arts_overrides)
+        if counter_path is not None:
+            cfg_overrides[KEY_COUNTER_FOLDER] = str(counter_path)
+        effective_run_cfg_path = (
+            (run_dir / ARTS_CFG_FILENAME).resolve()
+            if source_cfg_path is not None
+            else None
+        )
+        if effective_run_cfg_path is not None:
+            saved_env_overrides["ARTS_CONFIG"] = str(effective_run_cfg_path)
         am.save_run_config(
             execution.name,
             execution.config,
             run_number,
-            arts_cfg_path=run_cfg_path,
-            runtime_arts_overrides=(
-                {KEY_COUNTER_FOLDER: str(counter_path)}
-                if counter_path is not None
-                else None
-            ),
+            arts_cfg_path=source_cfg_path,
+            runtime_arts_overrides=cfg_overrides or None,
             env_overrides=saved_env_overrides,
             size=execution.size,
             cflags=execution.effective_cflags or None,
@@ -450,7 +493,11 @@ class ConfigExecutionExecutor:
             perf=perf_enabled,
             timeout=self.plan.timeout,
             arts_transport=self.plan.arts_transport,
+            arts_runtime_mode=arts_runtime_mode,
+            arts_runtime_mode_source=arts_runtime_mode_source,
         )
+        if effective_run_cfg_path is not None and effective_run_cfg_path.exists():
+            artifacts.arts_config = str(effective_run_cfg_path)
         return artifacts
 
     def _print_trace_output(

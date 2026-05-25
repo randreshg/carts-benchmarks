@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -17,18 +18,21 @@ sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from arts_config import (  # noqa: E402
+    KEY_PIN,
     KEY_PROTOCOL,
+    KEY_WORKER_THREADS,
     PROTOCOL_RDMA,
     PROTOCOL_TCP,
     compile_args_for_node_count,
     parse_arts_cfg,
 )
+from artifacts import ArtifactManager  # noqa: E402
 from execution import (  # noqa: E402
     BenchmarkExecutionContext,
     BenchmarkProcessRunner,
     BenchmarkRunFiles,
 )
-from models import BenchmarkConfig, BuildResult, RunResult, Status  # noqa: E402
+from models import Artifacts, BenchmarkConfig, BuildResult, RunResult, Status  # noqa: E402
 from pipeline import ConfigExecutionExecutor, ConfigExecutionPlan, ExecutionHooks  # noqa: E402
 from rich.console import Console  # noqa: E402
 from runner import BenchmarkRunner, generate_arts_config  # noqa: E402
@@ -47,6 +51,16 @@ class _RunOnlyHost:
             stdout="",
             stderr="",
         )
+
+
+class _ArtifactHost:
+    def __init__(self, artifact_manager: ArtifactManager) -> None:
+        self.artifact_manager = artifact_manager
+        self.trace = False
+        self.console = None
+
+    def collect_artifacts(self, bench_path: Path) -> Artifacts:
+        return Artifacts(benchmark_dir=str(bench_path))
 
 
 class BenchmarkPipelineTest(unittest.TestCase):
@@ -111,6 +125,162 @@ class BenchmarkPipelineTest(unittest.TestCase):
             self.assertIsNotNone(host.last_env)
             self.assertEqual(host.last_env["CUSTOM"], "1")
             self.assertEqual(host.last_env["ARTS_CONFIG"], str(cfg.resolve()))
+
+    def test_host_openmp_fallback_arts_run_uses_runtime_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = root / "arts.cfg"
+            cfg.write_text(
+                f"[ARTS]\n{KEY_WORKER_THREADS}=64\n{KEY_PIN}=1\nlauncher=local\n"
+            )
+            exe = root / "bench_arts"
+            exe.write_text("#!/bin/sh\n")
+            (root / "bench-arts.ll").write_text(
+                "declare void @carts_benchmarks_mark_host_openmp()\n"
+            )
+            run_dir = root / "run_1"
+            counter_dir = run_dir / "counters"
+
+            execution = BenchmarkExecutionContext(
+                name="polybench/jacobi-2d",
+                suite="polybench",
+                size="large",
+                bench_path=root,
+                config=BenchmarkConfig(
+                    arts_threads=64,
+                    arts_nodes=1,
+                    omp_threads=64,
+                    launcher="local",
+                ),
+                effective_arts_cfg=cfg,
+                desired_threads=64,
+                desired_nodes=1,
+                desired_launcher="local",
+                actual_omp_threads=64,
+                effective_cflags="",
+                run_args=[],
+                verify_tolerance=0.0,
+            )
+            plan = ConfigExecutionPlan(
+                execution=execution,
+                timeout=10,
+                run_numbers=(1,),
+                compile_args=None,
+                perf_enabled=False,
+                perf_interval=0.1,
+                env_overrides={},
+            )
+            host = _RunOnlyHost()
+            executor = ConfigExecutionExecutor(host, plan)
+
+            result = executor._run_arts(
+                BuildResult(
+                    status=Status.PASS,
+                    duration_sec=0.01,
+                    output="",
+                    executable=str(exe),
+                ),
+                execution,
+                BenchmarkRunFiles(
+                    run_number=1,
+                    run_dir=run_dir,
+                    counter_dir=counter_dir,
+                ),
+                ExecutionHooks(),
+            )
+
+            self.assertEqual(result.status, Status.PASS)
+            self.assertIsNotNone(host.last_env)
+            self.assertEqual(host.last_env["KMP_BLOCKTIME"], "0")
+            self.assertEqual(
+                host.last_env["KMP_AFFINITY"],
+                "granularity=fine,compact",
+            )
+            runtime_cfg = Path(host.last_env["ARTS_CONFIG"])
+            self.assertEqual(runtime_cfg, (run_dir / "arts.cfg").resolve())
+            parsed = parse_arts_cfg(runtime_cfg)
+            self.assertEqual(parsed[KEY_WORKER_THREADS], "1")
+            self.assertEqual(parsed[KEY_PIN], "0")
+            self.assertEqual(parsed["counter_folder"], str(counter_dir))
+
+    def test_host_openmp_fallback_run_config_reports_launched_arts_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = root / "build_arts.cfg"
+            cfg.write_text(
+                f"[ARTS]\n{KEY_WORKER_THREADS}=64\n{KEY_PIN}=1\nlauncher=local\n"
+            )
+            exe = root / "bench_arts"
+            exe.write_text("#!/bin/sh\n")
+            (root / "bench-arts.ll").write_text(
+                "declare void @carts_benchmarks_mark_host_openmp()\n"
+            )
+            am = ArtifactManager(root / "results", "ts")
+            bench = root / "bench"
+            bench.mkdir()
+            config = BenchmarkConfig(
+                arts_threads=64,
+                arts_nodes=1,
+                omp_threads=64,
+                launcher="local",
+            )
+            run_dir = am.get_run_dir("polybench/jacobi-2d", config, 1)
+
+            execution = BenchmarkExecutionContext(
+                name="polybench/jacobi-2d",
+                suite="polybench",
+                size="large",
+                bench_path=bench,
+                config=config,
+                effective_arts_cfg=cfg,
+                desired_threads=64,
+                desired_nodes=1,
+                desired_launcher="local",
+                actual_omp_threads=64,
+                effective_cflags="",
+                run_args=[],
+                verify_tolerance=0.0,
+                artifact_paths={"arts_config": str(cfg)},
+            )
+            plan = ConfigExecutionPlan(
+                execution=execution,
+                timeout=10,
+                run_numbers=(1,),
+                compile_args=None,
+                perf_enabled=False,
+                perf_interval=0.1,
+                env_overrides={},
+            )
+            host = _ArtifactHost(am)
+            executor = ConfigExecutionExecutor(host, plan)
+
+            artifacts = executor._collect_artifacts(
+                execution=execution,
+                run_files=BenchmarkRunFiles(run_number=1, run_dir=run_dir),
+                run_number=1,
+                perf_enabled=False,
+                build_arts=BuildResult(
+                    status=Status.PASS,
+                    duration_sec=0.01,
+                    output="",
+                    executable=str(exe),
+                ),
+            )
+
+            persisted_cfg = run_dir / "arts.cfg"
+            run_config = json.loads((run_dir / "run_config.json").read_text())
+            parsed = parse_arts_cfg(persisted_cfg)
+            self.assertEqual(
+                run_config["env_overrides"]["ARTS_CONFIG"],
+                str(persisted_cfg.resolve()),
+            )
+            self.assertEqual(artifacts.arts_config, str(persisted_cfg.resolve()))
+            self.assertEqual(
+                run_config["runtime_arts_overrides"][KEY_WORKER_THREADS], "1"
+            )
+            self.assertEqual(run_config["runtime_arts_overrides"][KEY_PIN], "0")
+            self.assertEqual(parsed[KEY_WORKER_THREADS], "1")
+            self.assertEqual(parsed[KEY_PIN], "0")
 
     def test_local_generated_config_synthesizes_matching_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
