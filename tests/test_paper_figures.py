@@ -37,10 +37,14 @@ class PaperFiguresGenerationTest(unittest.TestCase):
 
             self.assertTrue(artifact.readme.exists())
             self.assertTrue(artifact.data_dir.is_dir())
+            self.assertTrue(artifact.tabs_dir.is_dir())
             for name in (
                 "scaling-trends.dat",
+                "scaling-trends-labels.tex",
                 "speedup-by-strategy.dat",
+                "speedup-by-strategy-labels.tex",
                 "latency-comparison.dat",
+                "latency-comparison-labels.tex",
                 "case-gemm-strong.dat",
                 "case-gemm-capacity.dat",
                 "case-gemm-decomp.dat",
@@ -48,22 +52,40 @@ class PaperFiguresGenerationTest(unittest.TestCase):
                 self.assertTrue((artifact.data_dir / name).exists(), name)
 
             scaling = (artifact.data_dir / "scaling-trends.dat").read_text().splitlines()
-            self.assertEqual(scaling[0], "category threads geomean_speedup")
+            self.assertEqual(
+                scaling[0],
+                "category category_id benchmark series_id threads x speedup",
+            )
             self.assertGreater(len([line for line in scaling[1:] if line and not line.startswith("#")]), 0)
-            self.assertTrue(any(line.startswith("Dense_LA ") or line.startswith("Dense LA") for line in scaling))
+            self.assertTrue(any("polybench/gemm" in line for line in scaling))
 
             strategy = (artifact.data_dir / "speedup-by-strategy.dat").read_text().splitlines()
-            self.assertEqual(strategy[0], "strategy benchmark speedup")
+            self.assertEqual(strategy[0], "strategy strategy_id benchmark x speedup")
             self.assertGreater(len([line for line in strategy[1:] if line and not line.startswith("#")]), 0)
             self.assertTrue(any("polybench/gemm" in line for line in strategy))
 
             latency = (artifact.data_dir / "latency-comparison.dat").read_text().splitlines()
             self.assertEqual(latency[0], "benchmark carts_time omp_time ratio")
             self.assertGreater(len([line for line in latency[1:] if line and not line.startswith("#")]), 0)
+            latency_labels = (artifact.data_dir / "latency-comparison-labels.tex").read_text()
+            self.assertIn(r"\CartsLatencySymbolicXCoords", latency_labels)
+            self.assertIn(r"\CartsLatencyCategoryLabels", latency_labels)
+            self.assertIn(r"\CartsLatencyFirstCoord", latency_labels)
+            self.assertIn(r"\CartsLatencyLastCoord", latency_labels)
+            self.assertIn("polybench/gemm", latency_labels)
 
             gemm_strong = (artifact.data_dir / "case-gemm-strong.dat").read_text().splitlines()
             self.assertEqual(gemm_strong[0], "nodes speedup")
             self.assertGreater(len([line for line in gemm_strong[1:] if line and not line.startswith("#")]), 0)
+
+            scaling_labels = (artifact.data_dir / "scaling-trends-labels.tex").read_text()
+            self.assertIn(r"\CartsScalingTrendPlotsDenseLA", scaling_labels)
+            self.assertIn(r"\CartsScalingTrendLabelsDenseLA", scaling_labels)
+            self.assertIn("gemm", scaling_labels)
+
+            strategy_labels = (artifact.data_dir / "speedup-by-strategy-labels.tex").read_text()
+            self.assertIn(r"\CartsSpeedupStrategyAnnotations", strategy_labels)
+            self.assertIn(r"\CartsSpeedupStrategyLabels", strategy_labels)
 
             capacity = (artifact.data_dir / "case-gemm-capacity.dat").read_text().splitlines()
             self.assertEqual(capacity[0], "nodes problem_size speedup")
@@ -72,6 +94,10 @@ class PaperFiguresGenerationTest(unittest.TestCase):
             decomp = (artifact.data_dir / "case-gemm-decomp.dat").read_text().splitlines()
             self.assertEqual(decomp[0], "nodes startup_s comm_s compute_s")
             self.assertTrue(any(line.startswith("#") for line in decomp[1:]))
+
+            scaling_table = (artifact.tabs_dir / "scaling-results-body.tex").read_text()
+            self.assertIn(r"\multicolumn{2}{l}{\textit{Geometric Mean}}", scaling_table)
+            self.assertIn("gemm", scaling_table)
 
     def test_default_output_dir_uses_paper_figures_subdir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

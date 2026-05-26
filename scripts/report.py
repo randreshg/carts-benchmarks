@@ -1835,7 +1835,7 @@ def _build_single_node_acceptance_rows(
 
     bad_execution = [
         row
-        for row in measured_result_rows
+        for row in result_rows
         if _status_text(row.get("status")) != STATUS_PASS or row.get("verified") is not True
     ]
     rows.append(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ class ReportArtifact:
 class PaperFiguresArtifact:
     output_dir: Path
     data_dir: Path
+    tabs_dir: Path
     readme: Path
 
 
@@ -154,6 +156,117 @@ _PAPER_STRATEGIES: dict[str, str] = {
     "LLM": "Coarse",
 }
 
+_PAPER_CATEGORY_ORDER = {name: idx for idx, (name, _) in enumerate(_PAPER_CATEGORIES)}
+_PAPER_CATEGORY_TEX_COLOR: dict[str, str] = {
+    "Dense LA": "acmCatDenseLA",
+    "Convolution": "acmCatConvolution",
+    "Stencil": "acmCatStencil",
+    "ML": "acmCatML",
+    "Scientific": "acmCatScientific",
+    "Monte Carlo": "acmCatMonteCarlo",
+    "Memory": "acmCatMemory",
+    "LLM": "black",
+    "Other": "black",
+}
+_PAPER_SERIES_COLORS = (
+    "acmBlue",
+    "acmRed",
+    "acmGreen",
+    "acmOrange",
+    "acmPurple",
+    "acmGray",
+    "acmCatMonteCarlo",
+    "acmCatMemory",
+)
+_PAPER_STRATEGY_ORDER: dict[str, int] = {
+    "Block/ESD": 1,
+    "Stencil+Halo": 2,
+    "Coarse": 3,
+    "Other": 4,
+}
+_PAPER_BENCHMARK_LABELS: dict[str, str] = {
+    "polybench/gemm": "gemm",
+    "polybench/2mm": "2mm",
+    "polybench/3mm": "3mm",
+    "polybench/atax": "atax",
+    "polybench/bicg": "bicg",
+    "polybench/correlation": "corr",
+    "polybench/convolution-2d": "conv-2d",
+    "polybench/convolution-3d": "conv-3d",
+    "polybench/jacobi2d": "jac2d",
+    "polybench/seidel-2d": "seidel",
+    "kastors-jacobi/jacobi-for": "jac-for",
+    "kastors-jacobi/jacobi-task-dep": "jac-dep",
+    "kastors-jacobi/poisson-for": "pois-for",
+    "kastors-jacobi/poisson-task": "p-task",
+    "ml-kernels/activations": "act",
+    "ml-kernels/batchnorm": "bn",
+    "ml-kernels/layernorm": "ln",
+    "ml-kernels/pooling": "pool",
+    "seissol/volume-integral": "seis",
+    "specfem3d/stress": "spec-s",
+    "specfem3d/velocity": "spec-v",
+    "sw4lite/rhs4sg-base": "sw4-rhs",
+    "sw4lite/vel4sg-base": "sw4-vel",
+    "monte-carlo/ensemble": "ensemble",
+    "stream": "stream",
+}
+_PAPER_TABLE_CATEGORY_ORDER: dict[str, int] = {
+    "Stencil": 1,
+    "Dense LA": 2,
+    "Convolution": 3,
+    "ML": 4,
+    "Scientific": 5,
+    "Monte Carlo": 6,
+    "Memory": 7,
+    "LLM": 8,
+    "Other": 9,
+}
+_PAPER_TABLE_BENCHMARK_ORDER: dict[str, int] = {
+    "kastors-jacobi/jacobi-for": 1,
+    "kastors-jacobi/jacobi-task-dep": 2,
+    "kastors-jacobi/poisson-for": 3,
+    "kastors-jacobi/poisson-task": 4,
+    "polybench/jacobi2d": 5,
+    "polybench/seidel-2d": 6,
+    "polybench/gemm": 7,
+    "polybench/2mm": 8,
+    "polybench/3mm": 9,
+    "polybench/atax": 10,
+    "polybench/bicg": 11,
+    "polybench/convolution-2d": 12,
+    "polybench/convolution-3d": 13,
+    "polybench/correlation": 14,
+    "ml-kernels/activations": 15,
+    "ml-kernels/batchnorm": 16,
+    "ml-kernels/layernorm": 17,
+    "ml-kernels/pooling": 18,
+    "seissol/volume-integral": 19,
+    "specfem3d/stress": 20,
+    "specfem3d/velocity": 21,
+    "sw4lite/rhs4sg-base": 22,
+    "sw4lite/vel4sg-base": 23,
+    "monte-carlo/ensemble": 24,
+    "stream": 25,
+}
+_PAPER_TABLE_LABELS: dict[str, str] = {
+    "kastors-jacobi/jacobi-for": "jacobi-for",
+    "kastors-jacobi/jacobi-task-dep": "jacobi-task-dep",
+    "kastors-jacobi/poisson-for": "poisson-for",
+    "kastors-jacobi/poisson-task": "poisson-task",
+    "polybench/jacobi2d": "jacobi2d",
+    "polybench/seidel-2d": "seidel-2d",
+    "polybench/convolution-2d": "conv-2d",
+    "polybench/convolution-3d": "conv-3d",
+    "polybench/correlation": "correlation",
+    "seissol/volume-integral": "seissol",
+    "specfem3d/stress": "specfem-stress",
+    "specfem3d/velocity": "specfem-vel",
+    "sw4lite/rhs4sg-base": "sw4lite-rhs",
+    "sw4lite/vel4sg-base": "sw4lite-vel",
+    "monte-carlo/ensemble": "ensemble",
+}
+
 
 def _paper_category(benchmark: str, family: str) -> str:
     for name, members in _PAPER_CATEGORIES:
@@ -174,8 +287,10 @@ def generate_paper_figures(
         output_dir = results_dir / "presentation" / "paper-figures"
     output_dir = Path(output_dir).resolve()
     data_dir = output_dir / "data"
+    tabs_dir = output_dir / "tabs"
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
+    tabs_dir.mkdir(parents=True, exist_ok=True)
 
     rows = report_data["rows"]
     openmp_rows = report_data["tables"]["openmp"]
@@ -184,6 +299,10 @@ def generate_paper_figures(
     _write_dat_speedup_by_strategy(data_dir / "speedup-by-strategy.dat", openmp_rows)
     _write_dat_latency_comparison(data_dir / "latency-comparison.dat", openmp_rows)
     _write_dat_gemm_strong(data_dir / "case-gemm-strong.dat", rows)
+    _write_tab_scaling_results(tabs_dir / "scaling-results-body.tex", rows)
+    _write_labels_scaling_trends(data_dir / "scaling-trends-labels.tex", rows)
+    _write_labels_speedup_by_strategy(data_dir / "speedup-by-strategy-labels.tex", openmp_rows)
+    _write_labels_latency_comparison(data_dir / "latency-comparison-labels.tex", openmp_rows)
     _write_dat_pending(
         data_dir / "case-gemm-capacity.dat",
         "nodes problem_size speedup",
@@ -197,7 +316,7 @@ def generate_paper_figures(
 
     readme = output_dir / "README.md"
     readme.write_text(_paper_readme(), encoding="utf-8")
-    return PaperFiguresArtifact(output_dir=output_dir, data_dir=data_dir, readme=readme)
+    return PaperFiguresArtifact(output_dir=output_dir, data_dir=data_dir, tabs_dir=tabs_dir, readme=readme)
 
 
 def _write_dat(path: Path, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
@@ -222,10 +341,81 @@ def _dat_cell(value: Any) -> str:
     return text.replace(" ", "_") if " " in text else text
 
 
-def _write_dat_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None:
-    # Family-level summaries collapse Dense LA and Stencil into a single "polybench"
-    # bucket, so go straight to the per-run rows and apply the paper category map.
-    buckets: dict[tuple[str, int], list[float]] = defaultdict(list)
+def _write_tex(path: Path, lines: list[str]) -> None:
+    header = [
+        "% Generated by carts_report.py --paper-figures.",
+        "% Companion macros for data-driven CARTS paper figures.",
+    ]
+    path.write_text("\n".join(header + lines) + "\n", encoding="utf-8")
+
+
+def _tex_command_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "", value)
+    return token or "Unknown"
+
+
+def _tex_escape(value: Any) -> str:
+    text = str(value)
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+    }
+    return "".join(replacements.get(ch, ch) for ch in text)
+
+
+def _paper_category_sort_key(category: str) -> tuple[int, str]:
+    return (_PAPER_CATEGORY_ORDER.get(category, len(_PAPER_CATEGORY_ORDER)), category)
+
+
+def _paper_benchmark_label(benchmark: str) -> str:
+    if benchmark in _PAPER_BENCHMARK_LABELS:
+        return _PAPER_BENCHMARK_LABELS[benchmark]
+    return benchmark.rsplit("/", 1)[-1]
+
+
+def _paper_strategy_sort_key(strategy: str) -> tuple[int, str]:
+    return (_PAPER_STRATEGY_ORDER.get(strategy, len(_PAPER_STRATEGY_ORDER) + 1), strategy)
+
+
+def _paper_table_category_sort_key(category: str) -> tuple[int, str]:
+    return (_PAPER_TABLE_CATEGORY_ORDER.get(category, len(_PAPER_TABLE_CATEGORY_ORDER) + 1), category)
+
+
+def _paper_table_benchmark_sort_key(benchmark: str) -> tuple[int, str]:
+    return (_PAPER_TABLE_BENCHMARK_ORDER.get(benchmark, len(_PAPER_TABLE_BENCHMARK_ORDER) + 1), benchmark)
+
+
+def _paper_table_label(benchmark: str) -> str:
+    if benchmark in _PAPER_TABLE_LABELS:
+        return _PAPER_TABLE_LABELS[benchmark]
+    return _paper_benchmark_label(benchmark)
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _fmt_tex_float(value: float | None) -> str:
+    if value is None or not math.isfinite(value):
+        return "nan"
+    return f"{value:.3g}"
+
+
+def _paper_scaling_series_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    raw_rows: list[dict[str, Any]] = []
+    benchmarks: set[str] = set()
     for row in rows:
         if row.get("phase_kind") != PHASE_THREAD or row.get("nodes") != 1:
             continue
@@ -233,22 +423,60 @@ def _write_dat_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None:
             continue
         speedup = row.get("e2e_self_speedup")
         threads = row.get("threads")
-        if speedup is None or threads is None:
+        benchmark = str(row.get("benchmark") or "")
+        if not benchmark or speedup is None or threads is None:
             continue
-        category = _paper_category(str(row.get("benchmark") or ""), str(row.get("family") or ""))
-        buckets[(category, int(threads))].append(float(speedup))
-    out_rows: list[tuple[Any, ...]] = []
-    for (category, threads), values in sorted(buckets.items()):
-        positives = [v for v in values if v > 0.0]
-        if not positives:
-            continue
-        geomean = math.exp(sum(math.log(v) for v in positives) / len(positives))
-        out_rows.append((category, threads, geomean))
-    _write_dat(path, ["category", "threads", "geomean_speedup"], out_rows)
+        category = _paper_category(benchmark, str(row.get("family") or ""))
+        thread_value = int(threads)
+        raw_rows.append({
+            "category": category,
+            "category_id": _paper_category_sort_key(category)[0] + 1,
+            "benchmark": benchmark,
+            "threads": thread_value,
+            "x": {8: 1, 16: 2, 32: 3, 64: 4}.get(thread_value, thread_value),
+            "speedup": float(speedup),
+        })
+        benchmarks.add(benchmark)
+
+    series_ids = {
+        benchmark: idx
+        for idx, benchmark in enumerate(sorted(benchmarks), start=1)
+    }
+    for row in raw_rows:
+        row["series_id"] = series_ids[str(row["benchmark"])]
+    raw_rows.sort(
+        key=lambda item: (
+            int(item["category_id"]),
+            str(item["benchmark"]),
+            int(item["threads"]),
+        )
+    )
+    return raw_rows
+
+
+def _write_dat_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None:
+    out_rows = [
+        (
+            row["category"],
+            row["category_id"],
+            row["benchmark"],
+            row["series_id"],
+            row["threads"],
+            row["x"],
+            row["speedup"],
+        )
+        for row in _paper_scaling_series_rows(rows)
+    ]
+    _write_dat(
+        path,
+        ["category", "category_id", "benchmark", "series_id", "threads", "x", "speedup"],
+        out_rows,
+    )
 
 
 def _write_dat_speedup_by_strategy(path: Path, openmp_rows: list[dict[str, Any]]) -> None:
     out_rows: list[tuple[Any, ...]] = []
+    strategy_counts: dict[str, int] = defaultdict(int)
     for row in openmp_rows:
         benchmark = row.get("benchmark")
         ratio = row.get("carts_vs_openmp")
@@ -257,9 +485,12 @@ def _write_dat_speedup_by_strategy(path: Path, openmp_rows: list[dict[str, Any]]
         family = str(row.get("family") or benchmark)
         category = _paper_category(str(benchmark), family)
         strategy = _PAPER_STRATEGIES.get(category, "Other")
-        out_rows.append((strategy, str(benchmark), float(ratio)))
+        strategy_counts[strategy] += 1
+        x_base = _PAPER_STRATEGY_ORDER.get(strategy, len(_PAPER_STRATEGY_ORDER) + 1)
+        x_value = x_base + (strategy_counts[strategy] - 1) * 0.05 - 0.20
+        out_rows.append((strategy, x_base, str(benchmark), x_value, float(ratio)))
     out_rows.sort()
-    _write_dat(path, ["strategy", "benchmark", "speedup"], out_rows)
+    _write_dat(path, ["strategy", "strategy_id", "benchmark", "x", "speedup"], out_rows)
 
 
 def _write_dat_latency_comparison(path: Path, openmp_rows: list[dict[str, Any]]) -> None:
@@ -274,6 +505,69 @@ def _write_dat_latency_comparison(path: Path, openmp_rows: list[dict[str, Any]])
         out_rows.append((str(benchmark), float(carts_time), float(omp_time), ratio))
     out_rows.sort()
     _write_dat(path, ["benchmark", "carts_time", "omp_time", "ratio"], out_rows)
+
+
+def _fmt_tex_speedup_cell(value: float | None) -> str:
+    if value is None or not math.isfinite(value):
+        return "--"
+    text = f"{value:.2f}" + r"$\times$"
+    if value >= 1.5:
+        return rf"\textbf{{{text}}}"
+    return text
+
+
+def _write_tab_scaling_results(path: Path, rows: list[dict[str, Any]]) -> None:
+    thread_columns = (8, 16, 32, 64)
+    grouped: dict[str, dict[str, dict[int, float]]] = defaultdict(lambda: defaultdict(dict))
+    for row in _paper_scaling_series_rows(rows):
+        thread_value = int(row["threads"])
+        if thread_value not in thread_columns:
+            continue
+        grouped[str(row["category"])][str(row["benchmark"])][thread_value] = float(row["speedup"])
+
+    lines: list[str] = [
+        "% Generated by carts_report.py --paper-figures.",
+        "% Body rows for tabs/scaling-results.tex.",
+        "",
+    ]
+    geomean_values: dict[int, list[float]] = {thread: [] for thread in thread_columns}
+    first_category = True
+    for category in sorted(grouped, key=_paper_table_category_sort_key):
+        benchmarks = sorted(grouped[category], key=_paper_table_benchmark_sort_key)
+        if not benchmarks:
+            continue
+        if not first_category:
+            lines.append(r"\midrule")
+        first_category = False
+        row_count = len(benchmarks)
+        for idx, benchmark in enumerate(benchmarks):
+            cells: list[str] = []
+            for thread_value in thread_columns:
+                value = grouped[category][benchmark].get(thread_value)
+                if value is not None and value > 0.0:
+                    geomean_values[thread_value].append(value)
+                cells.append(_fmt_tex_speedup_cell(value))
+            prefix = (
+                rf"\multirow{{{row_count}}}{{*}}{{{_tex_escape(category)}}} & "
+                if idx == 0
+                else " & "
+            )
+            label = _tex_escape(_paper_table_label(benchmark))
+            lines.append(prefix + label + " & " + " & ".join(cells) + r" \\")
+
+    lines.append(r"\midrule")
+    geomean_cells: list[str] = []
+    for thread_value in thread_columns:
+        values = geomean_values[thread_value]
+        geomean = (
+            math.exp(sum(math.log(value) for value in values) / len(values))
+            if values
+            else None
+        )
+        geomean_cells.append(_fmt_tex_speedup_cell(geomean))
+    lines.append(r"\multicolumn{2}{l}{\textit{Geometric Mean}} & " + " & ".join(geomean_cells) + r" \\")
+    lines.append(r"\bottomrule")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_dat_gemm_strong(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -292,6 +586,162 @@ def _write_dat_gemm_strong(path: Path, rows: list[dict[str, Any]]) -> None:
     _write_dat(path, ["nodes", "speedup"], out_rows)
 
 
+def _write_labels_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None:
+    endpoints: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in _paper_scaling_series_rows(rows):
+        benchmark = str(row["benchmark"])
+        category = str(row["category"])
+        current = endpoints[category].get(benchmark)
+        if current is None or int(row["threads"]) > int(current["threads"]):
+            endpoints[category][benchmark] = {
+                "benchmark": benchmark,
+                "series_id": int(row["series_id"]),
+                "threads": int(row["threads"]),
+                "x": int(row["x"]),
+                "speedup": float(row["speedup"]),
+            }
+
+    lines: list[str] = [""]
+    for category in sorted(endpoints, key=_paper_category_sort_key):
+        token = _tex_command_token(category)
+        values = sorted(
+            endpoints[category].values(),
+            key=lambda item: (str(item["benchmark"]), int(item["threads"])),
+        )
+        positives = [item["speedup"] for item in values if item["speedup"] > 0.0]
+        geomean = (
+            math.exp(sum(math.log(value) for value in positives) / len(positives))
+            if positives
+            else None
+        )
+        lines.append(
+            rf"\providecommand{{\CartsScalingTrendGeomean{token}}}{{{_fmt_tex_float(geomean)}}}"
+        )
+        lines.append(rf"\providecommand{{\CartsScalingTrendPlots{token}}}{{%")
+        for idx, item in enumerate(values):
+            color = _PAPER_SERIES_COLORS[idx % len(_PAPER_SERIES_COLORS)]
+            series_id = int(item["series_id"])
+            lines.append(
+                rf"  \addplot[color={color}, mark=*] "
+                rf"table[x=x, y=speedup, restrict expr to domain={{\thisrow{{series_id}}}}{{{series_id}:{series_id}}}] "
+                rf"{{\CartsScalingTrendTable}};"
+            )
+        lines.append("}")
+        lines.append(rf"\providecommand{{\CartsScalingTrendLabels{token}}}{{%")
+        for idx, item in enumerate(values):
+            color = _PAPER_SERIES_COLORS[idx % len(_PAPER_SERIES_COLORS)]
+            label = _tex_escape(_paper_benchmark_label(str(item["benchmark"])))
+            x_value = int(item["x"])
+            speedup = _fmt_tex_float(float(item["speedup"]))
+            lines.append(
+                rf"  \node[right, font=\tiny, {color}] at (axis cs:{x_value},{speedup}) {{{label}}};"
+            )
+        lines.append("}")
+        lines.append("")
+    _write_tex(path, lines)
+
+
+def _write_labels_speedup_by_strategy(path: Path, openmp_rows: list[dict[str, Any]]) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in openmp_rows:
+        benchmark = row.get("benchmark")
+        ratio = row.get("carts_vs_openmp")
+        if benchmark is None or ratio is None:
+            continue
+        category = _paper_category(str(benchmark), str(row.get("family") or benchmark))
+        strategy = _PAPER_STRATEGIES.get(category, "Other")
+        grouped[strategy].append({
+            "benchmark": str(benchmark),
+            "category": category,
+            "speedup": float(ratio),
+        })
+
+    lines: list[str] = ["", r"\providecommand{\CartsSpeedupStrategyAnnotations}{%"]
+    for strategy in sorted(grouped, key=_paper_strategy_sort_key):
+        values = grouped[strategy]
+        speedups = [float(item["speedup"]) for item in values]
+        x_pos = _PAPER_STRATEGY_ORDER.get(strategy, len(_PAPER_STRATEGY_ORDER) + 1)
+        median = _median(speedups)
+        win_pct = 100.0 * sum(1 for value in speedups if value >= 1.0) / len(speedups)
+        lines.append(
+            rf"  \addplot[color=black, thick, no marks] coordinates "
+            rf"{{({x_pos - 0.30:.3g},{_fmt_tex_float(median)}) ({x_pos + 0.30:.3g},{_fmt_tex_float(median)})}};"
+        )
+        lines.append(
+            rf"  \node[font=\scriptsize\bfseries, anchor=south] at (axis cs:{x_pos},5.8) "
+            rf"{{{win_pct:.0f}\% win}};"
+        )
+        lines.append(
+            rf"  \node[font=\scriptsize, anchor=north, text=black!70] at (axis cs:{x_pos},0.32) "
+            rf"{{{len(values)} benchmarks}};"
+        )
+        lines.append(
+            rf"  \node[font=\tiny\bfseries, anchor=east] at (axis cs:{x_pos - 0.32:.3g},{_fmt_tex_float(median)}) "
+            rf"{{{_fmt_tex_float(median)}$\times$}};"
+        )
+    lines.append("}")
+    lines.append("")
+    lines.append(r"\providecommand{\CartsSpeedupStrategyLabels}{%")
+    for strategy in sorted(grouped, key=_paper_strategy_sort_key):
+        values = sorted(grouped[strategy], key=lambda item: item["speedup"], reverse=True)
+        selected = values if len(values) <= 8 else values[:4] + values[-3:]
+        x_base = _PAPER_STRATEGY_ORDER.get(strategy, len(_PAPER_STRATEGY_ORDER) + 1)
+        for idx, item in enumerate(selected):
+            offset = (idx - (len(selected) - 1) / 2.0) * 0.05
+            x_pos = x_base + offset
+            color = _PAPER_CATEGORY_TEX_COLOR.get(str(item["category"]), "black")
+            label = _tex_escape(_paper_benchmark_label(str(item["benchmark"])))
+            lines.append(
+                rf"  \node[font=\tiny, anchor=west, text={color}] at "
+                rf"(axis cs:{x_pos:.3g},{_fmt_tex_float(float(item['speedup']))}) {{{label}}};"
+            )
+    lines.append("}")
+    _write_tex(path, lines)
+
+
+def _write_labels_latency_comparison(path: Path, openmp_rows: list[dict[str, Any]]) -> None:
+    rows: list[dict[str, Any]] = []
+    for row in openmp_rows:
+        benchmark = row.get("benchmark")
+        ratio = row.get("carts_vs_openmp")
+        if benchmark is None or ratio is None:
+            continue
+        category = _paper_category(str(benchmark), str(row.get("family") or benchmark))
+        rows.append({
+            "benchmark": str(benchmark),
+            "category": category,
+            "coord": _dat_cell(str(benchmark)),
+            "label": _paper_benchmark_label(str(benchmark)),
+        })
+    rows.sort(key=lambda item: (_paper_category_sort_key(str(item["category"])), str(item["benchmark"])))
+
+    coords = ",".join(str(item["coord"]) for item in rows)
+    ticklabels = ",".join("{" + _tex_escape(item["label"]) + "}" for item in rows)
+    first_coord = str(rows[0]["coord"]) if rows else ""
+    last_coord = str(rows[-1]["coord"]) if rows else ""
+    lines = [
+        "",
+        rf"\providecommand{{\CartsLatencySymbolicXCoords}}{{{coords}}}",
+        rf"\providecommand{{\CartsLatencyXTickLabels}}{{{ticklabels}}}",
+        rf"\providecommand{{\CartsLatencyFirstCoord}}{{{first_coord}}}",
+        rf"\providecommand{{\CartsLatencyLastCoord}}{{{last_coord}}}",
+        r"\providecommand{\CartsLatencyCategoryLabels}{%",
+    ]
+    by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in rows:
+        by_category[str(item["category"])].append(item)
+    for category in sorted(by_category, key=_paper_category_sort_key):
+        category_rows = by_category[category]
+        middle = category_rows[len(category_rows) // 2]
+        color = _PAPER_CATEGORY_TEX_COLOR.get(category, "gray")
+        lines.append(
+            rf"  \node[font=\tiny\bfseries, text={color}] at "
+            rf"(axis cs:{middle['coord']},6.4) {{{_tex_escape(category)}}};"
+        )
+    lines.append("}")
+    _write_tex(path, lines)
+
+
 def _paper_readme() -> str:
     return "\n".join([
         "# Paper Figures Data",
@@ -302,12 +752,21 @@ def _paper_readme() -> str:
         "",
         "| File | Source aggregate | Columns |",
         "|---|---|---|",
-        "| `scaling-trends.dat` | `family_thread_summary` rebucketed by paper category | `category threads geomean_speedup` |",
-        "| `speedup-by-strategy.dat` | `openmp` rows (max-thread CARTS/OpenMP ratio) tagged by partitioning strategy | `strategy benchmark speedup` |",
+        "| `scaling-trends.dat` | single-node per-benchmark thread-sweep rows tagged by paper category | `category category_id benchmark series_id threads x speedup` |",
+        "| `speedup-by-strategy.dat` | `openmp` rows (max-thread CARTS/OpenMP ratio) tagged by partitioning strategy | `strategy strategy_id benchmark x speedup` |",
         "| `latency-comparison.dat` | `openmp` rows at the max-thread point | `benchmark carts_time omp_time ratio` |",
         "| `case-gemm-strong.dat` | `polybench/gemm` multinode self-speedup vs. 1 node | `nodes speedup` |",
         "| `case-gemm-capacity.dat` | weak-scaling GEMM sweep (pending) | `nodes problem_size speedup` |",
         "| `case-gemm-decomp.dat` | GEMM time breakdown (pending) | `nodes startup_s comm_s compute_s` |",
+        "",
+        "The exporter also emits `tabs/scaling-results-body.tex`, which is the",
+        "regenerated body of the paper's thread-scaling table.",
+        "",
+        "The three inline-submission figures also get companion macro files:",
+        "`scaling-trends-labels.tex`, `speedup-by-strategy-labels.tex`, and",
+        "`latency-comparison-labels.tex`. These files carry category annotations,",
+        "selected endpoint labels, symbolic x-coordinate lists, and median/win-rate labels",
+        "so the TeX figures can keep layout annotations out of hardcoded coordinates.",
         "",
         "Pending files contain only the header plus a `# pending multinode results` comment so the",
         "paper figure can detect emptiness and render a placeholder.",
