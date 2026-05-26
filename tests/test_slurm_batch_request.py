@@ -37,6 +37,54 @@ class _CapturingExecutor:
 
 
 class SlurmBatchRequestConstructionTest(unittest.TestCase):
+    def test_slurm_exclude_with_launcher_appends_submit_host(self) -> None:
+        exclude_nodes = runner._slurm_exclude_with_launcher(
+            "d16u43,h08u31",
+            nodelist=None,
+            launcher_host="a08u25.cluster",
+        )
+        self.assertEqual(exclude_nodes, "d16u43,h08u31,a08u25")
+
+    def test_slurm_exclude_with_launcher_preserves_explicit_nodelist(self) -> None:
+        exclude_nodes = runner._slurm_exclude_with_launcher(
+            "d16u43",
+            nodelist="a08u25",
+            launcher_host="a08u25",
+        )
+        self.assertEqual(exclude_nodes, "d16u43")
+
+    def test_run_step_slurm_excludes_launcher_host(self) -> None:
+        calls = []
+
+        def capture_batch(**kwargs):
+            calls.append(kwargs)
+
+        with mock.patch.object(runner, "_execute_slurm_batch", capture_batch), \
+                mock.patch.object(runner.platform, "node", lambda: "a08u25"):
+            runner._run_step_slurm(
+                bench_list=["polybench/gemm"],
+                size="small",
+                node_counts=[2],
+                runs=1,
+                partition="debug",
+                timeout=30,
+                time_limit="00:10:00",
+                arts_config=None,
+                threads_list=[64],
+                results_dir=Path("./results"),
+                verbose=False,
+                cflags=None,
+                compile_args=None,
+                exclude_nodes="d16u43,h08u31",
+                nodelist=None,
+                perf=False,
+                perf_interval=0.1,
+                dry_run=True,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["exclude_nodes"], "d16u43,h08u31,a08u25")
+
     def test_execute_slurm_batch_passes_max_jobs_to_request(self) -> None:
         profile = Path("configs/profiles/profile-comm.cfg")
         with mock.patch.object(runner, "BenchmarkRunner", _FakeRunner), mock.patch.object(

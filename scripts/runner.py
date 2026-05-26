@@ -184,7 +184,9 @@ from pipeline import (
 
 # Artifact management
 from artifacts import ArtifactManager
+from arts_runtime_modes import infer_arts_runtime_mode
 from report import generate_report
+from run_locks import BenchmarkRunLockError, BenchmarkRunLocks
 
 # Reproducibility metadata
 from metadata import (
@@ -3824,12 +3826,17 @@ def export_json(
 
     # Convert results to dict
     def result_to_dict(r: BenchmarkResult) -> Dict[str, Any]:
+        arts_runtime_mode, arts_runtime_mode_source = infer_arts_runtime_mode(
+            r.artifacts.executable_arts
+        )
         return {
             "name": r.name,
             "suite": r.suite,
             "size": r.size,
             "size_params": r.size_params,
             "run_phase": r.run_phase,
+            "arts_runtime_mode": arts_runtime_mode,
+            "arts_runtime_mode_source": arts_runtime_mode_source,
             "config": {
                 "arts_threads": r.config.arts_threads,
                 "arts_nodes": r.config.arts_nodes,
@@ -4553,6 +4560,24 @@ def _run_step(
     )
 
 
+def _slurm_exclude_with_launcher(
+    exclude_nodes: Optional[str],
+    nodelist: Optional[str],
+    launcher_host: Optional[str] = None,
+) -> Optional[str]:
+    if nodelist:
+        return exclude_nodes
+
+    host = (launcher_host or platform.node() or "").split(".", 1)[0].strip()
+    if not host:
+        return exclude_nodes
+
+    nodes = [node.strip() for node in (exclude_nodes or "").split(",") if node.strip()]
+    if host not in nodes:
+        nodes.append(host)
+    return ",".join(nodes)
+
+
 def _run_step_slurm(
     bench_list: List[str],
     size: str,
@@ -4587,6 +4612,7 @@ def _run_step_slurm(
 
     nodes_arg = ",".join(str(n) for n in node_counts)
     thread_values = threads_list if threads_list else [None]
+    effective_exclude_nodes = _slurm_exclude_with_launcher(exclude_nodes, nodelist)
 
     for slurm_threads in thread_values:
         _execute_slurm_batch(
@@ -4612,7 +4638,7 @@ def _run_step_slurm(
             perf=perf,
             perf_interval=perf_interval,
             cpu_pinning=cpu_pinning,
-            exclude_nodes=exclude_nodes,
+            exclude_nodes=effective_exclude_nodes,
             nodelist=nodelist,
             exclude=None,
             max_jobs=max_jobs,
@@ -4877,20 +4903,17 @@ def run(
     clean = not no_clean
     size_from_cli = _is_option_from_cli(ctx, "size", "--size", "-s")
 
-    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
     # Resolve results_dir — default to carts-benchmarks/results/
     if results_dir is None:
         results_dir = BENCHMARKS_DIR / "results"
     results_dir = Path(results_dir).resolve()
 
-    # Create ArtifactManager — every run gets a self-contained timestamped directory
-    am = ArtifactManager(results_dir, run_timestamp)
-
-    # Create runner with artifact manager
+    # Create the runner before opening artifacts; discovery does not need output files.
     runner = BenchmarkRunner(
         console, verbose=verbose, quiet=quiet, trace=trace, clean=clean,
-        debug=debug_level, artifact_manager=am,
+        debug=debug_level, artifact_manager=None,
     )
 
     # Parse thread/node specification (base CLI config)
@@ -4994,6 +5017,32 @@ def run(
     if has_thread_sweep and has_node_sweep:
         print_error("Cannot sweep both threads and nodes simultaneously.")
         raise typer.Exit(2)
+    if slurm and weak_scaling:
+        print_error("--weak-scaling is not supported with --slurm.")
+        raise typer.Exit(2)
+
+    command_str = "carts benchmarks " + " ".join(sys.argv[1:])
+    run_locks = BenchmarkRunLocks(
+        results_dir=results_dir,
+        run_id=run_timestamp,
+        command=command_str,
+        mode="slurm" if slurm else "local",
+        cwd=Path.cwd(),
+    )
+    try:
+        run_locks.acquire()
+        am = ArtifactManager(results_dir, run_timestamp)
+    except BenchmarkRunLockError as e:
+        print_error(str(e))
+        raise typer.Exit(2)
+    except FileExistsError as e:
+        run_locks.release()
+        print_error(str(e))
+        raise typer.Exit(2)
+    except Exception:
+        run_locks.release()
+        raise
+    runner.artifact_manager = am
 
     step_defaults = StepCliDefaults(
         size=size,
@@ -5016,10 +5065,6 @@ def run(
     )
 
     if slurm:
-        if weak_scaling:
-            print_error("--weak-scaling is not supported with --slurm.")
-            raise typer.Exit(2)
-
         try:
             _STEP_EXECUTOR.execute_slurm_steps(
                 steps=steps,
@@ -5041,6 +5086,8 @@ def run(
         except ValueError as e:
             console.print(f"\n[{Colors.ERROR}]Error:[/{Colors.ERROR}] {e}")
             raise typer.Exit(1)
+        finally:
+            run_locks.release()
         return
 
     if exclude_nodes:
@@ -5156,6 +5203,7 @@ def run(
         )
     except ValueError as e:
         console.print(f"\n[{Colors.ERROR}]Error:[/{Colors.ERROR}] {e}")
+        run_locks.release()
         raise typer.Exit(1)
 
     outlier_counts = annotate_startup_outliers(results, write_artifacts=True)
@@ -5210,7 +5258,6 @@ def run(
         print_warning("Report not generated (openpyxl may be unavailable in this environment).")
 
     # Write manifest.json
-    command_str = "carts benchmarks " + " ".join(sys.argv[1:])
     am.write_manifest(results, command_str, total_duration)
 
     # Show single results path
@@ -5220,6 +5267,7 @@ def run(
 
     # Exit with error if any failures
     failed = sum(1 for r in results if benchmark_result_failed(r))
+    run_locks.release()
     if failed > 0:
         raise typer.Exit(1)
 

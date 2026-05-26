@@ -1105,6 +1105,20 @@ class SlurmBatchExecutor:
                 )
                 continue
             run_openmp = self.request.variant != VARIANT_ARTS and node_count == 1
+            reference: Optional[ReferenceChecksum] = None
+            requires_reference = run_arts and not run_openmp and not self.request.dry_run
+            if requires_reference:
+                reference = self.host.ensure_omp_reference(
+                    bench,
+                    self.request.size,
+                    self.request.cflags or "",
+                    self.request.threads,
+                    self.request.timeout,
+                )
+                if reference.status != Status.PASS or reference.checksum is None:
+                    print_warning(
+                        f"{bench} reference unavailable; Slurm results will fail checksum verification"
+                    )
             for run_num in range(1, self.request.runs + 1):
                 bench_config = BenchmarkConfig(
                     arts_threads=self.request.threads,
@@ -1158,6 +1172,9 @@ class SlurmBatchExecutor:
                     ),
                     arts_runtime_mode=arts_runtime_mode,
                     arts_runtime_mode_source=arts_runtime_mode_source,
+                    reference_checksum=reference.checksum if reference else None,
+                    reference_source=reference.source if reference else None,
+                    reference_threads=reference.omp_threads if reference else None,
                 )
                 am.record_run(
                     bench,
@@ -1194,6 +1211,7 @@ class SlurmBatchExecutor:
                     cpu_pinning=self.request.cpu_pinning,
                     runtime_arts_overrides=runtime_arts_overrides,
                     runtime_env_overrides=runtime_env_for_run,
+                    requires_reference_verification=requires_reference,
                 )
                 script_path = (
                     scripts_dir

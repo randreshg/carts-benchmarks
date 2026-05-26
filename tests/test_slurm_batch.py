@@ -722,11 +722,11 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 content,
             )
             self.assertIn(
-                'export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-1}"',
+                'export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-256}"',
                 content,
             )
             self.assertIn(
-                'export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-0}"',
+                'export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-1}"',
                 content,
             )
             self.assertIn(
@@ -767,6 +767,18 @@ class SlurmBatchPollingTest(unittest.TestCase):
             )
             self.assertIn(
                 'export ARTS_TRACE_RDMA_SUMMARY="${ARTS_TRACE_RDMA_SUMMARY:-0}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-0}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_SEND_MAX_ITERS="${ARTS_RDMA_SEND_MAX_ITERS:-0}"',
+                content,
+            )
+            self.assertIn(
+                'export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-0}"',
                 content,
             )
             self.assertNotIn("--ntasks-per-node=4", content)

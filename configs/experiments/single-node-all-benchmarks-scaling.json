@@ -1,0 +1,49 @@
+{
+  "name": "single-node-all-benchmarks-scaling",
+  "description": "Complete single-node study for every enabled benchmark discovered by the runner. The medium thread sweep gives a practical 1..64-thread scaling shape for all workloads, the large 64-thread repeated step is the competitive OpenMP comparison point, and the final 64-thread diagnostic step captures runtime structure for generated-ARTS rows.",
+  "steps": [
+    {
+      "name": "medium-thread-sweep",
+      "description": "Run every enabled benchmark on one node across 1,2,4,8,16,32,64 threads. Medium size keeps slow single-thread rows observable without turning the scaling screen into an all-day run.",
+      "size": "medium",
+      "threads": "1,2,4,8,16,32,64",
+      "nodes": "1",
+      "launcher": "local",
+      "arts_config": "local.cfg",
+      "rdma": false,
+      "debug": 0,
+      "runs": 1,
+      "perf": false,
+      "timeout": 600
+    },
+    {
+      "name": "large-64-competitive",
+      "description": "Run every enabled benchmark at the target single-node point: large size, 64 threads, three paired samples. This is the stable CARTS-vs-OpenMP acceptance step.",
+      "size": "large",
+      "threads": "64",
+      "nodes": "1",
+      "launcher": "local",
+      "arts_config": "local.cfg",
+      "rdma": false,
+      "debug": 0,
+      "runs": 3,
+      "perf": false,
+      "timeout": 300
+    },
+    {
+      "name": "large-64-runtime-diagnostics",
+      "description": "Capture thread-level runtime diagnostics at the 64-thread target point. Host OpenMP fallback rows stay isolated; generated ARTS rows expose EDT/runtime structure for follow-up optimization.",
+      "size": "large",
+      "threads": "64",
+      "nodes": "1",
+      "launcher": "local",
+      "arts_config": "local.cfg",
+      "rdma": false,
+      "debug": 0,
+      "runs": 1,
+      "perf": false,
+      "profile": "profile-thread-edt.cfg",
+      "timeout": 300
+    }
+  ]
+}

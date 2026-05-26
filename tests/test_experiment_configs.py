@@ -18,6 +18,7 @@ NO_PERF_SCALABILITY_CONFIGS = [
     "scale-multinode-1-to-64.json",
     "scale-multinode-64n-rdma.json",
     "scale-single-node-large.json",
+    "single-node-all-benchmarks-scaling.json",
 ]
 
 MULTINODE_EXTRALARGE_CONFIGS = [
@@ -34,6 +35,50 @@ FULL_NODE_SWEEP = "1,2,4,8,16,32,64"
 
 
 class ExperimentConfigTest(unittest.TestCase):
+    def test_single_node_all_benchmarks_scaling_experiment_is_self_contained(self) -> None:
+        payload = json.loads(
+            (CONFIG_DIR / "single-node-all-benchmarks-scaling.json").read_text()
+        )
+        self.assertEqual(payload["name"], "single-node-all-benchmarks-scaling")
+        self.assertEqual(
+            [step["name"] for step in payload["steps"]],
+            [
+                "medium-thread-sweep",
+                "large-64-competitive",
+                "large-64-runtime-diagnostics",
+            ],
+        )
+
+        for step in payload["steps"]:
+            with self.subTest(step=step["name"]):
+                self.assertNotIn("benchmarks", step)
+                self.assertEqual(step["nodes"], "1")
+                self.assertEqual(step["launcher"], "local")
+                self.assertEqual(step["arts_config"], "local.cfg")
+                self.assertFalse(step["rdma"])
+                self.assertFalse(step.get("perf", False))
+                self.assertNotIn("perf_interval", step)
+                self.assertIn("64", {item.strip() for item in step["threads"].split(",")})
+
+        sweep = payload["steps"][0]
+        self.assertEqual(sweep["size"], "medium")
+        self.assertEqual(sweep["threads"], "1,2,4,8,16,32,64")
+        self.assertEqual(sweep["runs"], 1)
+        self.assertEqual(sweep["timeout"], 600)
+
+        competitive = payload["steps"][1]
+        self.assertEqual(competitive["size"], "large")
+        self.assertEqual(competitive["threads"], "64")
+        self.assertEqual(competitive["runs"], 3)
+        self.assertEqual(competitive["timeout"], 300)
+
+        diagnostics = payload["steps"][2]
+        self.assertEqual(diagnostics["size"], "large")
+        self.assertEqual(diagnostics["threads"], "64")
+        self.assertEqual(diagnostics["runs"], 1)
+        self.assertEqual(diagnostics["profile"], "profile-thread-edt.cfg")
+        self.assertEqual(diagnostics["timeout"], 300)
+
     def test_single_node_scaling_uses_large_with_90s_timeout(self) -> None:
         payload = json.loads((CONFIG_DIR / "scale-single-node-large.json").read_text())
         self.assertEqual(payload["name"], "scale-single-node-large")

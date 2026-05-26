@@ -81,6 +81,23 @@ class BenchmarkVerificationTest(unittest.TestCase):
         self.assertTrue(verification.correct)
         self.assertEqual(verification.mode, "arts_only")
 
+    def test_determine_status_checks_reference_even_when_openmp_was_not_run(self) -> None:
+        status, verification = determine_status(
+            arts_exit=0,
+            omp_exit=-1,
+            arts_checksum="123.0",
+            omp_checksum=None,
+            reference_checksum="456.0",
+            reference_source="/tmp/reference.json",
+            reference_omp_threads=64,
+            tolerance=0.01,
+            arts_only=True,
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertFalse(verification.correct)
+        self.assertEqual(verification.mode, "stored_omp_reference")
+        self.assertEqual(verification.reference_source, "/tmp/reference.json")
+
     def test_determine_status_passes_openmp_only_without_arts(self) -> None:
         status, verification = determine_status(
             arts_exit=-1,

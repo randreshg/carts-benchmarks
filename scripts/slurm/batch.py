@@ -739,8 +739,8 @@ def _rdma_environment_section(config: SlurmJobConfig) -> str:
         return ""
     return """export ARTS_RDMA_CONNECT_HELPER="${ARTS_RDMA_CONNECT_HELPER:-1}"
 export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"
-export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-1}"
-export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-0}"
+export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-256}"
+export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-1}"
 export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"
 export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"
 export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"
@@ -755,9 +755,9 @@ export ARTS_LISTEN_BACKLOG="${ARTS_LISTEN_BACKLOG:-0}"
 export ARTS_RDMA_ABANDONED_CONNECT_QUARANTINE_US="${ARTS_RDMA_ABANDONED_CONNECT_QUARANTINE_US:-0}"
 export ARTS_TRACE_RDMA_SUMMARY="${ARTS_TRACE_RDMA_SUMMARY:-0}"
 export ARTS_TRACE_RDMA_SUMMARY_INTERVAL_US="${ARTS_TRACE_RDMA_SUMMARY_INTERVAL_US:-5000000}"
-export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-1048576}"
-export ARTS_RDMA_SEND_MAX_ITERS="${ARTS_RDMA_SEND_MAX_ITERS:-256}"
-export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-16}"
+export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-0}"
+export ARTS_RDMA_SEND_MAX_ITERS="${ARTS_RDMA_SEND_MAX_ITERS:-0}"
+export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-0}"
     """
 
 
@@ -875,7 +875,13 @@ def generate_sbatch_script(
     job_name = f"{job_prefix[:max_prefix_len]}{job_suffix}"
     runtime_library_section, runtime_env_prefix = _runtime_library_section(config)
     rdma_environment_section = _rdma_environment_section(config)
-    arts_only_arg = '    --arts-only \\\n' if config.run_arts and not should_run_openmp else ''
+    arts_only_arg = (
+        '    --arts-only \\\n'
+        if config.run_arts
+        and not should_run_openmp
+        and not config.requires_reference_verification
+        else ''
+    )
     openmp_only_arg = '    --openmp-only \\\n' if (not config.run_arts and should_run_openmp) else ''
     initial_arts_exit = 125 if config.run_arts else -1
 

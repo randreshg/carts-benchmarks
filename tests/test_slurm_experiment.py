@@ -414,11 +414,9 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             self.assertEqual(run_cfg[KEY_PIN], "0")
             self.assertEqual(build_cfg[KEY_WORKER_THREADS], "64")
             self.assertEqual(build_cfg[KEY_PIN], "1")
-            self.assertEqual(run_config["env_overrides"]["KMP_BLOCKTIME"], "0")
-            self.assertEqual(
-                run_config["env_overrides"]["KMP_AFFINITY"],
-                "granularity=fine,compact",
-            )
+            self.assertEqual(run_config["env_overrides"]["OMP_WAIT_POLICY"], "ACTIVE")
+            self.assertNotIn("KMP_BLOCKTIME", run_config["env_overrides"])
+            self.assertNotIn("KMP_AFFINITY", run_config["env_overrides"])
             self.assertEqual(
                 run_config["env_overrides"]["ARTS_CONFIG"],
                 str((run_root / "run_1" / "arts.cfg").resolve()),
@@ -433,8 +431,9 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 f'export ARTS_CONFIG="{(run_root / "run_1" / "arts.cfg").resolve()}"',
                 script,
             )
-            self.assertIn("KMP_BLOCKTIME=0", script)
-            self.assertIn("KMP_AFFINITY=granularity=fine,compact", script)
+            self.assertIn("OMP_WAIT_POLICY=ACTIVE", script)
+            self.assertNotIn("KMP_BLOCKTIME", script)
+            self.assertNotIn("KMP_AFFINITY", script)
             self.assertIn("--cpus-per-task=68", script)
 
     def test_host_openmp_fallback_skips_multinode_jobs(self) -> None:
@@ -940,6 +939,98 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             self.assertIn("--arts-only", script)
             self.assertIn("# OpenMP skipped (multi-node ARTS-only run)", script)
             self.assertNotIn("[OpenMP] Running benchmark", script)
+
+    def test_multinode_arts_job_uses_stored_openmp_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            bench = bench_root / "suite" / "a"
+            bench.mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(f"[ARTS]\nworker_threads=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n")
+            carts_root = root / "carts"
+            host = _FakeHost(bench_root)
+            am = ArtifactManager(root / "results", "ts")
+            am.set_phase("scale")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/a"],
+                node_counts=[2],
+                size="small",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=64,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=False,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args=None,
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=False,
+                artifact_manager=am,
+                step_name="scale",
+                report_steps=None,
+                command_str="test",
+            )
+            executor = SlurmBatchExecutor(host, request, deps)
+            build_records = executor._build_one_bench(
+                am=am,
+                bench="suite/a",
+                multinode_disabled=set(),
+                print_lock=threading.Lock(),
+            )
+            scripts_dir = am.experiment_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+
+            job_configs = executor._generate_job_scripts(
+                am=am,
+                scripts_dir=scripts_dir,
+                build_results={key: value for key, value in build_records},
+                runtime_library_dirs=[],
+                emit_header=False,
+            )
+
+            self.assertEqual(host.reference_calls, 1)
+            self.assertEqual(len(job_configs), 1)
+            self.assertTrue(job_configs[0][0].requires_reference_verification)
+            run_config = json.loads(
+                (
+                    am.experiment_dir
+                    / "scale"
+                    / "suite"
+                    / "a"
+                    / "64t_2n"
+                    / "run_1"
+                    / "run_config.json"
+                ).read_text()
+            )
+            self.assertEqual(run_config["reference"]["checksum"], "1.0")
+            self.assertEqual(run_config["reference"]["omp_threads"], 64)
+            script = (
+                am.experiment_dir
+                / "scripts"
+                / "scale__suite_a_64t_2n_run1.sbatch"
+            ).read_text()
+            self.assertNotIn("--arts-only", script)
+            self.assertIn("# OpenMP skipped (multi-node ARTS-only run)", script)
 
 
 if __name__ == "__main__":

@@ -62,9 +62,14 @@ class ArtifactManager:
               run_2/
     """
 
-    def __init__(self, base_results_dir: Path, timestamp: str):
+    def __init__(self, base_results_dir: Path, timestamp: str, *, allow_existing: bool = False):
         self.experiment_dir = base_results_dir / timestamp
-        self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.experiment_dir.mkdir(parents=True, exist_ok=allow_existing)
+        except FileExistsError as exc:
+            raise FileExistsError(
+                f"Experiment directory already exists: {self.experiment_dir}"
+            ) from exc
         self.results_json_path = self.experiment_dir / RESULTS_FILENAME
         self.manifest_path = self.experiment_dir / MANIFEST_JSON_FILENAME
         self._manifest_benchmarks: Dict[str, Dict] = {}

@@ -138,6 +138,17 @@ def determine_status(
         return (STATUS_PASS if verification.correct else STATUS_FAIL, verification)
 
     arts_status = Status.PASS if arts_exit == 0 else Status.FAIL
+    if arts_only and reference_checksum is not None:
+        verification = verify_against_reference(
+            arts_status,
+            arts_checksum,
+            reference_checksum,
+            tolerance,
+            reference_source=reference_source,
+            reference_omp_threads=reference_omp_threads,
+        )
+        return (STATUS_PASS if verification.correct else STATUS_FAIL, verification)
+
     if arts_only:
         if arts_status == Status.PASS:
             note = (

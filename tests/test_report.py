@@ -17,7 +17,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from models import ExperimentStep  # noqa: E402
-from report import generate_report_from_rows  # noqa: E402
+from report import _phase_family, _phase_variant, generate_report_from_rows  # noqa: E402
 
 
 class BenchmarkReportWorkbookTest(unittest.TestCase):
@@ -69,7 +69,15 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         run_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "arts.cfg").write_text("[ARTS]\nworker_threads=64\n")
         (artifact_dir / "build.log").write_text("ok\n")
-        (run_dir / "run_config.json").write_text("{}\n")
+        (run_dir / "run_config.json").write_text(
+            json.dumps(
+                {
+                    "arts_runtime_mode": "arts_task_runtime",
+                    "arts_runtime_mode_source": str(artifact_dir / "bench-arts.ll"),
+                }
+            )
+            + "\n"
+        )
         (run_dir / "result.json").write_text("{}\n")
         (run_dir / "slurm.out").write_text("")
         (run_dir / "slurm.err").write_text("")
@@ -361,10 +369,11 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
             [
                 "Guide",
                 "Overview",
-                "Summary",
-                "ThreadScaling",
-                "NodeScaling",
-                "DistributedDbDelta",
+            "Summary",
+            "RuntimeCoverage",
+            "ThreadScaling",
+            "NodeScaling",
+            "DistributedDbDelta",
                 "ScalingMatrix",
                 "Comparison",
                 "NodeCounterSummary",
@@ -416,6 +425,36 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
             if row[thread_header["threads"]] == 2
         )
         self.assertEqual(thread_row[thread_header["self_scaling"]], 2.0)
+
+        summary_rows = list(workbook["Summary"].iter_rows(values_only=True))
+        summary_header = {name: idx for idx, name in enumerate(summary_rows[0])}
+        one_run_summary = next(
+            row
+            for row in summary_rows[1:]
+            if row[summary_header["run_phase"]] == "multinode-overhead-baseline"
+            and row[summary_header["nodes"]] == 2
+        )
+        self.assertIsNone(one_run_summary[summary_header["arts_e2e_std"]])
+        self.assertIsNone(one_run_summary[summary_header["arts_e2e_cv_pct"]])
+
+        runtime_rows = list(workbook["RuntimeCoverage"].iter_rows(values_only=True))
+        runtime_header = {name: idx for idx, name in enumerate(runtime_rows[0])}
+        thread_runtime = next(
+            row
+            for row in runtime_rows[1:]
+            if row[runtime_header["run_phase"]] == "thread-sweep"
+        )
+        self.assertEqual(thread_runtime[runtime_header["direct_omp_rows"]], 2)
+        multinode_runtime = next(
+            row
+            for row in runtime_rows[1:]
+            if row[runtime_header["run_phase"]] == "multinode-overhead-baseline"
+        )
+        self.assertEqual(multinode_runtime[runtime_header["stored_reference_rows"]], 2)
+        self.assertEqual(
+            multinode_runtime[runtime_header["coverage_scope"]],
+            "generated_arts_multinode_scaling",
+        )
 
         node_scaling_rows = list(workbook["NodeScaling"].iter_rows(values_only=True))
         node_header = {name: idx for idx, name in enumerate(node_scaling_rows[0])}
@@ -469,6 +508,26 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         )
         self.assertEqual(distributed_result_row[result_header["verification_mode"] - 1], "stored_omp_reference")
         self.assertEqual(distributed_result_row[result_header["reference_omp_threads"] - 1], 64)
+
+    def test_phase_family_and_variant_pair_mid_phase_baseline_and_ddb(self) -> None:
+        self.assertEqual(
+            _phase_family("overhead-counters-baseline-mid-high"),
+            "overhead-counters-mid-high",
+        )
+        self.assertEqual(
+            _phase_family("overhead-counters-ddb-mid-high"),
+            "overhead-counters-mid-high",
+        )
+        self.assertEqual(
+            _phase_family("overhead-counters-distributed-db-mid-high"),
+            "overhead-counters-mid-high",
+        )
+        self.assertEqual(_phase_variant("overhead-counters-baseline-mid-high", None), "baseline")
+        self.assertEqual(_phase_variant("overhead-counters-ddb-mid-high", None), "distributed-db")
+        self.assertEqual(
+            _phase_variant("overhead-counters-mid-high", "--distributed-db"),
+            "distributed-db",
+        )
 
     def test_generate_report_from_local_result_schema(self) -> None:
         report_path = generate_report_from_rows(
@@ -534,6 +593,329 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         self.assertEqual(result_rows[1][result_header["benchmark"]], "polybench/gemm")
         self.assertEqual(result_rows[1][result_header["verified"]], True)
         self.assertEqual(result_rows[1][result_header["verification_mode"]], "direct_omp")
+
+    def test_single_node_acceptance_separates_runtime_modes(self) -> None:
+        def make_row(
+            benchmark: str,
+            phase: str,
+            run: int,
+            mode: str,
+            arts_kernel: float,
+            omp_kernel: float,
+            arts_e2e: float,
+            omp_e2e: float,
+            *,
+            counters: bool = False,
+        ) -> dict[str, object]:
+            run_dir = (
+                self.experiment_dir
+                / phase
+                / benchmark
+                / "64t_1n"
+                / f"run_{run}"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "run_config.json").write_text(
+                json.dumps(
+                    {
+                        "arts_runtime_mode": mode,
+                        "arts_runtime_mode_source": str(run_dir / "bench-arts.ll"),
+                    }
+                )
+            )
+            if counters:
+                counter_dir = run_dir / "counters"
+                self._write_counter_bundle(
+                    counter_dir,
+                    total_nodes=1,
+                    cluster_counters={
+                        "edtRunningTime": {"value_ms": 12.0},
+                        "numEdtsCreated": {"value": 64},
+                        "numEdtsFinished": {"value": 64},
+                        "numDbsCreated": {"value": 4},
+                    },
+                    node_counters=[
+                        {
+                            "edtRunningTime": {"value_ms": 12.0},
+                            "numEdtsCreated": {"value": 64},
+                            "numEdtsFinished": {"value": 64},
+                            "numDbsCreated": {"value": 4},
+                        }
+                    ],
+                )
+
+            return {
+                "name": benchmark,
+                "suite": benchmark.split("/", 1)[0],
+                "size": "large" if phase != "medium-thread-sweep" else "medium",
+                "run_phase": phase,
+                "config": {
+                    "arts_threads": 64,
+                    "arts_nodes": 1,
+                    "omp_threads": 64,
+                    "launcher": "local",
+                },
+                "run_number": run,
+                "run_arts": {
+                    "status": "PASS",
+                    "duration_sec": arts_e2e,
+                    "exit_code": 0,
+                    "checksum": "10.0",
+                    "kernel_timings": {"kernel": arts_kernel},
+                    "e2e_timings": {"e2e": arts_e2e},
+                    "startup_timings": {},
+                    "verification_timings": {},
+                    "cleanup_timings": {},
+                },
+                "run_omp": {
+                    "status": "PASS",
+                    "duration_sec": omp_e2e,
+                    "exit_code": 0,
+                    "checksum": "10.0",
+                    "kernel_timings": {"kernel": omp_kernel},
+                    "e2e_timings": {"e2e": omp_e2e},
+                    "startup_timings": {},
+                    "verification_timings": {},
+                    "cleanup_timings": {},
+                },
+                "timing": {
+                    "arts_time_sec": arts_kernel,
+                    "omp_time_sec": omp_kernel,
+                    "speedup": omp_kernel / arts_kernel,
+                    "speedup_basis": "kernel",
+                },
+                "verification": {
+                    "correct": True,
+                    "note": "Checksums match within tolerance",
+                    "arts_checksum": "10.0",
+                    "omp_checksum": "10.0",
+                    "mode": "direct_omp",
+                },
+                "artifacts": {
+                    "run_dir": str(run_dir),
+                },
+            }
+
+        results: list[dict[str, object]] = []
+        for run in (1, 2, 3):
+            results.append(
+                make_row(
+                    "polybench/gemm",
+                    "large-64-competitive",
+                    run,
+                    "arts_task_runtime",
+                    arts_kernel=1.0,
+                    omp_kernel=4.0,
+                    arts_e2e=1.2,
+                    omp_e2e=3.0,
+                )
+            )
+            results.append(
+                make_row(
+                    "stream",
+                    "large-64-competitive",
+                    run,
+                    "host_openmp_fallback",
+                    arts_kernel=2.0,
+                    omp_kernel=1.96,
+                    arts_e2e=2.2,
+                    omp_e2e=2.18,
+                )
+            )
+        results.append(
+            make_row(
+                "polybench/gemm",
+                "large-64-runtime-diagnostics",
+                1,
+                "arts_task_runtime",
+                arts_kernel=1.0,
+                omp_kernel=4.0,
+                arts_e2e=1.2,
+                omp_e2e=3.0,
+                counters=True,
+            )
+        )
+        results.append(
+            make_row(
+                "stream",
+                "large-64-runtime-diagnostics",
+                1,
+                "host_openmp_fallback",
+                arts_kernel=2.0,
+                omp_kernel=1.96,
+                arts_e2e=2.2,
+                omp_e2e=2.18,
+            )
+        )
+        for benchmark, mode in (
+            ("polybench/gemm", "arts_task_runtime"),
+            ("stream", "host_openmp_fallback"),
+        ):
+            for thread in (1, 2, 4, 8, 16, 32, 64):
+                results.append(
+                    make_row(
+                        benchmark,
+                        "medium-thread-sweep",
+                        thread,
+                        mode,
+                        arts_kernel=0.01 if benchmark == "stream" and thread == 64 else 1.0,
+                        omp_kernel=0.005 if benchmark == "stream" and thread == 64 else 2.0,
+                        arts_e2e=0.02 if benchmark == "stream" and thread == 64 else 1.1,
+                        omp_e2e=0.01 if benchmark == "stream" and thread == 64 else 2.1,
+                    )
+                )
+
+        report_path = generate_report_from_rows(results, self.experiment_dir)
+        self.assertIsNotNone(report_path)
+        workbook = load_workbook(report_path, data_only=False)
+        self.assertIn("SingleNodeAcceptance", workbook.sheetnames)
+        self.assertIn("arts_runtime_mode", [cell.value for cell in workbook["Results"][1]])
+
+        acceptance_rows = list(
+            workbook["SingleNodeAcceptance"].iter_rows(values_only=True)
+        )
+        header = {name: idx for idx, name in enumerate(acceptance_rows[0])}
+        arts_row = next(
+            row
+            for row in acceptance_rows[1:]
+            if row[header["evidence_role"]] == "large64_competitive"
+            and row[header["benchmark"]] == "polybench/gemm"
+        )
+        host_row = next(
+            row
+            for row in acceptance_rows[1:]
+            if row[header["evidence_role"]] == "host_fallback_parity"
+            and row[header["benchmark"]] == "stream"
+        )
+        diagnostic_row = next(
+            row
+            for row in acceptance_rows[1:]
+            if row[header["evidence_role"]] == "medium_overhead_diagnostic"
+            and row[header["benchmark"]] == "stream"
+        )
+        runtime_diagnostic_row = next(
+            row
+            for row in acceptance_rows[1:]
+            if row[header["evidence_role"]] == "runtime_diagnostic"
+            and row[header["benchmark"]] == "polybench/gemm"
+        )
+
+        self.assertEqual(arts_row[header["acceptance_status"]], "PASS")
+        self.assertEqual(arts_row[header["runtime_mode"]], "arts_task_runtime")
+        self.assertEqual(host_row[header["acceptance_status"]], "PASS")
+        self.assertEqual(host_row[header["runtime_mode"]], "host_openmp_fallback")
+        self.assertEqual(diagnostic_row[header["acceptance_status"]], "DIAGNOSTIC")
+        self.assertEqual(runtime_diagnostic_row[header["acceptance_status"]], "PASS")
+        self.assertEqual(
+            runtime_diagnostic_row[header["diagnostic_counter_fields_present"]],
+            True,
+        )
+        self.assertIsNone(
+            runtime_diagnostic_row[header["missing_diagnostic_counter_fields"]]
+        )
+
+    def test_single_node_acceptance_keeps_high_margin_cv_competitive(self) -> None:
+        def make_row(
+            run: int,
+            *,
+            arts_kernel: float,
+            omp_kernel: float,
+            arts_e2e: float,
+            omp_e2e: float,
+        ) -> dict[str, object]:
+            run_dir = (
+                self.experiment_dir
+                / "large-64-competitive"
+                / "polybench/gemm"
+                / "64t_1n"
+                / f"run_{run}"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "run_config.json").write_text(
+                json.dumps(
+                    {
+                        "arts_runtime_mode": "arts_task_runtime",
+                        "arts_runtime_mode_source": str(run_dir / "gemm-arts.ll"),
+                    }
+                )
+            )
+            return {
+                "name": "polybench/gemm",
+                "suite": "polybench",
+                "size": "large",
+                "run_phase": "large-64-competitive",
+                "config": {
+                    "arts_threads": 64,
+                    "arts_nodes": 1,
+                    "omp_threads": 64,
+                    "launcher": "local",
+                },
+                "run_number": run,
+                "run_arts": {
+                    "status": "PASS",
+                    "duration_sec": arts_e2e,
+                    "exit_code": 0,
+                    "checksum": "10.0",
+                    "kernel_timings": {"kernel": arts_kernel},
+                    "e2e_timings": {"e2e": arts_e2e},
+                    "startup_timings": {},
+                    "verification_timings": {},
+                    "cleanup_timings": {},
+                },
+                "run_omp": {
+                    "status": "PASS",
+                    "duration_sec": omp_e2e,
+                    "exit_code": 0,
+                    "checksum": "10.0",
+                    "kernel_timings": {"kernel": omp_kernel},
+                    "e2e_timings": {"e2e": omp_e2e},
+                    "startup_timings": {},
+                    "verification_timings": {},
+                    "cleanup_timings": {},
+                },
+                "timing": {
+                    "arts_time_sec": arts_kernel,
+                    "omp_time_sec": omp_kernel,
+                    "speedup": omp_kernel / arts_kernel,
+                    "speedup_basis": "kernel",
+                },
+                "verification": {
+                    "correct": True,
+                    "note": "Checksums match within tolerance",
+                    "arts_checksum": "10.0",
+                    "omp_checksum": "10.0",
+                    "mode": "direct_omp",
+                },
+                "artifacts": {
+                    "run_dir": str(run_dir),
+                },
+            }
+
+        results = [
+            make_row(1, arts_kernel=10.0, omp_kernel=30.0, arts_e2e=10.0, omp_e2e=30.0),
+            make_row(2, arts_kernel=5.0, omp_kernel=30.0, arts_e2e=5.0, omp_e2e=30.0),
+            make_row(3, arts_kernel=1.0, omp_kernel=30.0, arts_e2e=1.0, omp_e2e=30.0),
+        ]
+
+        report_path = generate_report_from_rows(results, self.experiment_dir)
+        self.assertIsNotNone(report_path)
+        workbook = load_workbook(report_path, data_only=False)
+        acceptance_rows = list(
+            workbook["SingleNodeAcceptance"].iter_rows(values_only=True)
+        )
+        header = {name: idx for idx, name in enumerate(acceptance_rows[0])}
+        arts_row = next(
+            row
+            for row in acceptance_rows[1:]
+            if row[header["evidence_role"]] == "large64_competitive"
+            and row[header["benchmark"]] == "polybench/gemm"
+        )
+
+        self.assertEqual(arts_row[header["acceptance_status"]], "PASS")
+        self.assertIn(
+            "ARTS E2E CV above 10%",
+            arts_row[header["acceptance_reason"]],
+        )
 
 
 if __name__ == "__main__":

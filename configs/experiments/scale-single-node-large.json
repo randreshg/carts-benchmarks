@@ -17,11 +17,9 @@
         "polybench/correlation",
         "polybench/gemm",
         "polybench/jacobi2d",
-        "polybench/seidel-2d",
         "specfem3d/stress",
         "specfem3d/velocity",
         "stream",
-        "sw4lite/rhs4sg-base",
         "sw4lite/vel4sg-base"
       ],
       "size": "large",
@@ -46,11 +44,9 @@
         "polybench/correlation",
         "polybench/gemm",
         "polybench/jacobi2d",
-        "polybench/seidel-2d",
         "specfem3d/stress",
         "specfem3d/velocity",
         "stream",
-        "sw4lite/rhs4sg-base",
         "sw4lite/vel4sg-base"
       ],
       "size": "large",

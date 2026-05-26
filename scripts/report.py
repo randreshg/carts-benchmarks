@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean, median, stdev
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from common import (
@@ -32,6 +32,13 @@ from common import (
     VARIANT_OMP,
     parse_all_counters,
     parse_perf_csv,
+)
+from arts_runtime_modes import (
+    ARTS_RUNTIME_MODE_HOST_OPENMP,
+    ARTS_RUNTIME_MODE_HOST_SERIAL,
+    ARTS_RUNTIME_MODE_TASK,
+    ARTS_RUNTIME_MODE_UNKNOWN,
+    infer_arts_runtime_mode,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +90,8 @@ RESULTS_COLUMNS = [
     "reference_source",
     "reference_omp_threads",
     "runtime_warning",
+    "arts_runtime_mode",
+    "arts_runtime_mode_source",
     "slurm_job_id",
     "slurm_state",
     "slurm_exit_code",
@@ -150,6 +159,7 @@ SUMMARY_COLUMNS = [
     "nodes",
     "run_phase",
     "compile_args",
+    "arts_runtime_modes",
     "num_runs",
     "arts_e2e_mean",
     "arts_e2e_std",
@@ -199,6 +209,30 @@ THREAD_SCALING_COLUMNS = [
     "rows_with_perf",
 ]
 
+SINGLE_NODE_ACCEPTANCE_COLUMNS = [
+    "evidence_role",
+    "acceptance_status",
+    "acceptance_reason",
+    "benchmark",
+    "runtime_mode",
+    "run_phase",
+    "size",
+    "threads",
+    "nodes",
+    "num_runs",
+    "kernel_grain_class",
+    "kernel_speedup_median",
+    "e2e_speedup_median",
+    "arts_e2e_cv_pct",
+    "diagnostic_counter_fields_present",
+    "diagnostic_counter_fields",
+    "missing_diagnostic_counter_fields",
+    "arts_kernel_median",
+    "omp_kernel_median",
+    "arts_e2e_median",
+    "omp_e2e_median",
+]
+
 NODE_SCALING_COLUMNS = [
     "benchmark",
     "suite",
@@ -217,6 +251,26 @@ NODE_SCALING_COLUMNS = [
     "verified_count",
     "pass_count",
     "rows_with_counters",
+]
+
+RUNTIME_COVERAGE_COLUMNS = [
+    "run_phase",
+    "runtime_mode",
+    "benchmark_count",
+    "row_count",
+    "single_node_rows",
+    "multinode_rows",
+    "node_counts",
+    "speedup_rows",
+    "direct_omp_rows",
+    "stored_reference_rows",
+    "arts_only_rows",
+    "pass_count",
+    "fail_count",
+    "warn_count",
+    "verified_count",
+    "coverage_scope",
+    "coverage_note",
 ]
 
 DISTRIBUTED_DB_DELTA_COLUMNS = [
@@ -357,6 +411,18 @@ COUNTER_FIELD_MAP = {
     "edt_running_time_ms": ("TIME_EDT_EXEC", "edtRunningTime"),
 }
 
+SINGLE_NODE_DIAGNOSTIC_COUNTER_FIELDS = (
+    "edt_running_time_ms",
+    "num_edts_created",
+    "num_edts_finished",
+    "num_dbs_created",
+)
+
+LARGE64_TASK_KERNEL_SPEEDUP_GATE = 1.25
+LARGE64_TASK_E2E_SPEEDUP_GATE = 1.10
+LARGE64_TASK_E2E_CV_GATE_PCT = 10.0
+LARGE64_TASK_CV_MARGIN_SPEEDUP = 2.0
+
 INT_FIELDS = {
     "threads",
     "nodes",
@@ -447,7 +513,7 @@ def _mean_std(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
     if not values:
         return None, None
     if len(values) == 1:
-        return values[0], 0.0
+        return values[0], None
     return mean(values), stdev(values)
 
 
@@ -475,15 +541,23 @@ def _phase_family(value: Any) -> str:
     for suffix in ("-baseline", "-distributed-db"):
         if phase.endswith(suffix):
             return phase[: -len(suffix)]
+    for marker in ("-baseline-", "-distributed-db-", "-ddb-"):
+        if marker in phase:
+            return phase.replace(marker, "-", 1)
     return phase
 
 
 def _phase_variant(phase: Any, compile_args: Any) -> Optional[str]:
     phase_name = _phase_name(phase)
     compile_text = str(compile_args or "").strip()
-    if phase_name.endswith("-distributed-db") or compile_text == "--distributed-db":
+    if (
+        phase_name.endswith("-distributed-db")
+        or "-distributed-db-" in phase_name
+        or "-ddb-" in phase_name
+        or compile_text == "--distributed-db"
+    ):
         return "distributed-db"
-    if phase_name.endswith("-baseline") or not compile_text:
+    if phase_name.endswith("-baseline") or "-baseline-" in phase_name or not compile_text:
         return "baseline"
     return None
 
@@ -663,6 +737,31 @@ def _remap_path_value(value: Any, experiment_dir: Optional[Path] = None) -> Any:
         return str(path.resolve())
     remapped = _remap_artifact_path(path, experiment_dir)
     return str(remapped) if remapped is not None else text
+
+
+def _load_run_config_from_artifacts(
+    artifacts: Dict[str, Any],
+    experiment_dir: Optional[Path] = None,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    candidates: List[Path] = []
+    explicit = _path_if_exists(artifacts.get("run_config"), experiment_dir=experiment_dir)
+    if explicit is not None:
+        candidates.append(explicit)
+
+    run_dir = _path_if_exists(artifacts.get("run_dir"), experiment_dir=experiment_dir)
+    if run_dir is not None:
+        candidates.append(run_dir / RUN_CONFIG_JSON_FILENAME)
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            payload = json.loads(candidate.read_text())
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            return payload, str(candidate.resolve())
+    return {}, str(candidates[0].resolve()) if candidates else None
 
 
 def _base_result_identity(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -918,6 +1017,14 @@ def _build_perf_file_rows(
 
 
 def _apply_derived_fields(row: Dict[str, Any]) -> None:
+    if row.get("speedup") is None:
+        row["speedup"] = _safe_div(
+            _to_float(row.get("omp_kernel_sec")),
+            _to_float(row.get("arts_kernel_sec")),
+        ) or _safe_div(
+            _to_float(row.get("omp_e2e_sec")),
+            _to_float(row.get("arts_e2e_sec")),
+        )
     speedup = _to_float(row.get("speedup"))
     threads = _to_float(row.get("threads"))
     arts_e2e = _to_float(row.get("arts_e2e_sec"))
@@ -1000,6 +1107,9 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
     artifacts = result.artifacts
     arts_perf_path = result.run_arts.perf_csv_path
     arts_perf_dir = str(Path(arts_perf_path).parent) if arts_perf_path else None
+    arts_runtime_mode, arts_runtime_mode_source = infer_arts_runtime_mode(
+        artifacts.executable_arts
+    )
 
     row.update(
         {
@@ -1043,6 +1153,8 @@ def _flatten_result_dataclass(result: BenchmarkResult) -> Dict[str, Any]:
                 )
             ),
             "runtime_warning": False,
+            "arts_runtime_mode": arts_runtime_mode,
+            "arts_runtime_mode_source": arts_runtime_mode_source,
             "slurm_job_id": None,
             "slurm_state": None,
             "slurm_exit_code": None,
@@ -1118,6 +1230,19 @@ def _flatten_result_serialized(
     config = result.get("config") or {}
     arts = result.get(VARIANT_ARTS) or result.get("run_arts") or {}
     omp = result.get(VARIANT_OMP) or result.get("run_omp") or {}
+    artifacts = result.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    run_config, run_config_source = _load_run_config_from_artifacts(
+        artifacts,
+        experiment_dir=experiment_dir,
+    )
+    arts_runtime_mode = result.get("arts_runtime_mode") or run_config.get(
+        "arts_runtime_mode"
+    )
+    arts_runtime_mode_source = result.get("arts_runtime_mode_source") or run_config.get(
+        "arts_runtime_mode_source"
+    )
     slurm = result.get("slurm") or {}
     diagnostics = result.get("diagnostics") or {}
     slurm_stderr = diagnostics.get("slurm_stderr") if isinstance(diagnostics, dict) else {}
@@ -1193,6 +1318,8 @@ def _flatten_result_serialized(
                 )
             ),
             "runtime_warning": detected_runtime_warning,
+            "arts_runtime_mode": arts_runtime_mode,
+            "arts_runtime_mode_source": arts_runtime_mode_source,
             "slurm_job_id": slurm.get("job_id"),
             "slurm_state": slurm.get("state"),
             "slurm_exit_code": slurm.get("exit_code"),
@@ -1203,7 +1330,7 @@ def _flatten_result_serialized(
             "remote_send_hard_timeout_count": slurm_stderr.get("remote_send_hard_timeout_count"),
             "connection_refused_count": slurm_stderr.get("connection_refused_count"),
             "rdma_provider_fanout_warning_count": slurm_stderr.get("rdma_provider_fanout_warning_count"),
-            "speedup_basis": None,
+            "speedup_basis": (result.get("timing") or {}).get("speedup_basis"),
             "arts_e2e_sec": _first_timing_value(arts.get("e2e_timings")),
             "omp_e2e_sec": _first_timing_value(omp.get("e2e_timings")),
             "arts_startup_sec": _first_timing_value(arts.get("startup_timings")),
@@ -1218,35 +1345,36 @@ def _flatten_result_serialized(
             "omp_total_sec": _to_float(omp.get("duration_sec")),
             "speedup": _to_float(result.get("speedup")),
             "artifact_run_dir": _remap_path_value(
-                (result.get("artifacts") or {}).get("run_dir"), experiment_dir=experiment_dir
+                artifacts.get("run_dir"), experiment_dir=experiment_dir
             ),
             "artifact_run_config": _remap_path_value(
-                (result.get("artifacts") or {}).get("run_config"), experiment_dir=experiment_dir
+                artifacts.get("run_config") or run_config_source, experiment_dir=experiment_dir
             ),
             "artifact_result_json": _remap_path_value(
-                (result.get("artifacts") or {}).get("result_json"), experiment_dir=experiment_dir
+                artifacts.get("result_json"), experiment_dir=experiment_dir
             ),
             "artifact_slurm_out": _remap_path_value(
-                (result.get("artifacts") or {}).get("slurm_out"), experiment_dir=experiment_dir
+                artifacts.get("slurm_out"), experiment_dir=experiment_dir
             ),
             "artifact_slurm_err": _remap_path_value(
-                (result.get("artifacts") or {}).get("slurm_err"), experiment_dir=experiment_dir
+                artifacts.get("slurm_err"), experiment_dir=experiment_dir
             ),
             "artifact_build_dir": _remap_path_value(
-                (result.get("artifacts") or {}).get("build_dir"), experiment_dir=experiment_dir
+                artifacts.get("build_dir"), experiment_dir=experiment_dir
             ),
             "artifact_arts_config": _remap_path_value(
-                (result.get("artifacts") or {}).get("arts_config"), experiment_dir=experiment_dir
+                artifacts.get("arts_config"), experiment_dir=experiment_dir
             ),
             "artifact_counter_dir": _remap_path_value(
-                (result.get("artifacts") or {}).get("counter_dir"), experiment_dir=experiment_dir
+                artifacts.get("counter_dir") or artifacts.get("counters_dir"),
+                experiment_dir=experiment_dir,
             ),
             "artifact_perf_dir": _remap_path_value(
-                (result.get("artifacts") or {}).get("perf_dir"), experiment_dir=experiment_dir
+                artifacts.get("perf_dir"), experiment_dir=experiment_dir
             ),
         }
     )
-    perf_files = (result.get("artifacts") or {}).get("perf_files")
+    perf_files = artifacts.get("perf_files")
     if isinstance(perf_files, list):
         row["artifact_perf_file_count"] = len(perf_files)
     elif row.get("artifact_perf_dir"):
@@ -1266,12 +1394,12 @@ def _flatten_result_serialized(
     if isinstance(run_dir, str) and run_dir:
         candidate_dirs.append(Path(run_dir) / COUNTERS_DIR_NAME)
 
-    artifact_counter_dir = _counter_dir_from_artifacts(result.get("artifacts"))
+    artifact_counter_dir = _counter_dir_from_artifacts(artifacts)
     if artifact_counter_dir is not None:
         candidate_dirs.append(artifact_counter_dir)
 
     if experiment_dir is not None:
-        bench_name = result.get("benchmark")
+        bench_name = result.get("benchmark") or result.get("name")
         threads_value = _to_float(result.get("threads") or config.get("arts_threads"))
         nodes_value = _to_float(result.get("nodes") or config.get("arts_nodes"))
         run_number_value = _to_float(result.get("run_number"))
@@ -1359,6 +1487,13 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
         omp_cleanup_values = collect("omp_cleanup_sec")
         speedup_values = collect("speedup")
         efficiency_values = collect("parallel_efficiency")
+        runtime_modes = sorted(
+            {
+                str(r.get("arts_runtime_mode"))
+                for r in runs
+                if r.get("arts_runtime_mode")
+            }
+        )
 
         arts_e2e_mean, arts_e2e_std = _mean_std(arts_e2e_values)
         omp_e2e_mean, omp_e2e_std = _mean_std(omp_e2e_values)
@@ -1396,6 +1531,7 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "nodes": nodes,
                 "run_phase": run_phase,
                 "compile_args": compile_args,
+                "arts_runtime_modes": ",".join(runtime_modes) if runtime_modes else None,
                 "num_runs": len(runs),
                 "arts_e2e_mean": arts_e2e_mean,
                 "arts_e2e_std": arts_e2e_std,
@@ -1437,6 +1573,10 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             for row in summary_rows
             if row.get("benchmark") != "GEOMEAN" and _phase_name(row.get("run_phase")) == phase
         ]
+        if any((_to_float(row.get("nodes")) or 0) > 1 for row in phase_rows) and any(
+            _to_float(row.get("speedup_mean")) is None for row in phase_rows
+        ):
+            continue
         geomean_speedup = _geomean(row.get("speedup_mean") for row in phase_rows)
         if geomean_speedup is None:
             continue
@@ -1519,6 +1659,407 @@ def _build_thread_scaling_rows(summary_rows: List[Dict[str, Any]]) -> List[Dict[
     return rows
 
 
+def _median_value(values: Iterable[Optional[float]]) -> Optional[float]:
+    filtered = [float(value) for value in values if value is not None]
+    return float(median(filtered)) if filtered else None
+
+
+def _cv_pct(values: Iterable[Optional[float]]) -> Optional[float]:
+    filtered = [float(value) for value in values if value is not None]
+    mean_value, std_value = _mean_std(filtered)
+    if mean_value is None or std_value is None:
+        return None
+    if mean_value == 0:
+        return 0.0
+    return (std_value / mean_value) * 100.0
+
+
+def _runtime_mode_value(row: Dict[str, Any]) -> str:
+    mode = row.get("arts_runtime_mode")
+    return str(mode).strip() if mode else ARTS_RUNTIME_MODE_UNKNOWN
+
+
+def _e2e_speedup(row: Dict[str, Any]) -> Optional[float]:
+    return _safe_div(_to_float(row.get("omp_e2e_sec")), _to_float(row.get("arts_e2e_sec")))
+
+
+def _kernel_grain_class(rows: List[Dict[str, Any]]) -> Optional[str]:
+    kernel_times: List[float] = []
+    for row in rows:
+        for field in ("arts_kernel_sec", "omp_kernel_sec"):
+            value = _to_float(row.get(field))
+            if value is not None:
+                kernel_times.append(value)
+    if not kernel_times:
+        return None
+    return "tiny_kernel" if min(kernel_times) < 0.050 else "normal_kernel"
+
+
+def _large64_task_samples_have_cv_margin(rows: List[Dict[str, Any]]) -> bool:
+    kernel_speedups: List[float] = []
+    e2e_speedups: List[float] = []
+    for row in rows:
+        kernel_speedup = _to_float(row.get("speedup"))
+        e2e_speedup = _e2e_speedup(row)
+        if kernel_speedup is None or e2e_speedup is None:
+            return False
+        kernel_speedups.append(kernel_speedup)
+        e2e_speedups.append(e2e_speedup)
+
+    return (
+        len(kernel_speedups) >= 2
+        and min(kernel_speedups) >= LARGE64_TASK_CV_MARGIN_SPEEDUP
+        and min(e2e_speedups) >= LARGE64_TASK_CV_MARGIN_SPEEDUP
+    )
+
+
+def _single_node_acceptance_row(
+    *,
+    evidence_role: str,
+    acceptance_status: str,
+    acceptance_reason: str,
+    benchmark: str,
+    rows: List[Dict[str, Any]],
+    runtime_mode: Optional[str] = None,
+    kernel_speedup: Optional[float] = None,
+    e2e_speedup: Optional[float] = None,
+    diagnostic_counter_fields_present: Optional[bool] = None,
+    diagnostic_counter_fields: Optional[Iterable[str]] = None,
+    missing_diagnostic_counter_fields: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    return {
+        "evidence_role": evidence_role,
+        "acceptance_status": acceptance_status,
+        "acceptance_reason": acceptance_reason,
+        "benchmark": benchmark,
+        "runtime_mode": runtime_mode,
+        "run_phase": rows[0].get("run_phase") if rows else None,
+        "size": rows[0].get("size") if rows else None,
+        "threads": rows[0].get("threads") if rows else None,
+        "nodes": rows[0].get("nodes") if rows else None,
+        "num_runs": len(rows),
+        "kernel_grain_class": _kernel_grain_class(rows) if rows else None,
+        "kernel_speedup_median": kernel_speedup,
+        "e2e_speedup_median": e2e_speedup,
+        "arts_e2e_cv_pct": _cv_pct(_to_float(row.get("arts_e2e_sec")) for row in rows),
+        "diagnostic_counter_fields_present": diagnostic_counter_fields_present,
+        "arts_kernel_median": _median_value(_to_float(row.get("arts_kernel_sec")) for row in rows),
+        "omp_kernel_median": _median_value(_to_float(row.get("omp_kernel_sec")) for row in rows),
+        "arts_e2e_median": _median_value(_to_float(row.get("arts_e2e_sec")) for row in rows),
+        "omp_e2e_median": _median_value(_to_float(row.get("omp_e2e_sec")) for row in rows),
+        "diagnostic_counter_fields": (
+            ",".join(diagnostic_counter_fields) if diagnostic_counter_fields else None
+        ),
+        "missing_diagnostic_counter_fields": (
+            ",".join(missing_diagnostic_counter_fields)
+            if missing_diagnostic_counter_fields
+            else None
+        ),
+    }
+
+
+def _build_single_node_acceptance_rows(
+    result_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    single_node_phases = {
+        "medium-thread-sweep",
+        "large-64-competitive",
+        "large-64-runtime-diagnostics",
+    }
+    if not any(_phase_name(row.get("run_phase")) in single_node_phases for row in result_rows):
+        return []
+
+    known_modes = {
+        ARTS_RUNTIME_MODE_TASK,
+        ARTS_RUNTIME_MODE_HOST_OPENMP,
+        ARTS_RUNTIME_MODE_HOST_SERIAL,
+    }
+    benchmarks = sorted(
+        {str(row.get("benchmark")) for row in result_rows if row.get("benchmark")}
+    )
+    rows: List[Dict[str, Any]] = []
+
+    phase_expected = {
+        "medium-thread-sweep": 7,
+        "large-64-competitive": 3,
+        "large-64-runtime-diagnostics": 1,
+    }
+    for phase, multiplier in phase_expected.items():
+        phase_rows = [
+            row for row in result_rows if _phase_name(row.get("run_phase")) == phase
+        ]
+        expected = len(benchmarks) * multiplier
+        status = "PASS" if len(phase_rows) == expected else "FAIL"
+        rows.append(
+            _single_node_acceptance_row(
+                evidence_role="matrix_completeness",
+                acceptance_status=status,
+                acceptance_reason=f"{phase}: expected {expected} rows, found {len(phase_rows)}",
+                benchmark="ALL",
+                rows=phase_rows,
+            )
+        )
+
+    bad_execution = [
+        row
+        for row in result_rows
+        if _status_text(row.get("status")) != STATUS_PASS or row.get("verified") is not True
+    ]
+    rows.append(
+        _single_node_acceptance_row(
+            evidence_role="execution_correctness",
+            acceptance_status="FAIL" if bad_execution else "PASS",
+            acceptance_reason=(
+                f"{len(bad_execution)} rows failed execution or verification"
+                if bad_execution
+                else "all rows passed and verified"
+            ),
+            benchmark="ALL",
+            rows=result_rows,
+        )
+    )
+
+    unknown_mode_rows = [
+        row for row in result_rows if _runtime_mode_value(row) not in known_modes
+    ]
+    if unknown_mode_rows:
+        rows.append(
+            _single_node_acceptance_row(
+                evidence_role="runtime_classification",
+                acceptance_status="FAIL",
+                acceptance_reason=f"{len(unknown_mode_rows)} rows have missing or unknown runtime mode",
+                benchmark="ALL",
+                rows=unknown_mode_rows,
+            )
+        )
+    else:
+        rows.append(
+            _single_node_acceptance_row(
+                evidence_role="runtime_classification",
+                acceptance_status="PASS",
+                acceptance_reason="all rows have a known runtime mode",
+                benchmark="ALL",
+                rows=result_rows,
+            )
+        )
+
+    large64_rows = [
+        row
+        for row in result_rows
+        if _phase_name(row.get("run_phase")) == "large-64-competitive"
+        and str(row.get("size")) == "large"
+        and int(_to_float(row.get("threads")) or 0) == 64
+        and int(_to_float(row.get("nodes")) or 0) == 1
+    ]
+    by_benchmark_mode: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in large64_rows:
+        by_benchmark_mode[(str(row.get("benchmark")), _runtime_mode_value(row))].append(row)
+
+    arts_kernel_medians: List[float] = []
+    arts_e2e_medians: List[float] = []
+    host_e2e_medians: List[float] = []
+
+    for (benchmark, mode), grouped_rows in sorted(by_benchmark_mode.items()):
+        kernel_speedup = _median_value(_to_float(row.get("speedup")) for row in grouped_rows)
+        e2e_speedup = _median_value(_e2e_speedup(row) for row in grouped_rows)
+        e2e_cv = _cv_pct(_to_float(row.get("arts_e2e_sec")) for row in grouped_rows)
+
+        if mode == ARTS_RUNTIME_MODE_TASK:
+            if kernel_speedup is not None:
+                arts_kernel_medians.append(kernel_speedup)
+            if e2e_speedup is not None:
+                arts_e2e_medians.append(e2e_speedup)
+            failures: List[str] = []
+            acceptance_notes: List[str] = []
+            if len(grouped_rows) < 2:
+                failures.append("fewer than 2 paired samples")
+            if (
+                kernel_speedup is None
+                or kernel_speedup < LARGE64_TASK_KERNEL_SPEEDUP_GATE
+            ):
+                failures.append("kernel median below 1.25x")
+            if (
+                e2e_speedup is None
+                or e2e_speedup < LARGE64_TASK_E2E_SPEEDUP_GATE
+            ):
+                failures.append("E2E median below 1.10x")
+            if e2e_cv is not None and e2e_cv > LARGE64_TASK_E2E_CV_GATE_PCT:
+                if _large64_task_samples_have_cv_margin(grouped_rows):
+                    acceptance_notes.append(
+                        "ARTS E2E CV above 10% with all samples above 2.00x"
+                    )
+                else:
+                    failures.append("ARTS E2E CV above 10%")
+            acceptance_reason = (
+                ", ".join(failures)
+                if failures
+                else "generated ARTS meets large64 competitiveness gate"
+            )
+            if acceptance_notes and not failures:
+                acceptance_reason += "; " + ", ".join(acceptance_notes)
+            rows.append(
+                _single_node_acceptance_row(
+                    evidence_role="large64_competitive",
+                    acceptance_status="FAIL" if failures else "PASS",
+                    acceptance_reason=acceptance_reason,
+                    benchmark=benchmark,
+                    rows=grouped_rows,
+                    runtime_mode=mode,
+                    kernel_speedup=kernel_speedup,
+                    e2e_speedup=e2e_speedup,
+                )
+            )
+        elif mode in {ARTS_RUNTIME_MODE_HOST_OPENMP, ARTS_RUNTIME_MODE_HOST_SERIAL}:
+            if e2e_speedup is not None:
+                host_e2e_medians.append(e2e_speedup)
+            if e2e_speedup is None or e2e_speedup < 0.90:
+                status = "FAIL"
+                reason = "host fallback E2E parity below 0.90x"
+            elif kernel_speedup is not None and kernel_speedup < 0.80:
+                status = "WARN"
+                reason = "host fallback kernel spread below 0.80x; inspect as parity noise"
+            else:
+                status = "PASS"
+                reason = "host fallback meets E2E parity gate"
+            rows.append(
+                _single_node_acceptance_row(
+                    evidence_role="host_fallback_parity",
+                    acceptance_status=status,
+                    acceptance_reason=reason,
+                    benchmark=benchmark,
+                    rows=grouped_rows,
+                    runtime_mode=mode,
+                    kernel_speedup=kernel_speedup,
+                    e2e_speedup=e2e_speedup,
+                )
+            )
+
+    arts_kernel_geomean = _geomean(arts_kernel_medians)
+    arts_e2e_geomean = _geomean(arts_e2e_medians)
+    arts_aggregate_failures: List[str] = []
+    if arts_kernel_geomean is None or arts_kernel_geomean < 2.00:
+        arts_aggregate_failures.append("generated ARTS kernel geomean below 2.00x")
+    if arts_e2e_geomean is None or arts_e2e_geomean < 1.25:
+        arts_aggregate_failures.append("generated ARTS E2E geomean below 1.25x")
+    rows.append(
+        _single_node_acceptance_row(
+            evidence_role="large64_arts_aggregate",
+            acceptance_status="FAIL" if arts_aggregate_failures else "PASS",
+            acceptance_reason=(
+                ", ".join(arts_aggregate_failures)
+                if arts_aggregate_failures
+                else "generated ARTS aggregate meets large64 gate"
+            ),
+            benchmark="GEOMEAN",
+            rows=[row for row in large64_rows if _runtime_mode_value(row) == ARTS_RUNTIME_MODE_TASK],
+            runtime_mode=ARTS_RUNTIME_MODE_TASK,
+            kernel_speedup=arts_kernel_geomean,
+            e2e_speedup=arts_e2e_geomean,
+        )
+    )
+
+    host_e2e_geomean = _geomean(host_e2e_medians)
+    rows.append(
+        _single_node_acceptance_row(
+            evidence_role="host_fallback_aggregate",
+            acceptance_status="PASS" if host_e2e_geomean is not None and host_e2e_geomean >= 0.95 else "FAIL",
+            acceptance_reason=(
+                "host fallback aggregate E2E parity is at least 0.95x"
+                if host_e2e_geomean is not None and host_e2e_geomean >= 0.95
+                else "host fallback aggregate E2E parity below 0.95x"
+            ),
+            benchmark="GEOMEAN",
+            rows=[
+                row
+                for row in large64_rows
+                if _runtime_mode_value(row)
+                in {ARTS_RUNTIME_MODE_HOST_OPENMP, ARTS_RUNTIME_MODE_HOST_SERIAL}
+            ],
+            runtime_mode="host_fallback",
+            e2e_speedup=host_e2e_geomean,
+        )
+    )
+
+    medium_rows = [
+        row
+        for row in result_rows
+        if _phase_name(row.get("run_phase")) == "medium-thread-sweep"
+    ]
+    for row in medium_rows:
+        kernels = [
+            value
+            for value in (_to_float(row.get("arts_kernel_sec")), _to_float(row.get("omp_kernel_sec")))
+            if value is not None
+        ]
+        speedup = _to_float(row.get("speedup"))
+        if kernels and min(kernels) < 0.050 and speedup is not None and speedup < 0.80:
+            rows.append(
+                _single_node_acceptance_row(
+                    evidence_role="medium_overhead_diagnostic",
+                    acceptance_status="DIAGNOSTIC",
+                    acceptance_reason="tiny medium kernel is overhead dominated; excluded from large64 acceptance",
+                    benchmark=str(row.get("benchmark")),
+                    rows=[row],
+                    runtime_mode=_runtime_mode_value(row),
+                    kernel_speedup=speedup,
+                    e2e_speedup=_e2e_speedup(row),
+                )
+            )
+
+    diagnostic_rows = [
+        row
+        for row in result_rows
+        if _phase_name(row.get("run_phase")) == "large-64-runtime-diagnostics"
+    ]
+    for row in diagnostic_rows:
+        mode = _runtime_mode_value(row)
+        if mode == ARTS_RUNTIME_MODE_TASK:
+            missing_counter_fields = [
+                field
+                for field in SINGLE_NODE_DIAGNOSTIC_COUNTER_FIELDS
+                if _to_float(row.get(field)) is None
+            ]
+            has_required_counters = (
+                row.get("has_counters") is True
+                and row.get("counter_complete") is not False
+                and not missing_counter_fields
+            )
+            rows.append(
+                _single_node_acceptance_row(
+                    evidence_role="runtime_diagnostic",
+                    acceptance_status="PASS" if has_required_counters else "FAIL",
+                    acceptance_reason=(
+                        "generated ARTS diagnostic counters include required runtime fields"
+                        if has_required_counters
+                        else "generated ARTS diagnostic counters missing required runtime fields"
+                    ),
+                    benchmark=str(row.get("benchmark")),
+                    rows=[row],
+                    runtime_mode=mode,
+                    kernel_speedup=_to_float(row.get("speedup")),
+                    e2e_speedup=_e2e_speedup(row),
+                    diagnostic_counter_fields_present=has_required_counters,
+                    diagnostic_counter_fields=SINGLE_NODE_DIAGNOSTIC_COUNTER_FIELDS,
+                    missing_diagnostic_counter_fields=missing_counter_fields,
+                )
+            )
+        elif mode in {ARTS_RUNTIME_MODE_HOST_OPENMP, ARTS_RUNTIME_MODE_HOST_SERIAL}:
+            rows.append(
+                _single_node_acceptance_row(
+                    evidence_role="runtime_diagnostic",
+                    acceptance_status="NOT_APPLICABLE",
+                    acceptance_reason="host fallback row does not enter generated ARTS runtime",
+                    benchmark=str(row.get("benchmark")),
+                    rows=[row],
+                    runtime_mode=mode,
+                    kernel_speedup=_to_float(row.get("speedup")),
+                    e2e_speedup=_e2e_speedup(row),
+                )
+            )
+
+    return rows
+
+
 def _build_node_scaling_rows(summary_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for row in summary_rows:
@@ -1583,6 +2124,85 @@ def _build_node_scaling_rows(summary_rows: List[Dict[str, Any]]) -> List[Dict[st
                     "rows_with_counters": row.get("rows_with_counters"),
                 }
             )
+
+    return rows
+
+
+def _build_runtime_coverage_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in result_rows:
+        grouped[(_phase_name(row.get("run_phase")), _runtime_mode_value(row))].append(row)
+
+    rows: List[Dict[str, Any]] = []
+    for (phase, runtime_mode), group_rows in sorted(grouped.items()):
+        nodes = sorted(
+            {
+                int(node)
+                for node in (_to_float(row.get("nodes")) for row in group_rows)
+                if node is not None
+            }
+        )
+        single_node_rows = sum(1 for row in group_rows if _to_float(row.get("nodes")) == 1)
+        multinode_rows = sum(
+            1 for row in group_rows if (_to_float(row.get("nodes")) or 0) > 1
+        )
+        direct_omp_rows = sum(
+            1 for row in group_rows if row.get("verification_mode") == "direct_omp"
+        )
+        stored_reference_rows = sum(
+            1
+            for row in group_rows
+            if row.get("verification_mode") == "stored_omp_reference"
+        )
+        arts_only_rows = sum(
+            1 for row in group_rows if row.get("verification_mode") == "arts_only"
+        )
+        speedup_rows = sum(1 for row in group_rows if _to_float(row.get("speedup")) is not None)
+        statuses = [_status_text(row.get("status")) for row in group_rows]
+        details = [_status_text(row.get("status_detail")) for row in group_rows]
+
+        if runtime_mode == ARTS_RUNTIME_MODE_TASK and multinode_rows:
+            coverage_scope = "generated_arts_multinode_scaling"
+        elif runtime_mode in {ARTS_RUNTIME_MODE_HOST_OPENMP, ARTS_RUNTIME_MODE_HOST_SERIAL}:
+            coverage_scope = "host_fallback_single_node_parity"
+        elif runtime_mode == ARTS_RUNTIME_MODE_TASK:
+            coverage_scope = "generated_arts_single_node"
+        else:
+            coverage_scope = "runtime_mode_unknown"
+
+        notes: List[str] = []
+        if runtime_mode in {ARTS_RUNTIME_MODE_HOST_OPENMP, ARTS_RUNTIME_MODE_HOST_SERIAL}:
+            notes.append("host fallback rows are parity checks and are not RDMA scaling evidence")
+        if multinode_rows and arts_only_rows:
+            notes.append("arts_only rows prove execution and checksum emission only")
+        if multinode_rows and speedup_rows < len(group_rows):
+            notes.append("use NodeScaling and DistributedDbDelta for multinode timing")
+        if nodes and nodes[0] == 1 and multinode_rows:
+            notes.append("node 1 is the baseline; nodes greater than 1 are the RDMA sweep")
+
+        rows.append(
+            {
+                "run_phase": phase,
+                "runtime_mode": runtime_mode,
+                "benchmark_count": len(
+                    {row.get("benchmark") for row in group_rows if row.get("benchmark")}
+                ),
+                "row_count": len(group_rows),
+                "single_node_rows": single_node_rows,
+                "multinode_rows": multinode_rows,
+                "node_counts": ",".join(str(node) for node in nodes),
+                "speedup_rows": speedup_rows,
+                "direct_omp_rows": direct_omp_rows,
+                "stored_reference_rows": stored_reference_rows,
+                "arts_only_rows": arts_only_rows,
+                "pass_count": sum(1 for status in statuses if status == STATUS_PASS),
+                "fail_count": sum(1 for status in statuses if status in FAIL_STATUSES),
+                "warn_count": sum(1 for detail in details if detail == STATUS_WARN),
+                "verified_count": sum(1 for row in group_rows if row.get("verified") is True),
+                "coverage_scope": coverage_scope,
+                "coverage_note": "; ".join(notes),
+            }
+        )
 
     return rows
 
@@ -2899,6 +3519,7 @@ def _metadata_rows(
         add("report_rows_with_partial_counters", report_summary.get("rows_with_partial_counters"))
         add("report_rows_with_unknown_slurm_state", report_summary.get("rows_with_unknown_slurm_state"))
         add("report_rows_with_perf", report_summary.get("rows_with_perf"))
+        add("report_runtime_mode_counts", report_summary.get("runtime_mode_counts"))
 
     add("command", command)
     return rows
@@ -2935,13 +3556,20 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     phases = sorted({_phase_name(r.get("run_phase")) for r in result_rows})
     geomean_speedup: Dict[str, Optional[float]] = {}
     for phase in phases:
+        phase_rows = [
+            r for r in result_rows if _phase_name(r.get("run_phase")) == phase
+        ]
         phase_speedups = [
             _to_float(r.get("speedup"))
-            for r in result_rows
-            if _phase_name(r.get("run_phase")) == phase
+            for r in phase_rows
         ]
-        geomean_speedup[phase] = _geomean(
-            v for v in phase_speedups if v is not None and v > 0
+        if any((_to_float(r.get("nodes")) or 0) > 1 for r in phase_rows) and any(
+            v is None for v in phase_speedups
+        ):
+            geomean_speedup[phase] = None
+        else:
+            geomean_speedup[phase] = _geomean(
+                v for v in phase_speedups if v is not None and v > 0
         )
 
     rows_with_counters = sum(
@@ -2961,6 +3589,9 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         for r in result_rows
         if r.get("has_perf") is True
     )
+    runtime_mode_counts: Dict[str, int] = defaultdict(int)
+    for row in result_rows:
+        runtime_mode_counts[_runtime_mode_value(row)] += 1
 
     return {
         "generated_at": datetime.now().isoformat(),
@@ -2976,6 +3607,7 @@ def _build_report_summary(result_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "rows_with_partial_counters": rows_with_partial_counters,
         "rows_with_unknown_slurm_state": rows_with_unknown_slurm_state,
         "rows_with_perf": rows_with_perf,
+        "runtime_mode_counts": dict(sorted(runtime_mode_counts.items())),
     }
 
 
@@ -3002,6 +3634,8 @@ def _write_report(
     workbook.remove(workbook.active)
 
     summary_rows = _build_summary_rows(result_rows)
+    single_node_acceptance_rows = _build_single_node_acceptance_rows(result_rows)
+    runtime_coverage_rows = _build_runtime_coverage_rows(result_rows)
     node_counter_summary_rows = _build_node_counter_summary_rows(
         result_rows, experiment_dir=experiment_dir
     )
@@ -3043,6 +3677,11 @@ def _write_report(
                 "Summary",
                 "Aggregated timings and coverage grouped by benchmark configuration.",
                 "Use this for the main quantitative view before drilling into raw rows.",
+            ),
+            (
+                "RuntimeCoverage",
+                "Runtime-mode and verification coverage for distinguishing parity, execution-only, and scaling evidence.",
+                "Use this before making RDMA claims from mixed runtime-mode experiments.",
             )
         ]
     )
@@ -3052,6 +3691,14 @@ def _write_report(
                 "ThreadScaling",
                 "Self-scaling view for single-node thread sweeps.",
                 "Use this when the experiment varies thread count at a fixed node count.",
+            )
+        )
+    if single_node_acceptance_rows:
+        sheet_specs.append(
+            (
+                "SingleNodeAcceptance",
+                "Runtime-mode-aware acceptance for the all-benchmark single-node study.",
+                "Use this to separate generated ARTS competitiveness from host fallback parity and tiny-kernel diagnostics.",
             )
         )
     if node_scaling_rows:
@@ -3125,11 +3772,23 @@ def _write_report(
     _build_overview_sheet(workbook, result_rows, steps, metadata=metadata)
     _build_issues_sheet(workbook, result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
+    _append_table_sheet(
+        workbook,
+        "RuntimeCoverage",
+        RUNTIME_COVERAGE_COLUMNS,
+        runtime_coverage_rows,
+    )
     _append_optional_table_sheet(
         workbook,
         "ThreadScaling",
         THREAD_SCALING_COLUMNS,
         thread_scaling_rows,
+    )
+    _append_optional_table_sheet(
+        workbook,
+        "SingleNodeAcceptance",
+        SINGLE_NODE_ACCEPTANCE_COLUMNS,
+        single_node_acceptance_rows,
     )
     _append_optional_table_sheet(
         workbook,

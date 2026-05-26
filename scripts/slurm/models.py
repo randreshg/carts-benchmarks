@@ -61,6 +61,7 @@ class SlurmJobConfig:
     cpu_pinning: str = "default"
     runtime_arts_overrides: Dict[str, str] = field(default_factory=dict)
     runtime_env_overrides: Dict[str, str] = field(default_factory=dict)
+    requires_reference_verification: bool = False
 
 
 @dataclass
