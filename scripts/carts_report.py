@@ -22,12 +22,17 @@ class ReportArtifact:
     data_js: Path
 
 
-def generate_carts_report(
+@dataclass(frozen=True)
+class PaperFiguresArtifact:
+    output_dir: Path
+    data_dir: Path
+    readme: Path
+
+
+def _load_report_data(
     results_dir: Path,
-    output_dir: Path | None = None,
-    extra_results: Iterable[Path] | None = None,
-) -> ReportArtifact:
-    """Generate a self-contained static report for a benchmark results directory."""
+    extra_results: Iterable[Path] | None,
+) -> tuple[dict[str, Any], Path]:
     results_dir = Path(results_dir).resolve()
     results_json = results_dir / "results.json"
     if not results_json.exists():
@@ -59,6 +64,16 @@ def generate_carts_report(
         )
         source_results.append(extra_json)
     report_data = _build_report_data(payload.get("metadata") or {}, rows, source_results)
+    return report_data, results_dir
+
+
+def generate_carts_report(
+    results_dir: Path,
+    output_dir: Path | None = None,
+    extra_results: Iterable[Path] | None = None,
+) -> ReportArtifact:
+    """Generate a self-contained static report for a benchmark results directory."""
+    report_data, results_dir = _load_report_data(results_dir, extra_results)
 
     if output_dir is None:
         output_dir = results_dir / "presentation" / REPORT_DIRNAME
@@ -102,6 +117,201 @@ def generate_carts_report(
         index_html=output_dir / "index.html",
         data_js=assets_dir / "data.js",
     )
+
+
+# Category and strategy mappings come from the ICS-26 CARTS paper figure design:
+# benchmarks are grouped first by topical category (Dense LA, Stencil, ...) and
+# then by partitioning strategy (Block/ESD, Stencil+Halo, Coarse). The mapping
+# lives here because it is shared between scaling-trends and speedup-by-strategy.
+_PAPER_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Dense LA", ("polybench/gemm", "polybench/2mm", "polybench/3mm", "polybench/atax", "polybench/bicg")),
+    ("Convolution", ("polybench/convolution-2d", "polybench/convolution-3d", "polybench/correlation")),
+    ("Stencil", (
+        "polybench/jacobi2d",
+        "polybench/seidel-2d",
+        "kastors-jacobi/jacobi-for",
+        "kastors-jacobi/jacobi-task-dep",
+        "kastors-jacobi/poisson-for",
+        "kastors-jacobi/poisson-task",
+        "sw4lite/rhs4sg-base",
+        "sw4lite/vel4sg-base",
+    )),
+    ("ML", ("ml-kernels/activations", "ml-kernels/batchnorm", "ml-kernels/layernorm", "ml-kernels/pooling")),
+    ("Scientific", ("seissol/volume-integral", "specfem3d/stress", "specfem3d/velocity")),
+    ("Monte Carlo", ("monte-carlo/ensemble",)),
+    ("Memory", ("stream",)),
+    ("LLM", ("llama2",)),
+)
+
+_PAPER_STRATEGIES: dict[str, str] = {
+    "Dense LA": "Block/ESD",
+    "Convolution": "Block/ESD",
+    "ML": "Block/ESD",
+    "Scientific": "Block/ESD",
+    "Monte Carlo": "Block/ESD",
+    "Memory": "Block/ESD",
+    "Stencil": "Stencil+Halo",
+    "LLM": "Coarse",
+}
+
+
+def _paper_category(benchmark: str, family: str) -> str:
+    for name, members in _PAPER_CATEGORIES:
+        if benchmark in members or family in members:
+            return name
+    return "Other"
+
+
+def generate_paper_figures(
+    results_dir: Path,
+    output_dir: Path | None = None,
+    extra_results: Iterable[Path] | None = None,
+) -> PaperFiguresArtifact:
+    """Emit pgfplots-ready `.dat` files for the ICS-26 CARTS paper figures."""
+    report_data, results_dir = _load_report_data(results_dir, extra_results)
+
+    if output_dir is None:
+        output_dir = results_dir / "presentation" / "paper-figures"
+    output_dir = Path(output_dir).resolve()
+    data_dir = output_dir / "data"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = report_data["rows"]
+    openmp_rows = report_data["tables"]["openmp"]
+
+    _write_dat_scaling_trends(data_dir / "scaling-trends.dat", rows)
+    _write_dat_speedup_by_strategy(data_dir / "speedup-by-strategy.dat", openmp_rows)
+    _write_dat_latency_comparison(data_dir / "latency-comparison.dat", openmp_rows)
+    _write_dat_gemm_strong(data_dir / "case-gemm-strong.dat", rows)
+    _write_dat_pending(
+        data_dir / "case-gemm-capacity.dat",
+        "nodes problem_size speedup",
+        "weak-scaling GEMM sweep not yet executed",
+    )
+    _write_dat_pending(
+        data_dir / "case-gemm-decomp.dat",
+        "nodes startup_s comm_s compute_s",
+        "GEMM time-breakdown profiling not yet wired into results.json",
+    )
+
+    readme = output_dir / "README.md"
+    readme.write_text(_paper_readme(), encoding="utf-8")
+    return PaperFiguresArtifact(output_dir=output_dir, data_dir=data_dir, readme=readme)
+
+
+def _write_dat(path: Path, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
+    lines = [" ".join(columns)]
+    for row in rows:
+        lines.append(" ".join(_dat_cell(value) for value in row))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_dat_pending(path: Path, header: str, note: str) -> None:
+    path.write_text(f"{header}\n# pending multinode results: {note}\n", encoding="utf-8")
+
+
+def _dat_cell(value: Any) -> str:
+    if value is None:
+        return "nan"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "nan"
+        return f"{value:.6g}"
+    text = str(value)
+    return text.replace(" ", "_") if " " in text else text
+
+
+def _write_dat_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None:
+    # Family-level summaries collapse Dense LA and Stencil into a single "polybench"
+    # bucket, so go straight to the per-run rows and apply the paper category map.
+    buckets: dict[tuple[str, int], list[float]] = defaultdict(list)
+    for row in rows:
+        if row.get("phase_kind") != PHASE_THREAD or row.get("nodes") != 1:
+            continue
+        if row.get("status") != "PASS":
+            continue
+        speedup = row.get("e2e_self_speedup")
+        threads = row.get("threads")
+        if speedup is None or threads is None:
+            continue
+        category = _paper_category(str(row.get("benchmark") or ""), str(row.get("family") or ""))
+        buckets[(category, int(threads))].append(float(speedup))
+    out_rows: list[tuple[Any, ...]] = []
+    for (category, threads), values in sorted(buckets.items()):
+        positives = [v for v in values if v > 0.0]
+        if not positives:
+            continue
+        geomean = math.exp(sum(math.log(v) for v in positives) / len(positives))
+        out_rows.append((category, threads, geomean))
+    _write_dat(path, ["category", "threads", "geomean_speedup"], out_rows)
+
+
+def _write_dat_speedup_by_strategy(path: Path, openmp_rows: list[dict[str, Any]]) -> None:
+    out_rows: list[tuple[Any, ...]] = []
+    for row in openmp_rows:
+        benchmark = row.get("benchmark")
+        ratio = row.get("carts_vs_openmp")
+        if benchmark is None or ratio is None:
+            continue
+        family = str(row.get("family") or benchmark)
+        category = _paper_category(str(benchmark), family)
+        strategy = _PAPER_STRATEGIES.get(category, "Other")
+        out_rows.append((strategy, str(benchmark), float(ratio)))
+    out_rows.sort()
+    _write_dat(path, ["strategy", "benchmark", "speedup"], out_rows)
+
+
+def _write_dat_latency_comparison(path: Path, openmp_rows: list[dict[str, Any]]) -> None:
+    out_rows: list[tuple[Any, ...]] = []
+    for row in openmp_rows:
+        benchmark = row.get("benchmark")
+        carts_time = row.get("arts_e2e_sec")
+        omp_time = row.get("openmp_e2e_sec")
+        ratio = row.get("carts_vs_openmp")
+        if benchmark is None or carts_time is None or omp_time is None:
+            continue
+        out_rows.append((str(benchmark), float(carts_time), float(omp_time), ratio))
+    out_rows.sort()
+    _write_dat(path, ["benchmark", "carts_time", "omp_time", "ratio"], out_rows)
+
+
+def _write_dat_gemm_strong(path: Path, rows: list[dict[str, Any]]) -> None:
+    out_rows: list[tuple[Any, ...]] = []
+    for row in sorted(rows, key=lambda r: (int(r.get("nodes") or 0))):
+        if row.get("benchmark") != "polybench/gemm":
+            continue
+        if row.get("phase_kind") not in {PHASE_NODE, PHASE_NODE_DB}:
+            continue
+        if row.get("status") != "PASS":
+            continue
+        speedup = row.get("e2e_self_speedup")
+        if speedup is None:
+            continue
+        out_rows.append((int(row["nodes"]), float(speedup)))
+    _write_dat(path, ["nodes", "speedup"], out_rows)
+
+
+def _paper_readme() -> str:
+    return "\n".join([
+        "# Paper Figures Data",
+        "",
+        "Pgfplots-ready `.dat` files for the ICS-26 CARTS paper figures.",
+        "Each file is whitespace-separated with a header line; pgfplots reads them via",
+        "`\\pgfplotstableread{data/<name>.dat}{\\table}`.",
+        "",
+        "| File | Source aggregate | Columns |",
+        "|---|---|---|",
+        "| `scaling-trends.dat` | `family_thread_summary` rebucketed by paper category | `category threads geomean_speedup` |",
+        "| `speedup-by-strategy.dat` | `openmp` rows (max-thread CARTS/OpenMP ratio) tagged by partitioning strategy | `strategy benchmark speedup` |",
+        "| `latency-comparison.dat` | `openmp` rows at the max-thread point | `benchmark carts_time omp_time ratio` |",
+        "| `case-gemm-strong.dat` | `polybench/gemm` multinode self-speedup vs. 1 node | `nodes speedup` |",
+        "| `case-gemm-capacity.dat` | weak-scaling GEMM sweep (pending) | `nodes problem_size speedup` |",
+        "| `case-gemm-decomp.dat` | GEMM time breakdown (pending) | `nodes startup_s comm_s compute_s` |",
+        "",
+        "Pending files contain only the header plus a `# pending multinode results` comment so the",
+        "paper figure can detect emptiness and render a placeholder.",
+    ]) + "\n"
 
 
 def _normalize_result(result: dict[str, Any], results_dir: Path) -> dict[str, Any]:

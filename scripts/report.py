@@ -3254,3 +3254,18 @@ def generate_carts_report(
         output_dir=output_dir,
         extra_results=extra_results,
     )
+
+
+def generate_paper_figures(
+    results_dir: Path,
+    output_dir: Optional[Path] = None,
+    extra_results: Optional[Iterable[Path]] = None,
+):
+    """Generate pgfplots-ready `.dat` files for the ICS-26 CARTS paper figures."""
+    from carts_report import generate_paper_figures as generate_paper_figures_impl
+
+    return generate_paper_figures_impl(
+        results_dir,
+        output_dir=output_dir,
+        extra_results=extra_results,
+    )

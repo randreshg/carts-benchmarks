@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, MutableMapping, Optional, Protocol
 from dekk import Colors
 from arts_config import KEY_COUNTER_FOLDER
 from arts_runtime_modes import (
+    ARTS_RUNTIME_MODE_HOST_OPENMP,
     infer_arts_runtime_mode,
     runtime_overrides_for_arts_mode,
     write_runtime_arts_config,
@@ -228,10 +229,17 @@ class ConfigExecutionExecutor:
         )
 
         self.host._cleanup_port()
-        run_arts = self._run_arts(build_outputs.build_arts, execution, run_files, hooks)
-        hooks.store_partial("run_arts", run_arts)
-
-        run_omp = self._run_omp(build_outputs.build_omp, execution, run_files, hooks)
+        if self._run_omp_first(run_number):
+            run_omp = self._run_omp(build_outputs.build_omp, execution, run_files, hooks)
+            hooks.store_partial("run_omp", run_omp)
+            self.host._cleanup_port()
+            run_arts = self._run_arts(build_outputs.build_arts, execution, run_files, hooks)
+            hooks.store_partial("run_arts", run_arts)
+        else:
+            run_arts = self._run_arts(build_outputs.build_arts, execution, run_files, hooks)
+            hooks.store_partial("run_arts", run_arts)
+            run_omp = self._run_omp(build_outputs.build_omp, execution, run_files, hooks)
+            hooks.store_partial("run_omp", run_omp)
         self._append_perf_csv(run_files.arts_perf_temp, run_files.arts_perf_main, run_number)
         self._append_perf_csv(run_files.omp_perf_temp, run_files.omp_perf_main, run_number)
 
@@ -275,6 +283,13 @@ class ConfigExecutionExecutor:
             size_params=self.host.get_size_params(execution.bench_path, execution.size),
         )
 
+    def _run_omp_first(self, run_number: int) -> bool:
+        return (
+            self.plan.variant is None
+            and len(self.plan.run_numbers) > 1
+            and run_number % 2 == 0
+        )
+
     def _run_arts(
         self,
         build_arts: BuildResult,
@@ -305,6 +320,8 @@ class ConfigExecutionExecutor:
             runtime_overrides_for_arts_mode(arts_runtime_mode)
         )
         arts_env.update(runtime_env_overrides)
+        if arts_runtime_mode == ARTS_RUNTIME_MODE_HOST_OPENMP:
+            arts_env["OMP_NUM_THREADS"] = str(execution.actual_omp_threads)
         if execution.effective_arts_cfg:
             arts_cfg_path = Path(execution.effective_arts_cfg).resolve()
             if runtime_arts_overrides and run_files.run_dir:
@@ -470,6 +487,8 @@ class ConfigExecutionExecutor:
             runtime_overrides_for_arts_mode(arts_runtime_mode)
         )
         saved_env_overrides.update(runtime_env_overrides)
+        if arts_runtime_mode == ARTS_RUNTIME_MODE_HOST_OPENMP:
+            saved_env_overrides["OMP_NUM_THREADS"] = str(execution.actual_omp_threads)
         cfg_overrides = dict(runtime_arts_overrides)
         if counter_path is not None:
             cfg_overrides[KEY_COUNTER_FOLDER] = str(counter_path)

@@ -5745,9 +5745,25 @@ def report_command(
         "-o",
         help="Report output directory (default: <results-dir>/presentation/carts-report)",
     ),
+    paper_figures: Optional[Path] = typer.Option(
+        None,
+        "--paper-figures",
+        help=(
+            "Also emit pgfplots-ready `.dat` files into this directory "
+            "(default: <results-dir>/presentation/paper-figures when the flag is bare)."
+        ),
+    ),
+    paper_figures_only: bool = typer.Option(
+        False,
+        "--paper-figures-only",
+        help="Skip the HTML dashboard; emit only the paper-figure data files.",
+    ),
 ):
     """Generate the static interactive CARTS Report."""
-    _generate_carts_report(results_dir, extra_results, output_dir)
+    if not paper_figures_only:
+        _generate_carts_report(results_dir, extra_results, output_dir)
+    if paper_figures is not None or paper_figures_only:
+        _generate_paper_figures(results_dir, extra_results, paper_figures)
 
 
 def _generate_carts_report(
@@ -5768,6 +5784,26 @@ def _generate_carts_report(
         raise typer.Exit(1)
 
     print_success(f"CARTS Report written to {artifact.index_html}")
+
+
+def _generate_paper_figures(
+    results_dir: Path,
+    extra_results: Optional[List[Path]],
+    output_dir: Optional[Path],
+) -> None:
+    from report import generate_paper_figures
+
+    try:
+        artifact = generate_paper_figures(
+            results_dir,
+            output_dir=output_dir,
+            extra_results=extra_results,
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print_error(str(exc))
+        raise typer.Exit(1)
+
+    print_success(f"Paper figure data written to {artifact.data_dir}")
 
 
 # ============================================================================

@@ -32,7 +32,15 @@ from execution import (  # noqa: E402
     BenchmarkProcessRunner,
     BenchmarkRunFiles,
 )
-from models import Artifacts, BenchmarkConfig, BuildResult, RunResult, Status  # noqa: E402
+from models import (  # noqa: E402
+    Artifacts,
+    BenchmarkConfig,
+    BuildResult,
+    RunResult,
+    Status,
+    TimingResult,
+    VerificationResult,
+)
 from pipeline import ConfigExecutionExecutor, ConfigExecutionPlan, ExecutionHooks  # noqa: E402
 from rich.console import Console  # noqa: E402
 from runner import BenchmarkRunner, generate_arts_config  # noqa: E402
@@ -61,6 +69,86 @@ class _ArtifactHost:
 
     def collect_artifacts(self, bench_path: Path) -> Artifacts:
         return Artifacts(benchmark_dir=str(bench_path))
+
+
+class _ExecutionOrderHost:
+    def __init__(self, root: Path) -> None:
+        self.artifact_manager = None
+        self.trace = False
+        self.console = Console(file=StringIO())
+        self.root = root
+        self.run_calls: list[str] = []
+
+    def build_benchmark(
+        self,
+        name: str,
+        size: str,
+        variant: str,
+        arts_config: Path | None = None,
+        cflags: str = "",
+        compile_args: str | None = None,
+        build_output_dir: Path | None = None,
+    ) -> BuildResult:
+        suffix = "arts" if variant == "arts" else "omp"
+        return BuildResult(
+            status=Status.PASS,
+            duration_sec=0.01,
+            output="",
+            executable=str(self.root / f"bench_{suffix}"),
+        )
+
+    def run_benchmark(self, executable: str, *args, **kwargs) -> RunResult:
+        self.run_calls.append("arts" if executable.endswith("_arts") else "omp")
+        return RunResult(
+            status=Status.PASS,
+            duration_sec=0.01,
+            exit_code=0,
+            stdout="checksum: 1\nkernel.main: 1.0s\n",
+            stderr="",
+            checksum="1",
+            kernel_timings={"main": 1.0},
+        )
+
+    def collect_artifacts(self, bench_path: Path) -> Artifacts:
+        return Artifacts(benchmark_dir=str(bench_path))
+
+    def calculate_timing(
+        self,
+        arts_result: RunResult,
+        omp_result: RunResult,
+        report_speedup: bool = True,
+    ) -> TimingResult:
+        return TimingResult(
+            arts_time_sec=1.0,
+            omp_time_sec=1.0,
+            speedup=1.0,
+            note="Same performance",
+            speedup_basis="kernel",
+        )
+
+    def verify_correctness(
+        self,
+        arts_result: RunResult,
+        omp_result: RunResult,
+        tolerance: float,
+    ) -> VerificationResult:
+        return VerificationResult(True, arts_result.checksum, omp_result.checksum, tolerance, "")
+
+    def get_size_params(self, bench_path: Path, size: str) -> str | None:
+        return None
+
+    def _cleanup_port(self) -> None:
+        return None
+
+    def _index_build_artifacts(
+        self,
+        artifacts_dir: Path,
+        arts_cfg_used: Path | None = None,
+    ) -> dict[str, str | None]:
+        return {}
+
+    def _create_run_files(self, **kwargs) -> BenchmarkRunFiles:
+        return BenchmarkRunFiles(run_number=kwargs["run_number"])
 
 
 class BenchmarkPipelineTest(unittest.TestCase):
@@ -125,6 +213,50 @@ class BenchmarkPipelineTest(unittest.TestCase):
             self.assertIsNotNone(host.last_env)
             self.assertEqual(host.last_env["CUSTOM"], "1")
             self.assertEqual(host.last_env["ARTS_CONFIG"], str(cfg.resolve()))
+
+    def test_repeated_paired_runs_alternate_launch_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = root / "arts.cfg"
+            cfg.write_text("[ARTS]\nlauncher=local\nnode_count=1\n")
+            execution = BenchmarkExecutionContext(
+                name="polybench/gemm",
+                suite="polybench",
+                size="small",
+                bench_path=root,
+                config=BenchmarkConfig(
+                    arts_threads=64,
+                    arts_nodes=1,
+                    omp_threads=64,
+                    launcher="local",
+                ),
+                effective_arts_cfg=cfg,
+                desired_threads=64,
+                desired_nodes=1,
+                desired_launcher="local",
+                actual_omp_threads=64,
+                effective_cflags="",
+                run_args=[],
+                verify_tolerance=0.0,
+            )
+            plan = ConfigExecutionPlan(
+                execution=execution,
+                timeout=10,
+                run_numbers=(1, 2, 3),
+                compile_args=None,
+                perf_enabled=False,
+                perf_interval=0.1,
+                env_overrides={},
+            )
+            host = _ExecutionOrderHost(root)
+
+            results = ConfigExecutionExecutor(host, plan).execute()
+
+            self.assertEqual([r.run_number for r in results], [1, 2, 3])
+            self.assertEqual(
+                host.run_calls,
+                ["arts", "omp", "omp", "arts", "arts", "omp"],
+            )
 
     def test_host_openmp_fallback_arts_run_uses_runtime_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,11 +323,10 @@ class BenchmarkPipelineTest(unittest.TestCase):
 
             self.assertEqual(result.status, Status.PASS)
             self.assertIsNotNone(host.last_env)
-            self.assertEqual(host.last_env["KMP_BLOCKTIME"], "0")
-            self.assertEqual(
-                host.last_env["KMP_AFFINITY"],
-                "granularity=fine,compact",
-            )
+            self.assertEqual(host.last_env["OMP_WAIT_POLICY"], "ACTIVE")
+            self.assertEqual(host.last_env["OMP_NUM_THREADS"], "64")
+            self.assertNotIn("KMP_BLOCKTIME", host.last_env)
+            self.assertNotIn("KMP_AFFINITY", host.last_env)
             runtime_cfg = Path(host.last_env["ARTS_CONFIG"])
             self.assertEqual(runtime_cfg, (run_dir / "arts.cfg").resolve())
             parsed = parse_arts_cfg(runtime_cfg)
