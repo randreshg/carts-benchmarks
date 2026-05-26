@@ -202,6 +202,7 @@ class ArtifactManager:
         profile: Optional[str] = None,
         perf: Optional[bool] = None,
         perf_interval: Optional[float] = None,
+        warmup_run: Optional[bool] = None,
         timeout: Optional[int] = None,
         time_limit: Optional[str] = None,
         cpu_pinning: Optional[str] = None,
@@ -275,6 +276,8 @@ class ArtifactManager:
             run_config["perf"] = perf
         if perf_interval is not None:
             run_config["perf_interval"] = perf_interval
+        if warmup_run is not None:
+            run_config["warmup_run"] = warmup_run
         if timeout is not None:
             run_config["timeout"] = timeout
         if time_limit is not None:

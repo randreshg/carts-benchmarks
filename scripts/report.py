@@ -1589,6 +1589,39 @@ def _build_summary_rows(result_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
     return summary_rows
 
 
+def _warmup_runs_by_phase(
+    steps: Optional[List["ExperimentStep"]],
+) -> Dict[str, int]:
+    if not steps:
+        return {}
+
+    warmups: Dict[str, int] = {}
+    for idx, step in enumerate(steps, start=1):
+        phase = _phase_name(getattr(step, "name", None) or f"step_{idx}")
+        warmup_runs = int(getattr(step, "warmup_runs", 0) or 0)
+        if warmup_runs > 0:
+            warmups[phase] = warmup_runs
+    return warmups
+
+
+def _filter_warmup_rows(
+    result_rows: List[Dict[str, Any]],
+    steps: Optional[List["ExperimentStep"]],
+) -> List[Dict[str, Any]]:
+    warmups = _warmup_runs_by_phase(steps)
+    if not warmups:
+        return result_rows
+
+    measured_rows: List[Dict[str, Any]] = []
+    for row in result_rows:
+        warmup_runs = warmups.get(_phase_name(row.get("run_phase")), 0)
+        run_number = _to_float(row.get("run"))
+        if run_number is not None and run_number <= warmup_runs:
+            continue
+        measured_rows.append(row)
+    return measured_rows
+
+
 def _build_thread_scaling_rows(summary_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for row in summary_rows:
@@ -1802,7 +1835,7 @@ def _build_single_node_acceptance_rows(
 
     bad_execution = [
         row
-        for row in result_rows
+        for row in measured_result_rows
         if _status_text(row.get("status")) != STATUS_PASS or row.get("verified") is not True
     ]
     rows.append(
@@ -3633,19 +3666,21 @@ def _write_report(
     workbook = Workbook()
     workbook.remove(workbook.active)
 
-    summary_rows = _build_summary_rows(result_rows)
-    single_node_acceptance_rows = _build_single_node_acceptance_rows(result_rows)
-    runtime_coverage_rows = _build_runtime_coverage_rows(result_rows)
+    measured_result_rows = _filter_warmup_rows(result_rows, steps)
+
+    summary_rows = _build_summary_rows(measured_result_rows)
+    single_node_acceptance_rows = _build_single_node_acceptance_rows(measured_result_rows)
+    runtime_coverage_rows = _build_runtime_coverage_rows(measured_result_rows)
     node_counter_summary_rows = _build_node_counter_summary_rows(
-        result_rows, experiment_dir=experiment_dir
+        measured_result_rows, experiment_dir=experiment_dir
     )
-    node_counter_rows = _build_node_counter_rows(result_rows, experiment_dir=experiment_dir)
-    perf_file_rows = _build_perf_file_rows(result_rows, experiment_dir=experiment_dir)
+    node_counter_rows = _build_node_counter_rows(measured_result_rows, experiment_dir=experiment_dir)
+    perf_file_rows = _build_perf_file_rows(measured_result_rows, experiment_dir=experiment_dir)
     thread_scaling_rows = _build_thread_scaling_rows(summary_rows)
     node_scaling_rows = _build_node_scaling_rows(summary_rows)
     distributed_delta_rows = _build_distributed_db_delta_rows(
         summary_rows,
-        result_rows,
+        measured_result_rows,
         node_counter_summary_rows,
     )
 
@@ -3769,8 +3804,8 @@ def _write_report(
         ]
     )
 
-    _build_overview_sheet(workbook, result_rows, steps, metadata=metadata)
-    _build_issues_sheet(workbook, result_rows)
+    _build_overview_sheet(workbook, measured_result_rows, steps, metadata=metadata)
+    _build_issues_sheet(workbook, measured_result_rows)
     _append_table_sheet(workbook, "Summary", SUMMARY_COLUMNS, summary_rows)
     _append_table_sheet(
         workbook,
@@ -3803,7 +3838,7 @@ def _write_report(
         distributed_delta_rows,
     )
     _build_scaling_sheet(workbook, summary_rows)
-    _build_comparison_sheet(workbook, result_rows, steps=steps)
+    _build_comparison_sheet(workbook, measured_result_rows, steps=steps)
     _append_optional_table_sheet(
         workbook,
         "NodeCounterSummary",
@@ -3825,7 +3860,7 @@ def _write_report(
     _append_table_sheet(workbook, "Results", RESULTS_COLUMNS, result_rows)
 
     effective_command = command or _load_manifest_command(experiment_dir)
-    report_summary = _build_report_summary(result_rows)
+    report_summary = _build_report_summary(measured_result_rows)
     _append_metadata_sheet(
         workbook,
         metadata,

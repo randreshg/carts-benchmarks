@@ -161,6 +161,7 @@ class SlurmBatchRequest:
     report_steps: Optional[List[ExperimentStep]]
     command_str: str
     variant: Optional[str] = None
+    warmup_runs: int = 0
 
 
 @dataclass(frozen=True)
@@ -1159,6 +1160,7 @@ class SlurmBatchExecutor:
                     profile=str(self.request.profile) if self.request.profile else None,
                     perf=self.request.perf,
                     perf_interval=self.request.perf_interval if self.request.perf else None,
+                    warmup_run=run_num <= self.request.warmup_runs,
                     timeout=self.request.timeout,
                     time_limit=self.request.time_limit,
                     cpu_pinning=self.request.cpu_pinning,
@@ -1650,11 +1652,13 @@ class SlurmBatchExecutor:
                     "threads": step.threads,
                     "nodes": step.nodes,
                     "runs": step.runs,
+                    "warmup_runs": step.warmup_runs,
                     "compile_args": step.compile_args,
                     "debug": step.debug,
                     "perf": step.perf,
                     "perf_interval": step.perf_interval if step.perf else None,
                     "profile": step.profile,
+                    "problem_size_n": step.problem_size_n,
                 }
                 for step in self.request.report_steps
             ]
@@ -1667,6 +1671,7 @@ class SlurmBatchExecutor:
             "node_counts": self.request.node_counts,
             "threads": self.request.threads,
             "runs_per_benchmark": self.request.runs,
+            "warmup_runs": self.request.warmup_runs,
             "total_jobs": job_count,
             "submitted_jobs": submitted_jobs,
             "failed_submissions": failed_submissions,

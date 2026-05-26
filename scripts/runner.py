@@ -1661,6 +1661,10 @@ class BenchmarkRunner:
         Returns:
             List of BenchmarkResult objects.
         """
+        if warmup_runs < 0:
+            raise ValueError("warmup_runs must be >= 0")
+        if warmup_runs >= runs:
+            raise ValueError("warmup_runs must be less than runs")
         results = []
         am = self.artifact_manager  # shorthand (may be None)
 
@@ -2242,6 +2246,10 @@ class BenchmarkRunner:
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
+        if warmup_runs < 0:
+            raise ValueError("warmup_runs must be >= 0")
+        if warmup_runs >= runs:
+            raise ValueError("warmup_runs must be less than runs")
         results_dict: Dict[str, List[BenchmarkResult]] = {}
         results_list: List[BenchmarkResult] = []
         start_time = time.time()
@@ -4675,7 +4683,6 @@ def _run_step_slurm(
     size: str,
     node_counts: List[int],
     runs: int,
-    warmup_runs: int,
     partition: Optional[str],
     timeout: int,
     time_limit: Optional[str],
@@ -4684,7 +4691,6 @@ def _run_step_slurm(
     results_dir: Path,
     verbose: bool,
     cflags: Optional[str],
-    problem_size_n: Optional[int],
     compile_args: Optional[str],
     exclude_nodes: Optional[str],
     nodelist: Optional[str],
@@ -4699,6 +4705,8 @@ def _run_step_slurm(
     variant: Optional[str] = None,
     cpu_pinning: str = CPU_PINNING_DEFAULT,
     dry_run: bool = False,
+    warmup_runs: int = 0,
+    problem_size_n: Optional[int] = None,
 ) -> None:
     """Execute one resolved step through SLURM batch mode."""
     if not node_counts:
@@ -4833,6 +4841,7 @@ def _run_slurm_resolved_step(
         size=step_config.size,
         node_counts=step_config.node_counts or [],
         runs=step_config.runs,
+        warmup_runs=step_config.warmup_runs,
         partition=request.partition,
         timeout=step_config.timeout,
         time_limit=request.time_limit,
@@ -4841,6 +4850,7 @@ def _run_slurm_resolved_step(
         results_dir=request.results_dir,
         verbose=request.verbose,
         cflags=step_config.cflags,
+        problem_size_n=step_config.problem_size_n,
         compile_args=step_config.compile_args,
         exclude_nodes=step_config.exclude_nodes,
         nodelist=step_config.nodelist,
@@ -5975,6 +5985,11 @@ def _execute_slurm_batch(
         help="Execution timeout in seconds inside each SLURM job"),
     runs: int = typer.Option(
         1, "--runs", "-r", help="Number of runs per benchmark"),
+    warmup_runs: int = typer.Option(
+        0,
+        "--warmup-runs",
+        help="Run count prefix to execute but exclude from aggregate statistics",
+    ),
     partition: Optional[str] = typer.Option(
         None, "--partition", "-p",
         help="SLURM partition (uses cluster default if not specified)"),
@@ -6070,6 +6085,12 @@ def _execute_slurm_batch(
     - Sweep across multiple node counts with --nodes=1-15
     """
     size = parse_size(size, "--size")
+    if not isinstance(warmup_runs, int):
+        warmup_runs = 0
+    if warmup_runs < 0:
+        raise ValueError("--warmup-runs must be >= 0")
+    if warmup_runs >= runs:
+        raise ValueError("--warmup-runs must be less than --runs")
     cpu_pinning = normalize_cpu_pinning(cpu_pinning)
     runner = BenchmarkRunner(console, verbose, False, False, False, 0)
     require_slurm_commands(dry_run, probe_submission=False)
@@ -6104,6 +6125,8 @@ def _execute_slurm_batch(
         f"Runs per benchmark: {runs}, Size: {size}",
         f"Timeout: {timeout}s (wall {resolved_time_limit})",
     ]
+    if warmup_runs:
+        subtitle_parts.append(f"Warmup runs excluded from statistics: {warmup_runs}")
     if profile:
         subtitle_parts.append(f"Profile: {profile}")
     if perf:
@@ -6166,6 +6189,7 @@ def _execute_slurm_batch(
         node_counts=node_counts,
         size=size,
         runs=runs,
+        warmup_runs=warmup_runs,
         timeout=timeout,
         partition=partition,
         time_limit=resolved_time_limit,
