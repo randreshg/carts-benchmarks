@@ -57,6 +57,8 @@ class ResolvedStepConfig:
     nodelist: Optional[str]
     arts_config: Optional[Path]
     launcher: Optional[str]
+    warmup_runs: int = 0
+    problem_size_n: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -312,6 +314,18 @@ class StepResolver:
             )
             else defaults.runs
         )
+        step_warmup_runs = (
+            step_def.warmup_runs
+            if getattr(step_def, "_has_warmup_runs", False)
+            else 0
+        )
+        if step_warmup_runs < 0:
+            raise ValueError(f"Step '{step_name}': warmup_runs must be >= 0")
+        if step_warmup_runs >= step_runs:
+            raise ValueError(
+                f"Step '{step_name}': warmup_runs ({step_warmup_runs}) "
+                f"must be less than runs ({step_runs})"
+            )
         step_perf = (
             step_def.perf
             if self._uses_step_override(
@@ -335,6 +349,13 @@ class StepResolver:
             )
             else defaults.size
         )
+        step_problem_size_n = (
+            step_def.problem_size_n
+            if getattr(step_def, "_has_problem_size_n", False)
+            else None
+        )
+        if step_problem_size_n is not None and step_problem_size_n <= 0:
+            raise ValueError(f"Step '{step_name}': problem_size_n must be > 0")
         step_cflags = (
             step_def.cflags
             if self._uses_step_override(
@@ -399,9 +420,11 @@ class StepResolver:
             node_counts=node_counts,
             timeout=step_timeout,
             runs=step_runs,
+            warmup_runs=step_warmup_runs,
             perf=step_perf,
             perf_interval=step_perf_interval,
             size=step_size,
+            problem_size_n=step_problem_size_n,
             cflags=step_cflags,
             compile_args=step_compile_args,
             exclude_nodes=step_exclude_nodes,
@@ -526,9 +549,11 @@ class StepResolver:
             rdma=rdma,
             debug=debug,
             runs=runs,
+            warmup_runs=0,
             perf=perf,
             perf_interval=perf_interval,
             size=size,
+            problem_size_n=None,
             threads=threads,
             nodes=nodes,
             timeout=timeout,
@@ -541,9 +566,11 @@ class StepResolver:
         )
         explicit_flags = {
             "_has_runs": True,
+            "_has_warmup_runs": False,
             "_has_perf": True,
             "_has_perf_interval": True,
             "_has_size": True,
+            "_has_problem_size_n": False,
             "_has_threads": threads is not None,
             "_has_nodes": nodes is not None,
             "_has_timeout": True,

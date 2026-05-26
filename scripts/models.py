@@ -243,9 +243,11 @@ class ExperimentStep:
     rdma: bool = True
     debug: int = 0
     runs: int = 1
+    warmup_runs: int = 0
     perf: bool = False
     perf_interval: float = 0.1
     size: Optional[str] = None
+    problem_size_n: Optional[int] = None
     threads: Optional[str] = None
     nodes: Optional[str] = None
     timeout: Optional[int] = None

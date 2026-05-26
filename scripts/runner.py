@@ -483,6 +483,56 @@ def get_weak_scaling_cflags(
     return " ".join(cflags_parts)
 
 
+def get_problem_size_cflags(benchmark: str, problem_size_n: int) -> str:
+    """Generate CFLAGS overriding a benchmark's primary problem dimensions."""
+    if benchmark not in BENCHMARK_SIZE_PARAMS:
+        raise ValueError(
+            f"Step field `problem_size_n` is not supported for benchmark '{benchmark}'"
+        )
+    if problem_size_n <= 0:
+        raise ValueError("Step field `problem_size_n` must be > 0")
+
+    config = BENCHMARK_SIZE_PARAMS[benchmark]
+    return " ".join(f"-D{param}={problem_size_n}" for param in config["params"])
+
+
+def append_problem_size_cflags(
+    benchmark: str,
+    cflags: Optional[str],
+    problem_size_n: Optional[int],
+) -> str:
+    """Append per-benchmark explicit-size flags after user CFLAGS."""
+    base = (cflags or "").strip()
+    if problem_size_n is None:
+        return base
+
+    override = get_problem_size_cflags(benchmark, problem_size_n)
+    return f"{base} {override}".strip()
+
+
+def append_problem_size_cflags_for_step(
+    benchmarks: List[str],
+    cflags: Optional[str],
+    problem_size_n: Optional[int],
+) -> str:
+    """Resolve step-level explicit-size flags for APIs with one CFLAGS string."""
+    base = (cflags or "").strip()
+    if problem_size_n is None:
+        return base
+
+    overrides = {
+        get_problem_size_cflags(benchmark, problem_size_n)
+        for benchmark in benchmarks
+    }
+    if len(overrides) > 1:
+        raise ValueError(
+            "Step field `problem_size_n` maps to different CFLAGS across "
+            "benchmarks; split the step by benchmark for SLURM execution."
+        )
+    override = next(iter(overrides))
+    return f"{base} {override}".strip()
+
+
 def append_perf_to_main_csv(
     temp_perf_file: Path,
     main_perf_file: Path,
@@ -1595,11 +1645,13 @@ class BenchmarkRunner:
         weak_scaling: bool = False,
         base_size: Optional[int] = None,
         runs: int = 1,
+        warmup_runs: int = 0,
         compile_args: Optional[str] = None,
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
         variant: Optional[str] = None,
         rdma: bool = True,
+        problem_size_n: Optional[int] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark with multiple thread configurations.
 
@@ -1666,7 +1718,7 @@ class BenchmarkRunner:
                     desired_launcher, desired_nodes, benchmark_name=name, rdma=rdma
                 )
 
-                # Compute effective cflags (may include weak scaling size overrides)
+                # Compute effective cflags (may include size overrides)
                 effective_cflags = cflags
                 if weak_scaling and base_size:
                     weak_cflags = get_weak_scaling_cflags(
@@ -1674,6 +1726,11 @@ class BenchmarkRunner:
                     )
                     if weak_cflags:
                         effective_cflags = f"{cflags} {weak_cflags}".strip()
+                effective_cflags = append_problem_size_cflags(
+                    name,
+                    effective_cflags,
+                    problem_size_n,
+                )
 
                 env = self._create_common_env()
                 env["OMP_NUM_THREADS"] = str(actual_omp_threads)
@@ -1703,6 +1760,7 @@ class BenchmarkRunner:
                     execution=execution,
                     timeout=timeout,
                     run_numbers=tuple(range(1, runs + 1)),
+                    warmup_runs=warmup_runs,
                     compile_args=effective_compile_args,
                     perf_enabled=perf_enabled,
                     perf_interval=perf_interval,
@@ -2174,11 +2232,13 @@ class BenchmarkRunner:
         perf_enabled: bool = False,
         perf_interval: float = 0.1,
         runs: int = 1,
+        warmup_runs: int = 0,
         run_timestamp: str = "",
         perf_dir: Optional[Path] = None,
         cflags: str = "",
         variant: Optional[str] = None,
         rdma: bool = True,
+        problem_size_n: Optional[int] = None,
     ) -> List[BenchmarkResult]:
         """Run benchmark suite.
         """
@@ -2189,6 +2249,7 @@ class BenchmarkRunner:
         if self.quiet:
             # Quiet mode - no live display
             for bench in benchmarks:
+                bench_cflags = append_problem_size_cflags(bench, cflags, problem_size_n)
                 for run_num in range(1, runs + 1):
                     result = self.run_single(
                         bench,
@@ -2206,11 +2267,12 @@ class BenchmarkRunner:
                         run_number=run_num,
                         run_timestamp=run_timestamp,
                         perf_dir=perf_dir,
-                        cflags=cflags,
+                        cflags=bench_cflags,
                         variant=variant,
                         rdma=rdma,
                     )
-                    results_list.append(result)
+                    if run_num > warmup_runs:
+                        results_list.append(result)
             self.results = results_list
             return results_list
 
@@ -2235,6 +2297,7 @@ class BenchmarkRunner:
             refresh_per_second=4,
         ) as live:
             for bench in benchmarks:
+                bench_cflags = append_problem_size_cflags(bench, cflags, problem_size_n)
                 for run_num in range(1, runs + 1):
                     current_bench[0] = f"{bench} (run {run_num}/{runs})" if runs > 1 else bench
                     current_partial[0] = {}
@@ -2263,7 +2326,7 @@ class BenchmarkRunner:
                             run_number=run_num,
                             run_timestamp=run_timestamp,
                             perf_dir=perf_dir,
-                            cflags=cflags,
+                            cflags=bench_cflags,
                             variant=variant,
                             rdma=rdma,
                         )
@@ -2274,8 +2337,9 @@ class BenchmarkRunner:
                         result = self._make_error_result(bench, size, str(e))
 
                     # Update results and refresh display
-                    results_dict.setdefault(bench, []).append(result)
-                    results_list.append(result)
+                    if run_num > warmup_runs:
+                        results_dict.setdefault(bench, []).append(result)
+                        results_list.append(result)
                     current_bench[0] = None
                     current_partial[0] = None
                     elapsed = time.time() - start_time
@@ -4052,9 +4116,11 @@ KNOWN_STEP_KEYS = {
     "rdma",
     "debug",
     "runs",
+    "warmup_runs",
     "perf",
     "perf_interval",
     "size",
+    "problem_size_n",
     "threads",
     "nodes",
     "timeout",
@@ -4125,10 +4191,16 @@ def _make_experiment_step(
         rdma=_parse_bool_flag(normalized.get("rdma", True)),
         debug=int(normalized.get("debug", 0) or 0),
         runs=int(normalized.get("runs", 1) or 1),
+        warmup_runs=int(normalized.get("warmup_runs", 0) or 0),
         perf=_parse_bool_flag(normalized.get("perf", False)),
         perf_interval=float(normalized.get("perf_interval", 0.1) or 0.1),
         size=parse_size(str(normalized["size"]), f"step '{step_name}' size")
         if normalized.get("size") is not None else None,
+        problem_size_n=(
+            int(normalized["problem_size_n"])
+            if normalized.get("problem_size_n") is not None
+            else None
+        ),
         threads=str(normalized["threads"]) if normalized.get("threads") is not None else None,
         nodes=str(normalized["nodes"]) if normalized.get("nodes") is not None else None,
         timeout=int(normalized["timeout"]) if normalized.get("timeout") is not None else None,
@@ -4140,6 +4212,11 @@ def _make_experiment_step(
         launcher=str(normalized["launcher"]) if normalized.get("launcher") is not None else None,
     )
     setattr(step, "_has_runs", "runs" in normalized and normalized.get("runs") is not None)
+    setattr(
+        step,
+        "_has_warmup_runs",
+        "warmup_runs" in normalized and normalized.get("warmup_runs") is not None,
+    )
     setattr(step, "_has_perf", "perf" in normalized and normalized.get("perf") is not None)
     setattr(
         step,
@@ -4147,6 +4224,11 @@ def _make_experiment_step(
         "perf_interval" in normalized and normalized.get("perf_interval") is not None,
     )
     setattr(step, "_has_size", "size" in normalized and normalized.get("size") is not None)
+    setattr(
+        step,
+        "_has_problem_size_n",
+        "problem_size_n" in normalized and normalized.get("problem_size_n") is not None,
+    )
     setattr(step, "_has_threads", "threads" in normalized and normalized.get("threads") is not None)
     setattr(step, "_has_nodes", "nodes" in normalized and normalized.get("nodes") is not None)
     setattr(step, "_has_timeout", "timeout" in normalized and normalized.get("timeout") is not None)
@@ -4337,12 +4419,14 @@ def _serialize_experiment_steps(
                 "threads": step.threads,
                 "nodes": step.nodes,
                 "runs": step.runs,
+                "warmup_runs": step.warmup_runs,
                 "compile_args": step.compile_args,
                 "rdma": step.rdma,
                 "debug": step.debug,
                 "perf": step.perf,
                 "perf_interval": step.perf_interval if step.perf else None,
                 "profile": step.profile,
+                "problem_size_n": step.problem_size_n,
             }
         )
     return serialized
@@ -4451,6 +4535,7 @@ def _run_step(
     weak_scaling: bool,
     base_size: Optional[int],
     runs: int,
+    warmup_runs: int,
     compile_args: Optional[str],
     perf: bool,
     perf_interval: float,
@@ -4459,6 +4544,7 @@ def _run_step(
     quiet: bool,
     variant: Optional[str] = None,
     rdma: bool = True,
+    problem_size_n: Optional[int] = None,
 ) -> List[BenchmarkResult]:
     """Execute one resolved step using existing run dispatch rules."""
     has_thread_sweep = bool(threads_list and len(threads_list) > 1)
@@ -4489,11 +4575,13 @@ def _run_step(
             weak_scaling=weak_scaling,
             base_size=base_size,
             runs=runs,
+            warmup_runs=warmup_runs,
             compile_args=compile_args,
             perf_enabled=perf,
             perf_interval=perf_interval,
             variant=variant,
             rdma=rdma,
+            problem_size_n=problem_size_n,
         )
 
     if len(bench_list) > 1 and has_sweep:
@@ -4532,10 +4620,12 @@ def _run_step(
                     perf_enabled=perf,
                     perf_interval=perf_interval,
                     runs=runs,
+                    warmup_runs=warmup_runs,
                     run_timestamp=run_timestamp,
                     cflags=cflags or "",
                     variant=variant,
                     rdma=rdma,
+                    problem_size_n=problem_size_n,
                 )
                 results.extend(config_results)
         return results
@@ -4553,10 +4643,12 @@ def _run_step(
         perf_enabled=perf,
         perf_interval=perf_interval,
         runs=runs,
+        warmup_runs=warmup_runs,
         run_timestamp=run_timestamp,
         cflags=cflags or "",
         variant=variant,
         rdma=rdma,
+        problem_size_n=problem_size_n,
     )
 
 
@@ -4583,6 +4675,7 @@ def _run_step_slurm(
     size: str,
     node_counts: List[int],
     runs: int,
+    warmup_runs: int,
     partition: Optional[str],
     timeout: int,
     time_limit: Optional[str],
@@ -4591,6 +4684,7 @@ def _run_step_slurm(
     results_dir: Path,
     verbose: bool,
     cflags: Optional[str],
+    problem_size_n: Optional[int],
     compile_args: Optional[str],
     exclude_nodes: Optional[str],
     nodelist: Optional[str],
@@ -4613,6 +4707,11 @@ def _run_step_slurm(
     nodes_arg = ",".join(str(n) for n in node_counts)
     thread_values = threads_list if threads_list else [None]
     effective_exclude_nodes = _slurm_exclude_with_launcher(exclude_nodes, nodelist)
+    effective_cflags = append_problem_size_cflags_for_step(
+        bench_list,
+        cflags,
+        problem_size_n,
+    )
 
     for slurm_threads in thread_values:
         _execute_slurm_batch(
@@ -4621,6 +4720,7 @@ def _run_step_slurm(
             size=size,
             timeout=timeout,
             runs=runs,
+            warmup_runs=warmup_runs,
             partition=partition,
             time_limit=time_limit,
             account=None,
@@ -4631,7 +4731,7 @@ def _run_step_slurm(
             dry_run=dry_run,
             no_build=False,
             verbose=verbose,
-            cflags=cflags,
+            cflags=effective_cflags,
             compile_args=compile_args,
             gdb=False,
             profile=profile,
@@ -4708,6 +4808,7 @@ def _run_local_resolved_step(
         weak_scaling=request.weak_scaling,
         base_size=request.base_size,
         runs=step_config.runs,
+        warmup_runs=step_config.warmup_runs,
         compile_args=step_config.compile_args,
         perf=step_config.perf,
         perf_interval=step_config.perf_interval,
@@ -4716,6 +4817,7 @@ def _run_local_resolved_step(
         quiet=request.quiet,
         variant=request.variant,
         rdma=step_config.rdma,
+        problem_size_n=step_config.problem_size_n,
     )
 
 

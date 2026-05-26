@@ -43,6 +43,7 @@ class ConfigExecutionPlan:
     compile_args: Optional[str]
     perf_enabled: bool
     perf_interval: float
+    warmup_runs: int = 0
     counter_dir: Optional[Path] = None
     perf_dir: Optional[Path] = None
     run_timestamp: str = ""
@@ -168,7 +169,9 @@ class ConfigExecutionExecutor:
         build_outputs = self._build_variants(hooks)
         results: List[BenchmarkResult] = []
         for run_number in self.plan.run_numbers:
-            results.append(self._execute_run(run_number, build_outputs, hooks))
+            result = self._execute_run(run_number, build_outputs, hooks)
+            if run_number > self.plan.warmup_runs:
+                results.append(result)
         return results
 
     def _build_variants(self, hooks: ExecutionHooks) -> ConfigBuildOutputs:
