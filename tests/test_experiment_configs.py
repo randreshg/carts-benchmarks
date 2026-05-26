@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO_ROOT / "external" / "carts-benchmarks" / "configs" / "experiments"
+PERF_GATE_DIR = REPO_ROOT / "external" / "carts-benchmarks" / "configs" / "perf-gates"
 
 NO_PERF_SCALABILITY_CONFIGS = [
     "all-benchmarks-full-large-extralarge.json",
@@ -32,6 +33,23 @@ MULTINODE_EXTRALARGE_CONFIGS = [
 ]
 
 FULL_NODE_SWEEP = "1,2,4,8,16,32,64"
+
+CGO_EXPERIMENTS = [
+    "cgo-artifact-ci.json",
+    "cgo-tires.json",
+    "cgo-single-node.json",
+    "cgo-multinode-gemm.json",
+    "cgo-multinode-blockesd.json",
+    "cgo-multinode-sim.json",
+]
+
+CGO_PERF_GATES = [
+    "cgo-tires-gate.json",
+    "cgo-single-node-gate.json",
+    "cgo-multinode-gemm-gate.json",
+    "cgo-multinode-blockesd-gate.json",
+    "cgo-multinode-sim-gate.json",
+]
 
 
 class ExperimentConfigTest(unittest.TestCase):
@@ -155,6 +173,50 @@ class ExperimentConfigTest(unittest.TestCase):
                 self.assertTrue(node_sweep_steps)
                 for step in node_sweep_steps:
                     self.assertEqual(step["nodes"], FULL_NODE_SWEEP)
+
+    def test_cgo_experiments_and_gates_are_present(self) -> None:
+        for config_name in CGO_EXPERIMENTS:
+            with self.subTest(experiment=config_name):
+                payload = json.loads((CONFIG_DIR / config_name).read_text())
+                self.assertTrue(payload["name"].startswith("cgo-"))
+                self.assertTrue(payload["steps"])
+                for step in payload["steps"]:
+                    self.assertIn("runs", step)
+                    self.assertGreater(step["runs"], step.get("warmup_runs", 0))
+
+        for gate_name in CGO_PERF_GATES:
+            with self.subTest(gate=gate_name):
+                payload = json.loads((PERF_GATE_DIR / gate_name).read_text())
+                self.assertTrue(payload["name"].startswith("cgo-"))
+                self.assertTrue(payload["benchmarks"])
+
+    def test_cgo_capacity_steps_use_problem_size_override(self) -> None:
+        payload = json.loads((CONFIG_DIR / "cgo-multinode-gemm.json").read_text())
+        capacity_steps = [
+            step for step in payload["steps"] if step["name"].startswith("capacity-")
+        ]
+        self.assertEqual(len(capacity_steps), 5)
+        self.assertEqual(
+            [step["problem_size_n"] for step in capacity_steps],
+            [8192, 16384, 32768, 65536, 131072],
+        )
+
+    def test_cgo_artifact_ci_is_lightweight_local_smoke(self) -> None:
+        payload = json.loads((CONFIG_DIR / "cgo-artifact-ci.json").read_text())
+        self.assertEqual(payload["name"], "cgo-artifact-ci")
+        self.assertEqual(len(payload["steps"]), 1)
+        step = payload["steps"][0]
+        self.assertEqual(step["name"], "local-smoke")
+        self.assertEqual(step["benchmarks"], ["polybench/gemm", "polybench/atax"])
+        self.assertEqual(step["size"], "small")
+        self.assertEqual(step["threads"], "2")
+        self.assertEqual(step["nodes"], "1")
+        self.assertEqual(step["launcher"], "local")
+        self.assertEqual(step["arts_config"], "local.cfg")
+        self.assertFalse(step["rdma"])
+        self.assertEqual(step["runs"], 1)
+        self.assertEqual(step.get("warmup_runs", 0), 0)
+        self.assertFalse(step.get("perf", False))
 
 
 if __name__ == "__main__":

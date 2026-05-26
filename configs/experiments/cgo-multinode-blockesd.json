@@ -1,0 +1,54 @@
+{
+  "name": "cgo-multinode-blockesd",
+  "description": "CGO '27 multi-node sweep across the Block/ESD-partitioned benchmark subset. Populates the multi-node columns of scaling-results.",
+  "steps": [
+    {
+      "name": "blockesd-multinode-extralarge",
+      "benchmarks": [
+        "polybench/gemm",
+        "polybench/2mm",
+        "polybench/3mm",
+        "polybench/convolution-2d",
+        "polybench/convolution-3d",
+        "polybench/atax",
+        "polybench/bicg",
+        "seissol/volume-integral",
+        "ml-kernels/batchnorm",
+        "ml-kernels/pooling"
+      ],
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "1,2,4,8",
+      "launcher": "slurm",
+      "rdma": true,
+      "compile_args": "--distributed-db",
+      "runs": 15,
+      "warmup_runs": 5,
+      "perf": false,
+      "profile": "profile-timing.cfg",
+      "timeout": 3600
+    },
+    {
+      "name": "blockesd-multinode-16n",
+      "description": "16-node row for benchmarks whose extralarge size fits across 16 nodes.",
+      "benchmarks": [
+        "polybench/gemm",
+        "polybench/2mm",
+        "polybench/3mm",
+        "polybench/convolution-3d",
+        "seissol/volume-integral"
+      ],
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "16",
+      "launcher": "slurm",
+      "rdma": true,
+      "compile_args": "--distributed-db",
+      "runs": 10,
+      "warmup_runs": 3,
+      "perf": false,
+      "profile": "profile-timing.cfg",
+      "timeout": 5400
+    }
+  ]
+}

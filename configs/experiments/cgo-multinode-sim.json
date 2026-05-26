@@ -1,0 +1,20 @@
+{
+  "name": "cgo-multinode-sim",
+  "description": "CGO '27 Tier 3 Docker-simulated multi-node run: GEMM at medium size across 2 and 4 simulated nodes over TCP. Demonstrates multi-node mechanics, not performance claims.",
+  "steps": [
+    {
+      "name": "gemm-sim-2n4n",
+      "benchmarks": ["polybench/gemm"],
+      "size": "medium",
+      "threads": "4",
+      "nodes": "2,4",
+      "launcher": "slurm",
+      "rdma": false,
+      "compile_args": "--distributed-db",
+      "runs": 3,
+      "perf": false,
+      "profile": "profile-timing.cfg",
+      "timeout": 900
+    }
+  ]
+}

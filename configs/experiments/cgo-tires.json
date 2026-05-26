@@ -1,0 +1,24 @@
+{
+  "name": "cgo-tires",
+  "description": "CGO '27 AE kick-the-tires: three PolyBench kernels at small size, single-node, four threads. Exercises compile, run, checksum, and report generation end-to-end.",
+  "steps": [
+    {
+      "name": "smoke",
+      "benchmarks": [
+        "polybench/gemm",
+        "polybench/2mm",
+        "polybench/atax"
+      ],
+      "size": "small",
+      "threads": "4",
+      "nodes": "1",
+      "launcher": "local",
+      "arts_config": "local.cfg",
+      "rdma": false,
+      "runs": 3,
+      "perf": false,
+      "profile": "profile-none.cfg",
+      "timeout": 300
+    }
+  ]
+}

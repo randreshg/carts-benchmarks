@@ -1,0 +1,15 @@
+{
+  "name": "cgo-multinode-sim-gate",
+  "description": "Correctness gate for the Docker-simulated multi-node GEMM tier.",
+  "defaults": {
+    "size": "medium",
+    "threads": 4,
+    "run_phase": "gemm-sim-2n4n",
+    "require_success": false,
+    "require_correct": true
+  },
+  "benchmarks": [
+    {"name": "polybench/gemm", "nodes": 2},
+    {"name": "polybench/gemm", "nodes": 4}
+  ]
+}

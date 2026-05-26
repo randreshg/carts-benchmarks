@@ -1,0 +1,44 @@
+{
+  "name": "cgo-single-node-gate",
+  "description": "CGO '27 full single-node reproducibility gate. Reference-speed bounds are placeholders until the EPYC 75F3 run lands; this policy still enforces success, correctness, and bounded startup flakiness.",
+  "defaults": {
+    "size": "extralarge",
+    "threads": 64,
+    "nodes": 1,
+    "run_phase": "headline-64t-counters",
+    "require_success": true,
+    "require_correct": true,
+    "min_speedup": 0.0,
+    "max_startup_outliers": {
+      "arts": 1,
+      "omp": 1
+    }
+  },
+  "benchmarks": [
+    {"name": "polybench/gemm"},
+    {"name": "polybench/2mm"},
+    {"name": "polybench/3mm"},
+    {"name": "polybench/atax"},
+    {"name": "polybench/bicg"},
+    {"name": "polybench/correlation"},
+    {"name": "polybench/convolution-2d"},
+    {"name": "polybench/convolution-3d"},
+    {"name": "polybench/jacobi2d"},
+    {"name": "polybench/seidel-2d"},
+    {"name": "kastors-jacobi/jacobi-for"},
+    {"name": "kastors-jacobi/jacobi-task-dep"},
+    {"name": "kastors-jacobi/poisson-for"},
+    {"name": "kastors-jacobi/poisson-task"},
+    {"name": "ml-kernels/activations"},
+    {"name": "ml-kernels/batchnorm"},
+    {"name": "ml-kernels/layernorm"},
+    {"name": "ml-kernels/pooling"},
+    {"name": "seissol/volume-integral"},
+    {"name": "specfem3d/stress"},
+    {"name": "specfem3d/velocity"},
+    {"name": "sw4lite/rhs4sg-base"},
+    {"name": "sw4lite/vel4sg-base"},
+    {"name": "monte-carlo/ensemble", "max_startup_outliers": {"arts": 2, "omp": 2}},
+    {"name": "stream"}
+  ]
+}
