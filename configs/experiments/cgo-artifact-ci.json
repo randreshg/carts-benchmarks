@@ -1,0 +1,24 @@
+{
+  "name": "cgo-artifact-ci",
+  "description": "CGO '27 artifact CI smoke experiment. Keeps automated artifact checks inside carts-benchmarks by compiling, running, checking, and reporting a tiny local benchmark slice.",
+  "steps": [
+    {
+      "name": "local-smoke",
+      "benchmarks": [
+        "polybench/gemm",
+        "polybench/atax"
+      ],
+      "size": "small",
+      "threads": "2",
+      "nodes": "1",
+      "launcher": "local",
+      "arts_config": "local.cfg",
+      "rdma": false,
+      "runs": 1,
+      "warmup_runs": 0,
+      "perf": false,
+      "profile": "profile-none.cfg",
+      "timeout": 180
+    }
+  ]
+}
