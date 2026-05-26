@@ -258,6 +258,48 @@ class BenchmarkPipelineTest(unittest.TestCase):
                 ["arts", "omp", "omp", "arts", "arts", "omp"],
             )
 
+    def test_warmup_runs_execute_but_are_not_returned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = root / "arts.cfg"
+            cfg.write_text("[ARTS]\nlauncher=local\nnode_count=1\n")
+            execution = BenchmarkExecutionContext(
+                name="polybench/gemm",
+                suite="polybench",
+                size="small",
+                bench_path=root,
+                config=BenchmarkConfig(
+                    arts_threads=64,
+                    arts_nodes=1,
+                    omp_threads=64,
+                    launcher="local",
+                ),
+                effective_arts_cfg=cfg,
+                desired_threads=64,
+                desired_nodes=1,
+                desired_launcher="local",
+                actual_omp_threads=64,
+                effective_cflags="",
+                run_args=[],
+                verify_tolerance=0.0,
+            )
+            plan = ConfigExecutionPlan(
+                execution=execution,
+                timeout=10,
+                run_numbers=(1, 2, 3, 4),
+                compile_args=None,
+                perf_enabled=False,
+                perf_interval=0.1,
+                warmup_runs=2,
+                env_overrides={},
+            )
+            host = _ExecutionOrderHost(root)
+
+            results = ConfigExecutionExecutor(host, plan).execute()
+
+            self.assertEqual([r.run_number for r in results], [3, 4])
+            self.assertEqual(len(host.run_calls), 8)
+
     def test_host_openmp_fallback_arts_run_uses_runtime_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

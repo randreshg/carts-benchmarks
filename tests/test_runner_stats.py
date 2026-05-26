@@ -25,6 +25,7 @@ from models import (  # noqa: E402
 )
 from runner import (  # noqa: E402
     annotate_startup_outliers,
+    append_problem_size_cflags,
     detect_startup_outliers,
     summarize_runs_robust,
 )
@@ -103,6 +104,18 @@ def _make_result(
 
 
 class BenchmarkRunnerStatsTest(unittest.TestCase):
+    def test_problem_size_override_appends_benchmark_dimension_flags(self) -> None:
+        cflags = append_problem_size_cflags(
+            "polybench/gemm",
+            "-DREPEAT=1",
+            16384,
+        )
+
+        self.assertEqual(
+            cflags,
+            "-DREPEAT=1 -DNI=16384 -DNJ=16384 -DNK=16384",
+        )
+
     def test_detect_startup_outliers_flags_single_spike(self) -> None:
         analysis = detect_startup_outliers([0.11, 0.12, 0.11, 1.5, 0.10])
         self.assertEqual(analysis["outliers"], [False, False, False, True, False])

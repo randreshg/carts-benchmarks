@@ -1597,6 +1597,7 @@ class BenchmarkRunner:
         compile_args: Optional[str],
         perf_enabled: bool,
         perf_interval: float,
+        warmup_runs: int = 0,
         counter_dir: Optional[Path],
         perf_dir: Optional[Path],
         run_timestamp: str,
@@ -1612,6 +1613,7 @@ class BenchmarkRunner:
             execution=execution,
             timeout=timeout,
             run_numbers=run_numbers,
+            warmup_runs=warmup_runs,
             compile_args=compile_args,
             perf_enabled=perf_enabled,
             perf_interval=perf_interval,
@@ -4167,7 +4169,11 @@ def _make_experiment_step(
         if field == "arts_config":
             # Benchmark experiments live in the carts-benchmarks submodule, but
             # the Docker runtime config lives in the parent CARTS repo.
-            search_dirs = [get_carts_dir(), CONFIGS_DIR]
+            search_dirs = [CONFIGS_DIR]
+            try:
+                search_dirs.insert(0, get_carts_dir())
+            except RuntimeError:
+                pass
         elif field == "profile":
             search_dirs = [PROFILES_DIR]
 

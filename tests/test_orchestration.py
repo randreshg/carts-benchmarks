@@ -196,6 +196,81 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
         self.assertTrue(resolved.rdma)
         self.assertFalse(resolved.should_rebuild_arts)
 
+    def test_resolves_warmup_runs_and_problem_size_override(self) -> None:
+        step = ExperimentStep(
+            name="sized",
+            runs=10,
+            warmup_runs=3,
+            problem_size_n=16384,
+        )
+        setattr(step, "_has_runs", True)
+        setattr(step, "_has_warmup_runs", True)
+        setattr(step, "_has_problem_size_n", True)
+
+        defaults = StepCliDefaults(
+            size="small",
+            timeout=10,
+            threads_spec=None,
+            nodes_spec="2",
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            cflags=None,
+            compile_args=None,
+            debug=0,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher="slurm",
+            explicit_step_mode=True,
+            size_from_cli=False,
+            rdma=True,
+        )
+
+        resolved = self.resolver.resolve_step_config(
+            step,
+            1,
+            ["polybench/gemm"],
+            defaults,
+        )
+
+        self.assertEqual(resolved.runs, 10)
+        self.assertEqual(resolved.warmup_runs, 3)
+        self.assertEqual(resolved.problem_size_n, 16384)
+
+    def test_rejects_warmup_runs_that_leave_no_measured_runs(self) -> None:
+        step = ExperimentStep(name="bad", runs=3, warmup_runs=3)
+        setattr(step, "_has_runs", True)
+        setattr(step, "_has_warmup_runs", True)
+
+        defaults = StepCliDefaults(
+            size="small",
+            timeout=10,
+            threads_spec=None,
+            nodes_spec="2",
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            cflags=None,
+            compile_args=None,
+            debug=0,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher="slurm",
+            explicit_step_mode=True,
+            size_from_cli=False,
+            rdma=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "warmup_runs"):
+            self.resolver.resolve_step_config(
+                step,
+                1,
+                ["polybench/gemm"],
+                defaults,
+            )
+
     def test_local_execution_orchestrator_sets_phase_and_result_phase(self) -> None:
         artifact_manager = _FakeArtifactManager()
         runner = types.SimpleNamespace(clean=False)
