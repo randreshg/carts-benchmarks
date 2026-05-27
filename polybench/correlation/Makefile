@@ -8,5 +8,7 @@ SMALL_CFLAGS ?= -DSMALL_DATASET
 MEDIUM_CFLAGS ?= -DSTANDARD_DATASET
 LARGE_CFLAGS ?= -DM=4800 -DN=4800
 EXTRALARGE_CFLAGS ?= -DM=7680 -DN=7680
+# MEGALARGE: 2x extralarge linear dim for 1n->2n communication amortization.
+MEGALARGE_CFLAGS ?= -DM=15360 -DN=15360
 
 include ../carts.mk

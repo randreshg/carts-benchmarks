@@ -246,6 +246,7 @@ SUPPORTED_SIZES: Tuple[str, ...] = (
     "medium",
     "large",
     "extralarge",
+    "megalarge",
     "mini",
     "standard",
 )
@@ -253,9 +254,12 @@ SIZE_ALIASES: Dict[str, str] = {
     "extra-large": "extralarge",
     "extra_large": "extralarge",
     "xlarge": "extralarge",
+    "mega-large": "megalarge",
+    "mega_large": "megalarge",
+    "xxlarge": "megalarge",
 }
 SIZE_HELP = (
-    "Dataset size: small, medium, large, extralarge, mini, standard"
+    "Dataset size: small, medium, large, extralarge, megalarge, mini, standard"
 )
 DEFAULT_REPORTING_MODE = "median"
 DEFAULT_STARTUP_OUTLIER_POLICY: Dict[str, Any] = {

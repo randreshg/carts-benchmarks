@@ -54,8 +54,8 @@ ARTS_CFG_FINGERPRINT := $(shell cat $(ARTS_CFG) 2>/dev/null)
 ARTS_BUILD_FINGERPRINT := CFLAGS=$(EXECUTE_FLAGS)|COMPILE_ARGS=$(COMPILE_ARGS)|CFG=$(ARTS_CFG_FINGERPRINT)
 
 # OpenMP compile flags (split between cgeist and clang steps)
-OMP_CGEIST_FLAGS := -O3 -S --emit-llvm -fopenmp -std=c17 -D_POSIX_C_SOURCE=199309L $(EXECUTE_FLAGS)
-OMP_LINK_FLAGS := -O3 $(LDFLAGS) -lm -lcartsbenchmarks
+OMP_CGEIST_FLAGS := -O3 -S --emit-llvm -fopenmp -std=c17 -D_POSIX_C_SOURCE=199309L --march=native $(EXECUTE_FLAGS)
+OMP_LINK_FLAGS := -O3 -march=native -ffast-math $(LDFLAGS) -lm -lcartsbenchmarks
 OMP_LL := $(BUILD_DIR)/$(EXAMPLE_NAME)-omp.ll
 
 .PHONY: all openmp clean
@@ -131,20 +131,21 @@ clean:
 	rm -rf $(BUILD_DIR) $(LOG_DIR) $(ARTS_BINARY) *.mlir *.ll .carts-metadata.json *_metadata.mlir arts.cfg
 
 ################################################################################
-# Size targets - use SMALL_CFLAGS/MEDIUM_CFLAGS/LARGE_CFLAGS/EXTRALARGE_CFLAGS
-# from individual Makefile. These variables must be defined BEFORE including this file.
+# Size targets - use SMALL_CFLAGS/MEDIUM_CFLAGS/LARGE_CFLAGS/EXTRALARGE_CFLAGS/
+# MEGALARGE_CFLAGS from individual Makefile. These variables must be defined
+# BEFORE including this file.
 #
 # Available targets:
-#   small / medium / large / extralarge       - Build both ARTS and OpenMP
-#   small-arts / medium-arts / ...            - Build only ARTS executable
-#   small-openmp / medium-openmp / ...        - Build only OpenMP executable
-#   run-small / run-medium / run-large / ...  - Build and run both variants
+#   small / medium / large / extralarge / megalarge       - Build both ARTS and OpenMP
+#   small-arts / medium-arts / ...                        - Build only ARTS executable
+#   small-openmp / medium-openmp / ...                    - Build only OpenMP executable
+#   run-small / run-medium / run-large / ...              - Build and run both variants
 ################################################################################
 
-.PHONY: small medium large extralarge
-.PHONY: small-arts medium-arts large-arts extralarge-arts
-.PHONY: small-openmp medium-openmp large-openmp extralarge-openmp
-.PHONY: run-small run-medium run-large run-extralarge
+.PHONY: small medium large extralarge megalarge
+.PHONY: small-arts medium-arts large-arts extralarge-arts megalarge-arts
+.PHONY: small-openmp medium-openmp large-openmp extralarge-openmp megalarge-openmp
+.PHONY: run-small run-medium run-large run-extralarge run-megalarge
 
 # Build both variants with size
 small:
@@ -163,6 +164,10 @@ extralarge:
 	@echo "[$(EXAMPLE_NAME)] Building with EXTRALARGE size"
 	$(MAKE) all openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
+megalarge:
+	@echo "[$(EXAMPLE_NAME)] Building with MEGALARGE size"
+	$(MAKE) all openmp CFLAGS="$(MEGALARGE_CFLAGS) $(EXTRA_CFLAGS)"
+
 # Build only ARTS with size
 small-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with SMALL size"
@@ -180,6 +185,10 @@ extralarge-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with EXTRALARGE size"
 	$(MAKE) all CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
+megalarge-arts:
+	@echo "[$(EXAMPLE_NAME)] Building ARTS with MEGALARGE size"
+	$(MAKE) all CFLAGS="$(MEGALARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+
 # Build only OpenMP with size
 small-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with SMALL size"
@@ -196,6 +205,10 @@ large-openmp:
 extralarge-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with EXTRALARGE size"
 	$(MAKE) openmp CFLAGS="$(EXTRALARGE_CFLAGS) $(EXTRA_CFLAGS)"
+
+megalarge-openmp:
+	@echo "[$(EXAMPLE_NAME)] Building OpenMP with MEGALARGE size"
+	$(MAKE) openmp CFLAGS="$(MEGALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 # Build and run both variants with size
 run-small: small
@@ -220,4 +233,10 @@ run-extralarge: extralarge
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (EXTRALARGE)..."
 	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (EXTRALARGE, OMP_WAIT_POLICY=ACTIVE)..."
+	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
+
+run-megalarge: megalarge
+	@echo "[$(EXAMPLE_NAME)] Running ARTS (MEGALARGE)..."
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
+	@echo "[$(EXAMPLE_NAME)] Running OpenMP (MEGALARGE, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)

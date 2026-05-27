@@ -10,5 +10,7 @@ SMALL_CFLAGS ?= -DSIZE=256
 MEDIUM_CFLAGS ?= -DSIZE=1024
 LARGE_CFLAGS ?= -DSIZE=10240
 EXTRALARGE_CFLAGS ?= -DSIZE=23040
+# MEGALARGE: 2x extralarge linear dim for 1n->2n communication amortization.
+MEGALARGE_CFLAGS ?= -DSIZE=46080
 
 include ../carts.mk

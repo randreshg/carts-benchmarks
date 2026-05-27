@@ -9,5 +9,7 @@ SMALL_CFLAGS ?= -DSIZE=256
 MEDIUM_CFLAGS ?= -DSIZE=1024
 LARGE_CFLAGS ?= -DSIZE=10240 -DNREPS=10
 EXTRALARGE_CFLAGS ?= -DSIZE=21120 -DNREPS=10
+# MEGALARGE: 2x extralarge linear dim; NREPS lowered to keep wall time bounded.
+MEGALARGE_CFLAGS ?= -DSIZE=42240 -DNREPS=5
 
 include ../carts.mk
