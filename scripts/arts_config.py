@@ -29,6 +29,7 @@ KEY_WORKER_INIT_DEQUE_SIZE = "worker_init_deque_size"
 KEY_ROUTE_TABLE_SIZE = "route_table_size"
 KEY_AUTO_SHUTDOWN = "auto_shutdown"
 KEY_MIN_ITERATIONS_PER_WORKER = "min_iterations_per_worker"
+KEY_MIN_DISTRIBUTED_TILE_BYTES = "min_distributed_tile_bytes"
 
 # GPU
 KEY_GPU = "gpu"

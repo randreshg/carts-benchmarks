@@ -54,7 +54,10 @@ from arts_config import (
     KEY_MASTER_NODE,
     KEY_NODE_COUNT,
     KEY_NODES,
+    KEY_PORT_COUNT,
     KEY_PROTOCOL,
+    KEY_RECEIVER_THREADS,
+    KEY_SENDER_THREADS,
     KEY_WORKER_THREADS,
     PROTOCOL_TCP,
     compile_args_for_node_count,
@@ -690,6 +693,37 @@ def generate_arts_config(
 
     # Update launcher
     content = _upsert_arts_cfg_value(content, KEY_LAUNCHER, launcher)
+
+    # For multinode runs, ensure port_count >= 2 so that a second sender/
+    # receiver thread can be active without hitting the ARTS constraint
+    # sender_threads <= (nodes-1) * port_count.  With port_count=1 (template
+    # default) the ceiling is 1 thread regardless of how many threads we ask
+    # for, serializing all remote DB acquires through a single connection.
+    if node_count > 1:
+        env_port_count = os.environ.get("CARTS_SLURM_PORT_COUNT")
+        if env_port_count is not None and env_port_count.strip().isdigit():
+            port_count = max(1, int(env_port_count))
+        else:
+            port_count = 2
+        content = _upsert_arts_cfg_value(content, KEY_PORT_COUNT, port_count)
+        # Keep default_ports consistent with port_count.  ARTS validates that
+        # default_ports_count == port_count; if the template has one port but
+        # port_count is now 2, extend the list with consecutive port numbers.
+        existing_ports_str = get_arts_cfg_str(base_path, KEY_DEFAULT_PORTS) or ""
+        if existing_ports_str:
+            existing_ports = [p.strip() for p in existing_ports_str.split(",") if p.strip()]
+            if len(existing_ports) != port_count and existing_ports:
+                base_port = int(existing_ports[0])
+                new_ports = ",".join(str(base_port + i) for i in range(port_count))
+                content = _upsert_arts_cfg_value(content, KEY_DEFAULT_PORTS, new_ports)
+        # sender/receiver: 1 each is safe for TCP local (2 nodes * 2 ports = 4 cap).
+        # Do not override if the template already specifies non-zero values.
+        existing_sender = get_arts_cfg_int(base_path, KEY_SENDER_THREADS) or 0
+        existing_receiver = get_arts_cfg_int(base_path, KEY_RECEIVER_THREADS) or 0
+        if existing_sender == 0:
+            content = _upsert_arts_cfg_value(content, KEY_SENDER_THREADS, 1)
+        if existing_receiver == 0:
+            content = _upsert_arts_cfg_value(content, KEY_RECEIVER_THREADS, 1)
 
     # Add counter settings if requested
     if counter_dir:

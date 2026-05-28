@@ -50,12 +50,15 @@ from dekk import (
 )
 from arts_config import (
     KEY_COUNTER_FOLDER,
+    KEY_DEFAULT_PORTS,
     KEY_LAUNCHER,
     KEY_MASTER_NODE,
+    KEY_MIN_DISTRIBUTED_TILE_BYTES,
     KEY_MIN_ITERATIONS_PER_WORKER,
     KEY_NODE_COUNT,
     KEY_NODES,
     KEY_PIN,
+    KEY_PORT_COUNT,
     KEY_PROTOCOL,
     KEY_RECEIVER_THREADS,
     KEY_SENDER_THREADS,
@@ -458,7 +461,9 @@ def _slurm_min_iterations_per_worker(
     return _env_nonnegative_int("CARTS_SLURM_MIN_ITERATIONS_PER_WORKER")
 
 
-def _default_network_threads(node_count: int, *, rdma: bool) -> Tuple[int, int]:
+def _default_network_threads(
+    node_count: int, *, rdma: bool, port_count: Optional[int] = None
+) -> Tuple[int, int]:
     if node_count <= 1:
         return 0, 0
 
@@ -483,9 +488,62 @@ def _default_network_threads(node_count: int, *, rdma: bool) -> Tuple[int, int]:
     # fanout produced large abandoned-connect spikes at 64 nodes.
     # The sbatch CPU request adds these threads on top of the requested worker
     # count, so --threads remains the worker-thread contract.
-    floor = 2 if node_count >= 8 else 1
-    network_threads = min(node_count - 1, 2, max(floor, (node_count + 15) // 16))
+    #
+    # The ARTS runtime enforces sender_threads <= (nodes-1) * port_count.
+    # When port_count >= 2, use one sender thread per port (up to 2) so that
+    # a second thread can make progress while the first awaits an RDMA
+    # completion -- the primary fix for single-port sender serialization.
+    effective_ports = port_count if port_count is not None else 1
+    if effective_ports >= 2:
+        network_threads = min(effective_ports, 2)
+    else:
+        floor = 2 if node_count >= 8 else 1
+        network_threads = min(node_count - 1, 2, max(floor, (node_count + 15) // 16))
     return network_threads, network_threads
+
+
+def _default_port_count(node_count: int, *, rdma: bool) -> int:
+    """Return the port_count to write into the multinode arts.cfg.
+
+    With port_count=1 (historical default) every remote DB acquire from rank R
+    to rank T serializes through a single TCP/RDMA connection, capping
+    sender_threads at (nodes-1)*port_count = 1.  Raising port_count to 2 at
+    two nodes gives sender_threads room to grow to 2 without hitting the ARTS
+    validation error in threads.c.
+
+    Override via CARTS_SLURM_PORT_COUNT (non-negative integer).
+    """
+    override = _env_nonnegative_int("CARTS_SLURM_PORT_COUNT")
+    if override is not None:
+        return max(1, override)
+    if node_count <= 1:
+        return 1
+    # Two ports per peer saturates bandwidth while keeping the per-rank
+    # connection table small.  For RDMA the second port lets a second sender
+    # thread make progress while the first is waiting on an RDMA completion.
+    # For TCP the overhead is minimal and the serialization relief is the same.
+    return 2
+
+
+def _default_min_distributed_tile_bytes(node_count: int) -> Optional[int]:
+    """Return the min_distributed_tile_bytes compiler hint to embed in arts.cfg.
+
+    0 (disabled) keeps the pre-existing fine-grained plan.  For multinode runs
+    a 4 MiB floor coarsens the matmul tile from ~64 KB (per-EDT overhead) to
+    ~1 MB+ per EDT, reducing remote DB-acquire round-trips by 4-16x without
+    leaving workers idle on a 7680x7680 extralarge gemm.
+
+    Override via CARTS_SLURM_MIN_DISTRIBUTED_TILE_BYTES (non-negative integer
+    in bytes, or 0 to disable).
+    """
+    override = _env_nonnegative_int("CARTS_SLURM_MIN_DISTRIBUTED_TILE_BYTES")
+    if override is not None:
+        return override
+    if node_count <= 1:
+        return None
+    # 4 MiB: empirically gives 4-16x fewer remote acquires on extralarge gemm
+    # (7680x7680 float32) while retaining enough tiles for node-level balance.
+    return 4 * 1024 * 1024
 
 
 def _worker_threads_for_budget(
@@ -1075,12 +1133,24 @@ def generate_arts_config_for_node(
             "disabled by CARTS_SLURM_MIN_ITERATIONS_PER_WORKER=0",
         )
     if node_count > 1:
+        port_count = _default_port_count(node_count, rdma=rdma)
         sender_threads, receiver_threads = _default_network_threads(
-            node_count, rdma=rdma,
+            node_count, rdma=rdma, port_count=port_count,
         )
         worker_threads = _worker_threads_for_budget(
             threads, sender_threads, receiver_threads,
         )
+        content = _set_cfg_key(content, KEY_PORT_COUNT, str(port_count))
+        # Keep default_ports consistent with port_count.  ARTS validates that
+        # default_ports_count == port_count; if the template has a single-port
+        # value (e.g. 34739) but port_count is now 2, extend the list.
+        existing_ports_str = parse_arts_cfg(base_config).get(KEY_DEFAULT_PORTS, "")
+        if existing_ports_str:
+            existing_ports = [p.strip() for p in existing_ports_str.split(",") if p.strip()]
+            if len(existing_ports) != port_count and existing_ports:
+                base_port = int(existing_ports[0])
+                new_ports = ",".join(str(base_port + i) for i in range(port_count))
+                content = _set_cfg_key(content, KEY_DEFAULT_PORTS, new_ports)
         content = _set_cfg_key(content, KEY_WORKER_THREADS, str(worker_threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, str(sender_threads))
         content = _set_cfg_key(content, KEY_RECEIVER_THREADS, str(receiver_threads))
@@ -1088,6 +1158,21 @@ def generate_arts_config_for_node(
         content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, "0")
         content = _set_cfg_key(content, KEY_RECEIVER_THREADS, "0")
+
+    # Compiler hint: coarsen matmul EDT tiles to reduce remote DB-acquire count.
+    # This value is read at compile time by the arts.cfg parser and forwarded
+    # to SDECostModel.getMinDistributedTileBytes().  0 leaves the plan as-is.
+    min_tile_bytes = _default_min_distributed_tile_bytes(node_count)
+    if min_tile_bytes is not None and min_tile_bytes > 0:
+        content = _set_cfg_key(
+            content, KEY_MIN_DISTRIBUTED_TILE_BYTES, str(min_tile_bytes)
+        )
+    elif min_tile_bytes == 0:
+        content = _comment_cfg_key(
+            content,
+            KEY_MIN_DISTRIBUTED_TILE_BYTES,
+            "disabled by CARTS_SLURM_MIN_DISTRIBUTED_TILE_BYTES=0",
+        )
 
     # Clear nodes and master_node - SLURM launcher ignores these.
     # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)

@@ -448,16 +448,24 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertEqual(rdma_8_values["pin"], "0")
             self.assertEqual(rdma_32_values["pin"], "0")
             self.assertEqual(rdma_64_values["pin"], "0")
+            # TCP 2-node: port_count=2 (new default), sender/receiver=1 (TCP early-return).
             self.assertEqual(tcp_values["sender_threads"], "1")
             self.assertEqual(tcp_values["receiver_threads"], "1")
-            self.assertEqual(rdma_values["sender_threads"], "1")
-            self.assertEqual(rdma_values["receiver_threads"], "1")
+            self.assertEqual(tcp_values["port_count"], "2")
+            # RDMA 2-node: port_count=2, sender/receiver bumped to 2 (one per port).
+            self.assertEqual(rdma_values["sender_threads"], "2")
+            self.assertEqual(rdma_values["receiver_threads"], "2")
+            self.assertEqual(rdma_values["port_count"], "2")
+            # RDMA 8+: unchanged at 2.
             self.assertEqual(rdma_8_values["sender_threads"], "2")
             self.assertEqual(rdma_8_values["receiver_threads"], "2")
+            self.assertEqual(rdma_8_values["port_count"], "2")
             self.assertEqual(rdma_32_values["sender_threads"], "2")
             self.assertEqual(rdma_32_values["receiver_threads"], "2")
+            self.assertEqual(rdma_32_values["port_count"], "2")
             self.assertEqual(rdma_64_values["sender_threads"], "2")
             self.assertEqual(rdma_64_values["receiver_threads"], "2")
+            self.assertEqual(rdma_64_values["port_count"], "2")
             self.assertEqual(tcp_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_8_values["counter_capture_interval"], "10")
@@ -468,6 +476,11 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_8_values)
             self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_32_values)
             self.assertNotIn(KEY_MIN_ITERATIONS_PER_WORKER, rdma_64_values)
+            # min_distributed_tile_bytes: set to 4 MiB default for multinode.
+            self.assertEqual(rdma_values["min_distributed_tile_bytes"], str(4 * 1024 * 1024))
+            self.assertEqual(rdma_8_values["min_distributed_tile_bytes"], str(4 * 1024 * 1024))
+            # single_default: node_count=1, no tile bytes set.
+            self.assertNotIn("min_distributed_tile_bytes", single_default_values)
 
     def test_generate_arts_config_for_node_supports_cpu_pinning_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
