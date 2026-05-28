@@ -638,21 +638,26 @@ class SlurmBatchExecutor:
         src_arts, src_omp = self.host.get_executable_paths(bench_path)
         results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
         include_openmp = self.request.variant != VARIANT_ARTS
-        known_arts_runtime_mode: Optional[str] = None
+        mode_by_compile_args: Dict[Optional[str], str] = {}
 
         for node_count in self.request.node_counts:
             if node_count > 1 and bench in multinode_disabled:
                 continue
-            if known_arts_runtime_mode and should_skip_multinode_runtime_mode(
+            effective_compile_args_for_skip = compile_args_for_node_count(
+                self.request.compile_args,
                 node_count,
-                known_arts_runtime_mode,
+            )
+            prior_mode = mode_by_compile_args.get(effective_compile_args_for_skip)
+            if prior_mode and should_skip_multinode_runtime_mode(
+                node_count,
+                prior_mode,
             ):
                 with print_lock:
                     print_multinode_runtime_skip(
                         bench,
                         node_count,
                         self.request.threads,
-                        known_arts_runtime_mode,
+                        prior_mode,
                     )
                 continue
 
@@ -720,7 +725,7 @@ class SlurmBatchExecutor:
                 and _build_config_matches(build_node_dir, expected_build_config)
             ):
                 arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
-                known_arts_runtime_mode = arts_runtime_mode
+                mode_by_compile_args[effective_compile_args] = arts_runtime_mode
                 if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
                     with print_lock:
                         print_multinode_runtime_skip(
@@ -789,7 +794,7 @@ class SlurmBatchExecutor:
                 continue
 
             arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
-            known_arts_runtime_mode = arts_runtime_mode
+            mode_by_compile_args[effective_compile_args] = arts_runtime_mode
             if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
                 _write_build_config(build_node_dir, expected_build_config)
                 with print_lock:
@@ -857,21 +862,26 @@ class SlurmBatchExecutor:
             src_arts, src_omp = self.host.get_executable_paths(bench_path)
             results: List[Tuple[Tuple[str, int], BuildArtifacts]] = []
             include_openmp = self.request.variant != VARIANT_ARTS
-            known_arts_runtime_mode: Optional[str] = None
+            mode_by_compile_args: Dict[Optional[str], str] = {}
 
             for node_count in self.request.node_counts:
                 if node_count > 1 and bench in multinode_disabled:
                     continue
-                if known_arts_runtime_mode and should_skip_multinode_runtime_mode(
+                effective_compile_args_for_skip = compile_args_for_node_count(
+                    self.request.compile_args,
                     node_count,
-                    known_arts_runtime_mode,
+                )
+                prior_mode = mode_by_compile_args.get(effective_compile_args_for_skip)
+                if prior_mode and should_skip_multinode_runtime_mode(
+                    node_count,
+                    prior_mode,
                 ):
                     with print_lock:
                         print_multinode_runtime_skip(
                             bench,
                             node_count,
                             self.request.threads,
-                            known_arts_runtime_mode,
+                            prior_mode,
                         )
                     continue
 
@@ -942,7 +952,7 @@ class SlurmBatchExecutor:
                     and _build_config_matches(build_node_dir, expected_build_config)
                 ):
                     arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
-                    known_arts_runtime_mode = arts_runtime_mode
+                    mode_by_compile_args[effective_compile_args] = arts_runtime_mode
                     if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
                         with print_lock:
                             print_multinode_runtime_skip(
@@ -1011,7 +1021,7 @@ class SlurmBatchExecutor:
                     continue
 
                 arts_runtime_mode, _ = infer_arts_runtime_mode(dst_arts)
-                known_arts_runtime_mode = arts_runtime_mode
+                mode_by_compile_args[effective_compile_args] = arts_runtime_mode
                 if should_skip_multinode_runtime_mode(node_count, arts_runtime_mode):
                     _write_build_config(build_node_dir, expected_build_config)
                     with print_lock:
@@ -1105,9 +1115,14 @@ class SlurmBatchExecutor:
                     arts_runtime_mode,
                 )
                 continue
-            run_openmp = self.request.variant != VARIANT_ARTS and node_count == 1
+            arts_only = os.environ.get("CARTS_SKIP_OMP_REFERENCE") == "1"
+            run_openmp = (self.request.variant != VARIANT_ARTS
+                          and node_count == 1
+                          and not arts_only)
             reference: Optional[ReferenceChecksum] = None
-            requires_reference = run_arts and not run_openmp and not self.request.dry_run
+            requires_reference = (run_arts and not run_openmp
+                                  and not self.request.dry_run
+                                  and not arts_only)
             if requires_reference:
                 reference = self.host.ensure_omp_reference(
                     bench,
