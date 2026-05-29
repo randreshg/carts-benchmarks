@@ -7,6 +7,7 @@ Key names mirror the authoritative ``config_entries[]`` table in
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 from pathlib import Path
@@ -97,10 +98,17 @@ def compile_args_for_node_count(
     compile_args: Optional[str],
     node_count: int,
 ) -> Optional[str]:
-    """Remove multinode-only compiler flags for single-node benchmark builds."""
+    """Remove multinode-only compiler flags for single-node benchmark builds.
+
+    Set CARTS_KEEP_DISTRIBUTED_DB_1N=1 to disable stripping --distributed-db at
+    1n. Needed for apples-to-apples 1n vs 2n scaling comparisons where both
+    runs must take the same compile path.
+    """
     if not compile_args:
         return compile_args
     if node_count > 1:
+        return compile_args
+    if os.environ.get("CARTS_KEEP_DISTRIBUTED_DB_1N", "").strip() in {"1", "true", "yes"}:
         return compile_args
 
     try:
