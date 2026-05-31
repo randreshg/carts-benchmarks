@@ -448,24 +448,21 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertEqual(rdma_8_values["pin"], "0")
             self.assertEqual(rdma_32_values["pin"], "0")
             self.assertEqual(rdma_64_values["pin"], "0")
-            # TCP 2-node: port_count=2 (new default), sender/receiver=1 (TCP early-return).
             self.assertEqual(tcp_values["sender_threads"], "1")
             self.assertEqual(tcp_values["receiver_threads"], "1")
             self.assertEqual(tcp_values["port_count"], "2")
-            # RDMA 2-node: port_count=2, sender/receiver bumped to 2 (one per port).
-            self.assertEqual(rdma_values["sender_threads"], "2")
-            self.assertEqual(rdma_values["receiver_threads"], "2")
-            self.assertEqual(rdma_values["port_count"], "2")
-            # RDMA 8+: unchanged at 2.
-            self.assertEqual(rdma_8_values["sender_threads"], "2")
-            self.assertEqual(rdma_8_values["receiver_threads"], "2")
-            self.assertEqual(rdma_8_values["port_count"], "2")
-            self.assertEqual(rdma_32_values["sender_threads"], "2")
-            self.assertEqual(rdma_32_values["receiver_threads"], "2")
-            self.assertEqual(rdma_32_values["port_count"], "2")
-            self.assertEqual(rdma_64_values["sender_threads"], "2")
-            self.assertEqual(rdma_64_values["receiver_threads"], "2")
-            self.assertEqual(rdma_64_values["port_count"], "2")
+            self.assertEqual(rdma_values["sender_threads"], "1")
+            self.assertEqual(rdma_values["receiver_threads"], "1")
+            self.assertEqual(rdma_values["port_count"], "1")
+            self.assertEqual(rdma_8_values["sender_threads"], "1")
+            self.assertEqual(rdma_8_values["receiver_threads"], "1")
+            self.assertEqual(rdma_8_values["port_count"], "1")
+            self.assertEqual(rdma_32_values["sender_threads"], "1")
+            self.assertEqual(rdma_32_values["receiver_threads"], "1")
+            self.assertEqual(rdma_32_values["port_count"], "1")
+            self.assertEqual(rdma_64_values["sender_threads"], "1")
+            self.assertEqual(rdma_64_values["receiver_threads"], "1")
+            self.assertEqual(rdma_64_values["port_count"], "1")
             self.assertEqual(tcp_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_values["counter_capture_interval"], "10")
             self.assertEqual(rdma_8_values["counter_capture_interval"], "10")
@@ -731,55 +728,11 @@ class SlurmBatchPollingTest(unittest.TestCase):
             self.assertNotIn("launcher=ssh", content)
             self.assertNotIn("ARTS RDMA Env: CONNECT_HELPER=", content)
             self.assertIn(
-                'export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-256}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-1}"',
-                content,
-            )
-            self.assertIn(
                 'export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"',
                 content,
             )
             self.assertIn(
-                'export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS="${ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS:-5000}"',
-                content,
-            )
-            self.assertIn(
                 'export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-10000}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_CONNECT_STEADY_BETWEEN_US="${ARTS_CONNECT_STEADY_BETWEEN_US:-1000}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_LAZY_ACCEPT_DRAIN_LIMIT="${ARTS_LAZY_ACCEPT_DRAIN_LIMIT:-0}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_LISTEN_BACKLOG="${ARTS_LISTEN_BACKLOG:-0}"',
-                content,
-            )
-            self.assertIn(
-                'export ARTS_TRACE_RDMA_SUMMARY="${ARTS_TRACE_RDMA_SUMMARY:-0}"',
                 content,
             )
             self.assertIn(
@@ -794,6 +747,10 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 'export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-0}"',
                 content,
             )
+            self.assertNotIn("ARTS_RDMA_CLOSE_AFTER_SEND=", content)
+            self.assertNotIn("ARTS_RDMA_LISTENER_READY=", content)
+            self.assertNotIn("ARTS_RDMA_MAX_ACTIVE_CONNECTS=", content)
+            self.assertNotIn("ARTS_TRACE_RDMA_SUMMARY=", content)
             self.assertNotIn("--ntasks-per-node=4", content)
 
     def test_generate_sbatch_script_uses_worker_threads_from_arts_cfg(self) -> None:
@@ -811,7 +768,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 path.write_text("#!/bin/sh\n")
             arts_cfg.write_text(
                 f"[ARTS]\n{KEY_PROTOCOL}={PROTOCOL_RDMA}\n"
-                "worker_threads=60\nsender_threads=2\nreceiver_threads=2\n"
+                "worker_threads=60\nsender_threads=1\nreceiver_threads=1\n"
             )
 
             config = SlurmJobConfig(
@@ -834,13 +791,13 @@ class SlurmBatchPollingTest(unittest.TestCase):
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn("#SBATCH --cpus-per-task=68", content)
+            self.assertIn("#SBATCH --cpus-per-task=66", content)
             self.assertIn(
-                "[SLURM] Runtime threads: worker=60 sender=2 receiver=2 total=64",
+                "[SLURM] Runtime threads: worker=60 sender=1 receiver=1 total=62",
                 content,
             )
-            self.assertIn("required=64 runtime_required=64 requested=68", content)
-            self.assertIn("--cpus-per-task=68 --cpu-bind=none", content)
+            self.assertIn("required=62 runtime_required=62 requested=66", content)
+            self.assertIn("--cpus-per-task=66 --cpu-bind=none", content)
             self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
 
     def test_generate_sbatch_script_adds_single_node_cpu_headroom_by_default(self) -> None:
@@ -1030,7 +987,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 path.write_text("#!/bin/sh\n")
             arts_cfg.write_text(
                 f"[ARTS]\n{KEY_PROTOCOL}={PROTOCOL_RDMA}\n"
-                "worker_threads=64\nsender_threads=2\nreceiver_threads=2\n"
+                "worker_threads=64\nsender_threads=1\nreceiver_threads=1\n"
             )
 
             config = SlurmJobConfig(
@@ -1053,9 +1010,9 @@ class SlurmBatchPollingTest(unittest.TestCase):
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn("#SBATCH --cpus-per-task=72", content)
-            self.assertIn("required=68 runtime_required=68 requested=72", content)
-            self.assertIn("--cpus-per-task=72 --cpu-bind=none", content)
+            self.assertIn("#SBATCH --cpus-per-task=70", content)
+            self.assertIn("required=66 runtime_required=66 requested=70", content)
+            self.assertIn("--cpus-per-task=70 --cpu-bind=none", content)
 
     def test_generate_sbatch_script_can_strictly_require_cpu_headroom(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
@@ -1078,7 +1035,7 @@ class SlurmBatchPollingTest(unittest.TestCase):
                 path.write_text("#!/bin/sh\n")
             arts_cfg.write_text(
                 f"[ARTS]\n{KEY_PROTOCOL}={PROTOCOL_RDMA}\n"
-                "worker_threads=64\nsender_threads=2\nreceiver_threads=2\n"
+                "worker_threads=64\nsender_threads=1\nreceiver_threads=1\n"
             )
 
             config = SlurmJobConfig(
@@ -1101,8 +1058,8 @@ class SlurmBatchPollingTest(unittest.TestCase):
             generate_sbatch_script(config, script_path, job_result_script)
 
             content = script_path.read_text()
-            self.assertIn("#SBATCH --cpus-per-task=72", content)
-            self.assertIn("required=72 runtime_required=68 requested=72", content)
+            self.assertIn("#SBATCH --cpus-per-task=70", content)
+            self.assertIn("required=70 runtime_required=66 requested=70", content)
             self.assertIn("${CARTS_SLURM_STRICT_CPU_PREFLIGHT:-1}", content)
 
     def test_generate_sbatch_script_uses_managed_runtime_library_path(self) -> None:

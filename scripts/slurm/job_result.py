@@ -208,6 +208,13 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
         "rdma_provider_fanout_warning_count": len(
             re.findall(r"provider open-fanout|provider-fanout|rsocket/RoCE provider", stderr)
         ),
+        "rdma_warn_count": len(re.findall(r"RDMA-WARN", stderr)),
+        "lazy_accept_failed_count": len(re.findall(r"lazy accept failed", stderr)),
+        "rconnect_hello_timeout_count": len(
+            re.findall(r"rconnect/hello did not complete", stderr)
+        ),
+        "cannot_send_count": len(re.findall(r"Cannot send", stderr)),
+        "target_zero_port_count": len(re.findall(r"target [0-9.]+:0", stderr)),
         "crash_count": len(re.findall(r"\[ARTS\] Crashed:", stderr)),
     }
 
@@ -239,6 +246,15 @@ def summarize_slurm_logs(stdout: str, stderr: str, include_tails: bool) -> Dict[
             "rdma_provider_fanout_warning_count="
             f"{slurm_stderr_summary['rdma_provider_fanout_warning_count']}"
         )
+    for key in (
+        "rdma_warn_count",
+        "lazy_accept_failed_count",
+        "rconnect_hello_timeout_count",
+        "cannot_send_count",
+        "target_zero_port_count",
+    ):
+        if slurm_stderr_summary[key] > 0:
+            warning_reasons.append(f"{key}={slurm_stderr_summary[key]}")
     if slurm_stderr_summary["crash_count"] > 0:
         warning_reasons.append(f"crash_count={slurm_stderr_summary['crash_count']}")
 

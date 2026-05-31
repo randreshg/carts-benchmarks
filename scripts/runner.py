@@ -59,12 +59,13 @@ from arts_config import (
     KEY_RECEIVER_THREADS,
     KEY_SENDER_THREADS,
     KEY_WORKER_THREADS,
+    PROTOCOL_RDMA,
     PROTOCOL_TCP,
     compile_args_for_node_count,
     get_cfg_int as get_arts_cfg_int,
     get_cfg_str as get_arts_cfg_str,
     get_cfg_nodes as get_arts_cfg_nodes,
-    protocol_for_node_count,
+    protocol_for_launcher,
     protocol_for_rdma,
     upsert_cfg_value as _upsert_arts_cfg_value,
     extract_embedded_cfg as _extract_embedded_arts_cfg,
@@ -664,7 +665,7 @@ def generate_arts_config(
     content = base_path.read_text()
     node_count = nodes_override if nodes_override else get_arts_cfg_int(
         base_path, KEY_NODE_COUNT) or 1
-    protocol = protocol_for_node_count(rdma, node_count)
+    protocol = protocol_for_launcher(rdma, node_count, launcher)
 
     # CLI --threads maps to ARTS worker_threads in the v2 runtime schema.
     content = _upsert_arts_cfg_value(content, KEY_WORKER_THREADS, threads)
@@ -694,17 +695,17 @@ def generate_arts_config(
     # Update launcher
     content = _upsert_arts_cfg_value(content, KEY_LAUNCHER, launcher)
 
-    # For multinode runs, ensure port_count >= 2 so that a second sender/
-    # receiver thread can be active without hitting the ARTS constraint
-    # sender_threads <= (nodes-1) * port_count.  With port_count=1 (template
-    # default) the ceiling is 1 thread regardless of how many threads we ask
-    # for, serializing all remote DB acquires through a single connection.
     if node_count > 1:
-        env_port_count = os.environ.get("CARTS_SLURM_PORT_COUNT")
-        if env_port_count is not None and env_port_count.strip().isdigit():
-            port_count = max(1, int(env_port_count))
+        if launcher == "local":
+            port_count = 1
         else:
-            port_count = 2
+            env_port_count = os.environ.get("CARTS_SLURM_PORT_COUNT")
+            if env_port_count is not None and env_port_count.strip().isdigit():
+                port_count = max(1, int(env_port_count))
+            elif protocol == PROTOCOL_RDMA:
+                port_count = 1
+            else:
+                port_count = 2
         content = _upsert_arts_cfg_value(content, KEY_PORT_COUNT, port_count)
         # Keep default_ports consistent with port_count.  ARTS validates that
         # default_ports_count == port_count; if the template has one port but
@@ -771,15 +772,30 @@ def _resolve_effective_arts_config(
     return DEFAULT_ARTS_CONFIG.resolve()
 
 
-def _transport_display(rdma: bool, node_counts: Optional[List[int]]) -> str:
+def _transport_display(
+    rdma: bool,
+    node_counts: Optional[List[int]],
+    launcher: Optional[str] = None,
+) -> str:
     """Return a concise transport label for a possibly mixed node sweep."""
     counts = node_counts or [1]
     has_single = any(count <= 1 for count in counts)
     has_multi = any(count > 1 for count in counts)
     if has_single and has_multi:
-        multi_protocol = protocol_for_node_count(rdma, max(counts))
+        multi_protocol = protocol_for_launcher(rdma, max(counts), launcher)
         return f"{PROTOCOL_TCP}@1n,{multi_protocol}@multi"
-    return protocol_for_node_count(rdma, max(counts))
+    return protocol_for_launcher(rdma, max(counts), launcher)
+
+
+def _effective_launcher_for_config(
+    launcher: Optional[str],
+    arts_config: Optional[Path],
+) -> Optional[str]:
+    """Resolve the launcher used for transport policy decisions."""
+    if launcher:
+        return launcher
+    source = arts_config or DEFAULT_ARTS_CONFIG
+    return get_arts_cfg_str(source, KEY_LAUNCHER)
 
 
 def _compile_args_display(
@@ -1748,7 +1764,11 @@ class BenchmarkRunner:
                     compile_args,
                     desired_nodes,
                 )
-                effective_protocol = protocol_for_node_count(rdma, desired_nodes)
+                effective_protocol = protocol_for_launcher(
+                    rdma,
+                    desired_nodes,
+                    desired_launcher,
+                )
                 config = BenchmarkConfig(
                     arts_threads=threads,
                     arts_nodes=desired_nodes,
@@ -2161,7 +2181,11 @@ class BenchmarkRunner:
         desired_threads = threads_override if threads_override is not None else base_threads
         desired_nodes = nodes_override if nodes_override is not None else base_nodes
         desired_launcher = launcher_override if launcher_override is not None else base_launcher
-        expected_protocol = protocol_for_node_count(rdma, desired_nodes)
+        expected_protocol = protocol_for_launcher(
+            rdma,
+            desired_nodes,
+            desired_launcher,
+        )
         effective_compile_args = compile_args_for_node_count(
             compile_args,
             desired_nodes,
@@ -4806,7 +4830,15 @@ def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
     """Rebuild ARTS when a step needs a different runtime build."""
     node_counts = step_config.node_counts or [1]
     uses_multinode = any(count > 1 for count in node_counts)
-    requested_rdma = uses_multinode and step_config.rdma
+    effective_launcher = _effective_launcher_for_config(
+        step_config.launcher,
+        step_config.arts_config,
+    )
+    requested_rdma = any(
+        protocol_for_launcher(step_config.rdma, count, effective_launcher)
+        == PROTOCOL_RDMA
+        for count in node_counts
+    )
     runtime_missing = not arts_runtime_is_installed()
     runtime_rdma = arts_runtime_uses_rdma()
     transport_unknown = uses_multinode and runtime_rdma is None
@@ -5065,6 +5097,7 @@ def run(
     if results_dir is None:
         results_dir = BENCHMARKS_DIR / "results"
     results_dir = Path(results_dir).resolve()
+    effective_display_launcher = _effective_launcher_for_config(launcher, arts_config)
 
     # Create the runner before opening artifacts; discovery does not need output files.
     runner = BenchmarkRunner(
@@ -5273,7 +5306,9 @@ def run(
             config_items.append(f"debug={debug_level}")
         if profile:
             config_items.append(f"profile={profile.name}")
-        config_items.append(f"transport={_transport_display(rdma, base_node_counts)}")
+        config_items.append(
+            f"transport={_transport_display(rdma, base_node_counts, effective_display_launcher)}"
+        )
         if cpu_pinning != CPU_PINNING_DEFAULT:
             config_items.append(f"cpu-pinning={cpu_pinning}")
         if perf:
@@ -6156,6 +6191,10 @@ def _execute_slurm_batch(
         threads = get_arts_cfg_int(thread_source_cfg, KEY_WORKER_THREADS) or 8
 
     nodes_display = format_node_counts_display(node_counts)
+    effective_display_launcher = _effective_launcher_for_config(
+        "slurm",
+        explicit_arts_config,
+    )
 
     config_display = (
         str(explicit_arts_config)
@@ -6165,7 +6204,7 @@ def _execute_slurm_batch(
     subtitle_parts = [
         f"Config: {config_display}",
         f"Nodes: {nodes_display}, Threads: {threads}",
-        f"Transport: {_transport_display(rdma, node_counts)}",
+        f"Transport: {_transport_display(rdma, node_counts, effective_display_launcher)}",
         f"Runs per benchmark: {runs}, Size: {size}",
         f"Timeout: {timeout}s (wall {resolved_time_limit})",
     ]

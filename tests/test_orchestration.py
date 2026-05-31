@@ -390,6 +390,64 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
 
         self.assertEqual(recorded_report_steps, [["dist"]])
 
+    def test_slurm_execution_forces_launcher_before_rebuild(self) -> None:
+        rebuild_launchers: list[str | None] = []
+        run_launchers: list[str | None] = []
+
+        def rebuild_step(step_config) -> None:
+            rebuild_launchers.append(step_config.launcher)
+
+        def run_slurm_step(*, step_config, request, report_steps) -> None:
+            del request, report_steps
+            run_launchers.append(step_config.launcher)
+
+        orchestrator = StepExecutionOrchestrator(
+            resolver=self.resolver,
+            rebuild_step=rebuild_step,
+            run_local_step=lambda **kwargs: [],
+            run_slurm_step=run_slurm_step,
+            print_step=lambda label, idx, total: None,
+        )
+
+        defaults = StepCliDefaults(
+            size="small",
+            timeout=10,
+            threads_spec="64",
+            nodes_spec="1,2",
+            runs=1,
+            perf=False,
+            perf_interval=0.1,
+            cflags=None,
+            compile_args="--distributed-db",
+            debug=0,
+            exclude_nodes=None,
+            nodelist=None,
+            arts_config=None,
+            launcher=None,
+            explicit_step_mode=False,
+            size_from_cli=False,
+            rdma=True,
+        )
+
+        orchestrator.execute_slurm_steps(
+            steps=[ExperimentStep(name="default", threads="64", nodes="1,2")],
+            bench_list=["polybench/gemm"],
+            defaults=defaults,
+            request=SlurmStepExecutionRequest(
+                partition="debug",
+                time_limit="00:10:00",
+                results_dir=self.root / "results",
+                verbose=False,
+                quiet=True,
+                artifact_manager=_FakeArtifactManager(),
+                max_jobs=2,
+                dry_run=True,
+            ),
+        )
+
+        self.assertEqual(rebuild_launchers, ["slurm"])
+        self.assertEqual(run_launchers, ["slurm"])
+
 
 if __name__ == "__main__":
     unittest.main()

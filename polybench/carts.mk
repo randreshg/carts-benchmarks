@@ -8,5 +8,7 @@ BENCHMARKS_ROOT := $(abspath $(POLYBENCH_ROOT)/..)
 
 # Set includes for common/carts.mk
 INCLUDES ?= -I. -I../common -I../utilities
+MINI_CFLAGS ?= -DMINI_DATASET
+STANDARD_CFLAGS ?= -DSTANDARD_DATASET
 
 include $(BENCHMARKS_ROOT)/common/carts.mk

@@ -232,6 +232,13 @@ def _summarize_log(log_path: Path, tail_lines: int = 40) -> Dict[str, Any]:
         summary["rdma_provider_fanout_warning_count"] = len(
             re.findall(r"provider open-fanout|provider-fanout|rsocket/RoCE provider", text)
         )
+        summary["rdma_warn_count"] = len(re.findall(r"RDMA-WARN", text))
+        summary["lazy_accept_failed_count"] = len(re.findall(r"lazy accept failed", text))
+        summary["rconnect_hello_timeout_count"] = len(
+            re.findall(r"rconnect/hello did not complete", text)
+        )
+        summary["cannot_send_count"] = len(re.findall(r"Cannot send", text))
+        summary["target_zero_port_count"] = len(re.findall(r"target [0-9.]+:0", text))
         summary["crash_count"] = len(re.findall(r"\[ARTS\] Crashed:", text))
     return summary
 
@@ -268,6 +275,15 @@ def _runtime_warning_reasons(diagnostics: Any) -> List[str]:
         "rdma_provider_fanout_warning_count": int(
             slurm_err.get("rdma_provider_fanout_warning_count") or 0
         ),
+        "rdma_warn_count": int(slurm_err.get("rdma_warn_count") or 0),
+        "lazy_accept_failed_count": int(
+            slurm_err.get("lazy_accept_failed_count") or 0
+        ),
+        "rconnect_hello_timeout_count": int(
+            slurm_err.get("rconnect_hello_timeout_count") or 0
+        ),
+        "cannot_send_count": int(slurm_err.get("cannot_send_count") or 0),
+        "target_zero_port_count": int(slurm_err.get("target_zero_port_count") or 0),
         "crash_count": int(slurm_err.get("crash_count") or 0),
     }
     for key, value in warning_counts.items():

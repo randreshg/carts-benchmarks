@@ -204,7 +204,7 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
             exclude_nodes=None,
             nodelist=None,
             arts_config=None,
-            launcher=None,
+            launcher="slurm",
         )
 
         request = runner.SlurmStepExecutionRequest(
@@ -249,7 +249,7 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
             exclude_nodes=None,
             nodelist=None,
             arts_config=None,
-            launcher=None,
+            launcher="slurm",
         )
 
         with mock.patch.object(runner, "arts_runtime_is_installed", lambda: True), \

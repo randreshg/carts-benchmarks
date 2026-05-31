@@ -28,6 +28,8 @@ LOG_DIR ?= logs
 INCLUDES ?=
 LDFLAGS ?=
 CFLAGS ?=
+MINI_CFLAGS ?= $(SMALL_CFLAGS)
+STANDARD_CFLAGS ?= $(MEDIUM_CFLAGS)
 
 # Output files
 ARTS_BINARY := $(EXAMPLE_NAME)_arts
@@ -131,23 +133,27 @@ clean:
 	rm -rf $(BUILD_DIR) $(LOG_DIR) $(ARTS_BINARY) *.mlir *.ll .carts-metadata.json *_metadata.mlir arts.cfg
 
 ################################################################################
-# Size targets - use SMALL_CFLAGS/MEDIUM_CFLAGS/LARGE_CFLAGS/EXTRALARGE_CFLAGS/
-# MEGALARGE_CFLAGS from individual Makefile. These variables must be defined
-# BEFORE including this file.
+# Size targets - use MINI_CFLAGS/SMALL_CFLAGS/MEDIUM_CFLAGS/STANDARD_CFLAGS/
+# LARGE_CFLAGS/EXTRALARGE_CFLAGS/MEGALARGE_CFLAGS from individual Makefile.
+# These variables must be defined BEFORE including this file.
 #
 # Available targets:
-#   small / medium / large / extralarge / megalarge       - Build both ARTS and OpenMP
-#   small-arts / medium-arts / ...                        - Build only ARTS executable
-#   small-openmp / medium-openmp / ...                    - Build only OpenMP executable
-#   run-small / run-medium / run-large / ...              - Build and run both variants
+#   mini / small / medium / standard / large / ...       - Build both ARTS and OpenMP
+#   mini-arts / small-arts / medium-arts / ...           - Build only ARTS executable
+#   mini-openmp / small-openmp / medium-openmp / ...     - Build only OpenMP executable
+#   run-mini / run-small / run-medium / ...              - Build and run both variants
 ################################################################################
 
-.PHONY: small medium large extralarge megalarge
-.PHONY: small-arts medium-arts large-arts extralarge-arts megalarge-arts
-.PHONY: small-openmp medium-openmp large-openmp extralarge-openmp megalarge-openmp
-.PHONY: run-small run-medium run-large run-extralarge run-megalarge
+.PHONY: mini small medium standard large extralarge megalarge
+.PHONY: mini-arts small-arts medium-arts standard-arts large-arts extralarge-arts megalarge-arts
+.PHONY: mini-openmp small-openmp medium-openmp standard-openmp large-openmp extralarge-openmp megalarge-openmp
+.PHONY: run-mini run-small run-medium run-standard run-large run-extralarge run-megalarge
 
 # Build both variants with size
+mini:
+	@echo "[$(EXAMPLE_NAME)] Building with MINI size"
+	$(MAKE) all openmp CFLAGS="$(MINI_CFLAGS) $(EXTRA_CFLAGS)"
+
 small:
 	@echo "[$(EXAMPLE_NAME)] Building with SMALL size"
 	$(MAKE) all openmp CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)"
@@ -155,6 +161,10 @@ small:
 medium:
 	@echo "[$(EXAMPLE_NAME)] Building with MEDIUM size"
 	$(MAKE) all openmp CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)"
+
+standard:
+	@echo "[$(EXAMPLE_NAME)] Building with STANDARD size"
+	$(MAKE) all openmp CFLAGS="$(STANDARD_CFLAGS) $(EXTRA_CFLAGS)"
 
 large:
 	@echo "[$(EXAMPLE_NAME)] Building with LARGE size"
@@ -169,6 +179,10 @@ megalarge:
 	$(MAKE) all openmp CFLAGS="$(MEGALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 # Build only ARTS with size
+mini-arts:
+	@echo "[$(EXAMPLE_NAME)] Building ARTS with MINI size"
+	$(MAKE) all CFLAGS="$(MINI_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+
 small-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with SMALL size"
 	$(MAKE) all CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
@@ -176,6 +190,10 @@ small-arts:
 medium-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with MEDIUM size"
 	$(MAKE) all CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
+
+standard-arts:
+	@echo "[$(EXAMPLE_NAME)] Building ARTS with STANDARD size"
+	$(MAKE) all CFLAGS="$(STANDARD_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 large-arts:
 	@echo "[$(EXAMPLE_NAME)] Building ARTS with LARGE size"
@@ -190,6 +208,10 @@ megalarge-arts:
 	$(MAKE) all CFLAGS="$(MEGALARGE_CFLAGS) $(EXTRA_CFLAGS)" ARTS_CFG="$(ARTS_CFG)"
 
 # Build only OpenMP with size
+mini-openmp:
+	@echo "[$(EXAMPLE_NAME)] Building OpenMP with MINI size"
+	$(MAKE) openmp CFLAGS="$(MINI_CFLAGS) $(EXTRA_CFLAGS)"
+
 small-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with SMALL size"
 	$(MAKE) openmp CFLAGS="$(SMALL_CFLAGS) $(EXTRA_CFLAGS)"
@@ -197,6 +219,10 @@ small-openmp:
 medium-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with MEDIUM size"
 	$(MAKE) openmp CFLAGS="$(MEDIUM_CFLAGS) $(EXTRA_CFLAGS)"
+
+standard-openmp:
+	@echo "[$(EXAMPLE_NAME)] Building OpenMP with STANDARD size"
+	$(MAKE) openmp CFLAGS="$(STANDARD_CFLAGS) $(EXTRA_CFLAGS)"
 
 large-openmp:
 	@echo "[$(EXAMPLE_NAME)] Building OpenMP with LARGE size"
@@ -211,6 +237,12 @@ megalarge-openmp:
 	$(MAKE) openmp CFLAGS="$(MEGALARGE_CFLAGS) $(EXTRA_CFLAGS)"
 
 # Build and run both variants with size
+run-mini: mini
+	@echo "[$(EXAMPLE_NAME)] Running ARTS (MINI)..."
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
+	@echo "[$(EXAMPLE_NAME)] Running OpenMP (MINI, OMP_WAIT_POLICY=ACTIVE)..."
+	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
+
 run-small: small
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (SMALL)..."
 	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
@@ -221,6 +253,12 @@ run-medium: medium
 	@echo "[$(EXAMPLE_NAME)] Running ARTS (MEDIUM)..."
 	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
 	@echo "[$(EXAMPLE_NAME)] Running OpenMP (MEDIUM, OMP_WAIT_POLICY=ACTIVE)..."
+	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
+
+run-standard: standard
+	@echo "[$(EXAMPLE_NAME)] Running ARTS (STANDARD)..."
+	$(ARTS_RUNTIME_ENV) $(if $(filter /%,$(ARTS_BINARY)),$(ARTS_BINARY),./$(ARTS_BINARY))
+	@echo "[$(EXAMPLE_NAME)] Running OpenMP (STANDARD, OMP_WAIT_POLICY=ACTIVE)..."
 	OMP_WAIT_POLICY=ACTIVE ./$(OMP_BINARY)
 
 run-large: large

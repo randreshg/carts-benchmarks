@@ -18,13 +18,16 @@ sys.path.insert(0, str(TOOLS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from arts_config import (  # noqa: E402
+    KEY_DEFAULT_PORTS,
     KEY_PIN,
+    KEY_PORT_COUNT,
     KEY_PROTOCOL,
     KEY_WORKER_THREADS,
     PROTOCOL_RDMA,
     PROTOCOL_TCP,
     compile_args_for_node_count,
     parse_arts_cfg,
+    protocol_for_launcher,
 )
 from artifacts import ArtifactManager  # noqa: E402
 from execution import (  # noqa: E402
@@ -487,10 +490,12 @@ class BenchmarkPipelineTest(unittest.TestCase):
                     "localhost:34739,localhost:34740",
                 )
                 self.assertEqual(parsed["master_node"], "localhost:34739")
+                self.assertEqual(parsed["port_count"], "1")
+                self.assertEqual(parsed["default_ports"], "34739")
             finally:
                 generated.unlink(missing_ok=True)
 
-    def test_local_generated_config_sets_protocol_from_rdma_flag_for_multinode(self) -> None:
+    def test_local_generated_config_uses_tcp_for_multinode_loopback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             template = Path(tmp) / "arts.cfg"
             template.write_text(
@@ -531,14 +536,66 @@ class BenchmarkPipelineTest(unittest.TestCase):
                 rdma=True,
             )
             try:
-                self.assertNotEqual(rdma_cfg, tcp_cfg)
-                self.assertEqual(parse_arts_cfg(rdma_cfg)[KEY_PROTOCOL], PROTOCOL_RDMA)
+                self.assertEqual(rdma_cfg, tcp_cfg)
+                self.assertEqual(parse_arts_cfg(rdma_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
                 self.assertEqual(parse_arts_cfg(tcp_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
                 self.assertEqual(parse_arts_cfg(single_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
             finally:
                 rdma_cfg.unlink(missing_ok=True)
                 tcp_cfg.unlink(missing_ok=True)
                 single_cfg.unlink(missing_ok=True)
+
+    def test_nonlocal_multinode_launcher_keeps_rdma_protocol(self) -> None:
+        self.assertEqual(protocol_for_launcher(True, 2, "slurm"), PROTOCOL_RDMA)
+        self.assertEqual(protocol_for_launcher(True, 2, "ssh"), PROTOCOL_RDMA)
+        self.assertEqual(protocol_for_launcher(False, 2, "slurm"), PROTOCOL_TCP)
+        self.assertEqual(protocol_for_launcher(True, 1, "slurm"), PROTOCOL_TCP)
+
+    def test_nonlocal_generated_rdma_config_uses_production_single_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "arts.cfg"
+            template.write_text(
+                "\n".join(
+                    [
+                        "[ARTS]",
+                        "worker_threads=1",
+                        "launcher=slurm",
+                        "node_count=1",
+                        "default_ports=34739",
+                        f"{KEY_PROTOCOL}={PROTOCOL_TCP}",
+                    ]
+                )
+                + "\n"
+            )
+
+            rdma_cfg = generate_arts_config(
+                template,
+                threads=4,
+                launcher="slurm",
+                nodes_override=2,
+                benchmark_name="unit/nonlocal-rdma",
+                rdma=True,
+            )
+            tcp_cfg = generate_arts_config(
+                template,
+                threads=4,
+                launcher="slurm",
+                nodes_override=2,
+                benchmark_name="unit/nonlocal-tcp",
+                rdma=False,
+            )
+            try:
+                rdma_values = parse_arts_cfg(rdma_cfg)
+                tcp_values = parse_arts_cfg(tcp_cfg)
+                self.assertEqual(rdma_values[KEY_PROTOCOL], PROTOCOL_RDMA)
+                self.assertEqual(rdma_values[KEY_PORT_COUNT], "1")
+                self.assertEqual(rdma_values[KEY_DEFAULT_PORTS], "34739")
+                self.assertEqual(tcp_values[KEY_PROTOCOL], PROTOCOL_TCP)
+                self.assertEqual(tcp_values[KEY_PORT_COUNT], "2")
+                self.assertEqual(tcp_values[KEY_DEFAULT_PORTS], "34739,34740")
+            finally:
+                rdma_cfg.unlink(missing_ok=True)
+                tcp_cfg.unlink(missing_ok=True)
 
     def test_single_node_compile_args_strip_distributed_db(self) -> None:
         self.assertIsNone(compile_args_for_node_count("--distributed-db", 1))

@@ -1,36 +1,39 @@
 {
-  "name": "gemm-server-validation",
-  "description": "GEMM extralarge: direct single-node ARTS vs OMP, then 1..64 node baseline vs distributed-db.",
+  "name": "carts-suite-1-to-2-rdma-validation",
+  "description": "All enabled CARTS benchmarks at extralarge size: validate single-node and 2-node Slurm/RDMA behavior, then compare distributed DB ownership on the same 1-to-2-node slice.",
   "steps": [
     {
-      "name": "n1-direct",
-      "benchmarks": ["polybench/gemm"],
+      "name": "single-node-reference",
       "size": "extralarge",
       "threads": "64",
       "nodes": "1",
-      "debug": 0,
-      "runs": 1,
-      "perf": false
-    },
-    {
-      "name": "multinode-baseline",
-      "benchmarks": ["polybench/gemm"],
-      "size": "extralarge",
-      "threads": "64",
-      "nodes": "1,2,4,8,16,32,64",
-      "debug": 0,
-      "runs": 1,
-      "perf": false
-    },
-    {
-      "name": "multinode-distributed-db",
-      "benchmarks": ["polybench/gemm"],
-      "size": "extralarge",
-      "threads": "64",
-      "nodes": "1,2,4,8,16,32,64",
+      "rdma": true,
       "debug": 0,
       "runs": 1,
       "perf": false,
+      "timeout": 900
+    },
+    {
+      "name": "one-to-two-baseline",
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "1,2",
+      "rdma": true,
+      "debug": 0,
+      "runs": 1,
+      "perf": false,
+      "timeout": 900
+    },
+    {
+      "name": "one-to-two-distributed-db",
+      "size": "extralarge",
+      "threads": "64",
+      "nodes": "1,2",
+      "rdma": true,
+      "debug": 0,
+      "runs": 1,
+      "perf": false,
+      "timeout": 900,
       "compile_args": "--distributed-db"
     }
   ]

@@ -482,34 +482,13 @@ def _default_network_threads(
     if not rdma:
         return 1, 1
 
-    # RoCE/RDMA needs dedicated progress capacity, but one thread per peer makes
-    # startup fanout much noisier than the runtime can use. Keep a small floor
-    # for 8+ node diagnostics and cap at two per direction; higher sender
-    # fanout produced large abandoned-connect spikes at 64 nodes.
-    # The sbatch CPU request adds these threads on top of the requested worker
-    # count, so --threads remains the worker-thread contract.
-    #
-    # The ARTS runtime enforces sender_threads <= (nodes-1) * port_count.
-    # When port_count >= 2, use one sender thread per port (up to 2) so that
-    # a second thread can make progress while the first awaits an RDMA
-    # completion -- the primary fix for single-port sender serialization.
-    effective_ports = port_count if port_count is not None else 1
-    if effective_ports >= 2:
-        network_threads = min(effective_ports, 2)
-    else:
-        floor = 2 if node_count >= 8 else 1
-        network_threads = min(node_count - 1, 2, max(floor, (node_count + 15) // 16))
-    return network_threads, network_threads
+    return 1, 1
 
 
 def _default_port_count(node_count: int, *, rdma: bool) -> int:
     """Return the port_count to write into the multinode arts.cfg.
 
-    With port_count=1 (historical default) every remote DB acquire from rank R
-    to rank T serializes through a single TCP/RDMA connection, capping
-    sender_threads at (nodes-1)*port_count = 1.  Raising port_count to 2 at
-    two nodes gives sender_threads room to grow to 2 without hitting the ARTS
-    validation error in threads.c.
+    TCP uses two ports by default; RDMA uses one lazy peer endpoint.
 
     Override via CARTS_SLURM_PORT_COUNT (non-negative integer).
     """
@@ -518,11 +497,7 @@ def _default_port_count(node_count: int, *, rdma: bool) -> int:
         return max(1, override)
     if node_count <= 1:
         return 1
-    # Two ports per peer saturates bandwidth while keeping the per-rank
-    # connection table small.  For RDMA the second port lets a second sender
-    # thread make progress while the first is waiting on an RDMA completion.
-    # For TCP the overhead is minimal and the serialization relief is the same.
-    return 2
+    return 1 if rdma else 2
 
 
 def _default_min_distributed_tile_bytes(node_count: int) -> Optional[int]:
@@ -795,24 +770,8 @@ def _rdma_environment_section(config: SlurmJobConfig) -> str:
     protocol = parse_arts_cfg(config.arts_config_path).get(KEY_PROTOCOL)
     if protocol != PROTOCOL_RDMA:
         return ""
-    return """export ARTS_RDMA_CONNECT_HELPER="${ARTS_RDMA_CONNECT_HELPER:-1}"
-export ARTS_RDMA_CLOSE_AFTER_SEND="${ARTS_RDMA_CLOSE_AFTER_SEND:-1}"
-export ARTS_RDMA_CLOSE_AFTER_SEND_EVERY="${ARTS_RDMA_CLOSE_AFTER_SEND_EVERY:-256}"
-export ARTS_RDMA_ALLOW_RSOCKET_REUSE="${ARTS_RDMA_ALLOW_RSOCKET_REUSE:-1}"
-export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"
-export ARTS_RDMA_MAX_ACTIVE_CONNECTS="${ARTS_RDMA_MAX_ACTIVE_CONNECTS:-2}"
-export ARTS_RDMA_CLOSE_WORKERS="${ARTS_RDMA_CLOSE_WORKERS:-4}"
-export ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS="${ARTS_RDMA_CONNECT_HELPER_SHUTDOWN_WAIT_MS:-5000}"
+    return """export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"
 export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-10000}"
-export ARTS_CONNECT_STEADY_BETWEEN_US="${ARTS_CONNECT_STEADY_BETWEEN_US:-1000}"
-export ARTS_RDMA_EAGER_CONNECT="${ARTS_RDMA_EAGER_CONNECT:-0}"
-export ARTS_RDMA_RECEIVE_RPOLL="${ARTS_RDMA_RECEIVE_RPOLL:-0}"
-export ARTS_LAZY_ACCEPT_DRAIN_LIMIT="${ARTS_LAZY_ACCEPT_DRAIN_LIMIT:-0}"
-export ARTS_LAZY_ACCEPT_IDLE_INTERVAL_US="${ARTS_LAZY_ACCEPT_IDLE_INTERVAL_US:-1000}"
-export ARTS_LISTEN_BACKLOG="${ARTS_LISTEN_BACKLOG:-0}"
-export ARTS_RDMA_ABANDONED_CONNECT_QUARANTINE_US="${ARTS_RDMA_ABANDONED_CONNECT_QUARANTINE_US:-0}"
-export ARTS_TRACE_RDMA_SUMMARY="${ARTS_TRACE_RDMA_SUMMARY:-0}"
-export ARTS_TRACE_RDMA_SUMMARY_INTERVAL_US="${ARTS_TRACE_RDMA_SUMMARY_INTERVAL_US:-5000000}"
 export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-0}"
 export ARTS_RDMA_SEND_MAX_ITERS="${ARTS_RDMA_SEND_MAX_ITERS:-0}"
 export ARTS_RDMA_RECV_PACKETS_PER_SOCKET="${ARTS_RDMA_RECV_PACKETS_PER_SOCKET:-0}"

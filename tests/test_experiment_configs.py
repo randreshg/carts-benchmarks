@@ -27,7 +27,6 @@ MULTINODE_EXTRALARGE_CONFIGS = [
     "all-benchmarks-multinode-extralarge.json",
     "gemm-full-extralarge.json",
     "gemm-multinode-extralarge.json",
-    "gemm-validation.json",
     "scale-multinode-1-to-64.json",
     "scale-multinode-64n-rdma.json",
 ]
@@ -135,6 +134,31 @@ class ExperimentConfigTest(unittest.TestCase):
             self.assertTrue(step["rdma"])
             self.assertFalse(step.get("perf", False))
             self.assertNotIn("perf_interval", step)
+
+    def test_validation_experiment_covers_all_benchmarks_from_one_to_two_nodes(self) -> None:
+        payload = json.loads((CONFIG_DIR / "gemm-validation.json").read_text())
+        self.assertEqual(payload["name"], "carts-suite-1-to-2-rdma-validation")
+        self.assertEqual(
+            [step["name"] for step in payload["steps"]],
+            [
+                "single-node-reference",
+                "one-to-two-baseline",
+                "one-to-two-distributed-db",
+            ],
+        )
+        for step in payload["steps"]:
+            with self.subTest(step=step["name"]):
+                self.assertNotIn("benchmarks", step)
+                self.assertEqual(step["size"], "extralarge")
+                self.assertEqual(step["threads"], "64")
+                self.assertTrue(step["rdma"])
+                self.assertFalse(step.get("perf", False))
+                self.assertEqual(step["runs"], 1)
+                self.assertEqual(step["timeout"], 900)
+        self.assertEqual(payload["steps"][0]["nodes"], "1")
+        self.assertEqual(payload["steps"][1]["nodes"], "1,2")
+        self.assertEqual(payload["steps"][2]["nodes"], "1,2")
+        self.assertEqual(payload["steps"][2]["compile_args"], "--distributed-db")
 
     def test_scalability_experiments_do_not_require_perf(self) -> None:
         for config_name in NO_PERF_SCALABILITY_CONFIGS:

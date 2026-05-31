@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, List, Optional, Protocol, Sequence, Tuple
 
@@ -662,6 +662,11 @@ class StepExecutionOrchestrator:
                 bench_list,
                 defaults,
             )
+            # The SLURM executor always materializes launcher=slurm arts.cfg files.
+            # Make the pre-step runtime rebuild policy use the same launcher so a
+            # 1n/2n sweep requests an RDMA-capable ARTS build for the multinode jobs.
+            if step_config.launcher != "slurm":
+                step_config = replace(step_config, launcher="slurm")
             if not request.quiet and len(steps) > 1:
                 self.print_step(step_config.name, idx, len(steps))
             self.rebuild_step(step_config)

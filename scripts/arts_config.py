@@ -94,6 +94,18 @@ def protocol_for_node_count(enabled: bool, node_count: int) -> str:
     return protocol_for_rdma(rdma_for_node_count(enabled, node_count))
 
 
+def rdma_for_launcher(enabled: bool, node_count: int, launcher: Optional[str]) -> bool:
+    """Return whether a launcher/node-count pair should request RDMA transport."""
+    if str(launcher or "").strip().lower() == "local":
+        return False
+    return rdma_for_node_count(enabled, node_count)
+
+
+def protocol_for_launcher(enabled: bool, node_count: int, launcher: Optional[str]) -> str:
+    """Return the transport protocol for a launcher/node-count pair."""
+    return protocol_for_rdma(rdma_for_launcher(enabled, node_count, launcher))
+
+
 def compile_args_for_node_count(
     compile_args: Optional[str],
     node_count: int,
