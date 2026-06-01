@@ -183,6 +183,55 @@ carts benchmarks run polybench/gemm --threads 1,2 --nodes 1,2
 carts benchmarks run polybench/gemm --threads 4 --nodes 2 --no-rdma
 ```
 
+### Serial 1-to-2 Node Validation Gate
+
+Use the serial gate while compiler/runtime optimization work is still active.
+It runs one benchmark at a time, one phase at a time, at 64 threads and
+`size=extralarge`: 1-node reference, 2-node baseline, then 2-node
+`--distributed-db`. Each SLURM job uses a 270 second process timeout and a
+5 minute wall cap. The driver stops at the first failed phase, runtime warning,
+timeout-budget violation, or 1-node to 2-node non-scaling result.
+
+```bash
+.dekk/env/bin/python external/carts-benchmarks/scripts/serial_1_to_2_validation.py \
+    --partition <partition> \
+    --results-dir external/carts-benchmarks/results/serial-1-to-2-64t
+```
+
+For harness validation without submitting jobs:
+
+```bash
+.dekk/env/bin/python external/carts-benchmarks/scripts/serial_1_to_2_validation.py \
+    --partition <partition> --dry-run
+```
+
+### Megalarge Evaluation Scaffold
+
+The checked-in `all-enabled-megalarge` experiment is the final
+single-node-to-multinode scaffold for every currently enabled benchmark. It
+uses `size=megalarge`, 64 worker threads per node, one single-node reference
+step, and paired RDMA multinode sweeps with and without `--distributed-db`.
+
+Keep this as the final campaign. During optimization, run the serial 1-to-2
+gate first so failures are fixed one at a time before the broad megalarge
+sweep consumes the queue.
+
+Use dry-run mode for final harness validation:
+
+```bash
+carts benchmarks run --experiment all-enabled-megalarge \
+    --slurm --dry-run --partition <partition> \
+    --results-dir external/carts-benchmarks/results/dryrun-megalarge
+```
+
+Run the campaign only after implementation convergence:
+
+```bash
+carts benchmarks run --experiment all-enabled-megalarge \
+    --slurm --partition <partition> \
+    --results-dir external/carts-benchmarks/results/megalarge-final
+```
+
 ### Multiple Runs for Statistics
 
 ```bash
@@ -595,14 +644,14 @@ Linear algebra kernels and stencil computations from PolyBench/C.
 - `polybench/gemm` - Matrix multiplication (O(N^3) compute-bound)
 - `polybench/2mm`, `polybench/3mm` - Multiple matrix operations
 - `polybench/jacobi2d` - 2D Jacobi stencil (memory-bound)
-- `polybench/heat-3d` - 3D heat equation
+- `polybench/convolution-2d`, `polybench/convolution-3d` - Convolution kernels
 - And more...
 
 ### KaStORS Suite
 
 Task-based parallel benchmarks for OpenMP task dependencies.
 
-- `kastors-jacobi/jacobi-task-dep` - Task dependency Jacobi
 - `kastors-jacobi/jacobi-for` - Fork-join Jacobi
+- `kastors-jacobi/poisson-for` - Fork-join Poisson solver
 
 Use `carts benchmarks list` to see all available benchmarks.

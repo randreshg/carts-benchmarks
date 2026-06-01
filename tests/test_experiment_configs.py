@@ -8,10 +8,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO_ROOT / "external" / "carts-benchmarks" / "configs" / "experiments"
 PERF_GATE_DIR = REPO_ROOT / "external" / "carts-benchmarks" / "configs" / "perf-gates"
+BENCHMARK_ROOT = REPO_ROOT / "external" / "carts-benchmarks"
+SKIP_DIRS = {"common", "include", "src", "utilities", ".git", ".svn", ".hg", "build", "logs"}
 
 NO_PERF_SCALABILITY_CONFIGS = [
+    "all-enabled-1-to-2-64t-validation.json",
     "all-benchmarks-full-large-extralarge.json",
     "all-benchmarks-multinode-extralarge.json",
+    "all-enabled-megalarge.json",
     "all-benchmarks-single-node-large.json",
     "gemm-full-extralarge.json",
     "gemm-multinode-extralarge.json",
@@ -51,7 +55,160 @@ CGO_PERF_GATES = [
 ]
 
 
+def _discover_enabled_benchmarks() -> set[str]:
+    benchmarks: set[str] = set()
+    for makefile in BENCHMARK_ROOT.rglob("Makefile"):
+        bench_dir = makefile.parent
+        rel_path = bench_dir.relative_to(BENCHMARK_ROOT)
+        if any(part in SKIP_DIRS for part in rel_path.parts):
+            continue
+        if not any(bench_dir.glob("*.c")) and not any(bench_dir.glob("*.cpp")):
+            continue
+        if (bench_dir / ".disabled").exists():
+            continue
+        benchmarks.add(str(rel_path))
+    return benchmarks
+
+
+def _explicit_experiment_benchmarks(payload: dict) -> set[str]:
+    benchmarks: set[str] = set()
+    for step in payload.get("steps", []):
+        benchmarks.update(step.get("benchmarks", []))
+    return benchmarks
+
+
+def _explicit_perf_gate_benchmarks(payload: dict) -> set[str]:
+    benchmarks: set[str] = set()
+    for entry in payload.get("benchmarks", []):
+        if "name" in entry:
+            benchmarks.add(entry["name"])
+    return benchmarks
+
+
+def _node_count_list(step: dict) -> list[int]:
+    return [int(item.strip()) for item in step["nodes"].split(",")]
+
+
 class ExperimentConfigTest(unittest.TestCase):
+    def test_explicit_experiment_benchmarks_are_enabled(self) -> None:
+        enabled = _discover_enabled_benchmarks()
+        for config_path in sorted(CONFIG_DIR.glob("*.json")):
+            with self.subTest(config=config_path.name):
+                payload = json.loads(config_path.read_text())
+                unknown = _explicit_experiment_benchmarks(payload) - enabled
+                self.assertEqual(unknown, set())
+
+    def test_perf_gate_benchmarks_are_enabled(self) -> None:
+        enabled = _discover_enabled_benchmarks()
+        for config_path in sorted(PERF_GATE_DIR.glob("*.json")):
+            with self.subTest(config=config_path.name):
+                payload = json.loads(config_path.read_text())
+                unknown = _explicit_perf_gate_benchmarks(payload) - enabled
+                self.assertEqual(unknown, set())
+
+    def test_all_enabled_megalarge_experiment_covers_enabled_benchmarks(self) -> None:
+        payload = json.loads((CONFIG_DIR / "all-enabled-megalarge.json").read_text())
+        self.assertEqual(payload["name"], "all-enabled-megalarge")
+        self.assertEqual(
+            [step["name"] for step in payload["steps"]],
+            [
+                "single-node-reference",
+                "multinode-baseline",
+                "multinode-distributed-db",
+            ],
+        )
+        enabled = _discover_enabled_benchmarks()
+        for step in payload["steps"]:
+            with self.subTest(step=step["name"]):
+                self.assertEqual(step["size"], "megalarge")
+                self.assertEqual(step["threads"], "64")
+                self.assertEqual(step["launcher"], "slurm")
+                self.assertTrue(step["rdma"])
+                self.assertEqual(step["runs"], 1)
+                self.assertEqual(step.get("warmup_runs", 0), 0)
+                self.assertFalse(step.get("perf", False))
+                self.assertEqual(step["profile"], "profile-none.cfg")
+                self.assertEqual(set(step["benchmarks"]), enabled)
+        self.assertEqual(payload["steps"][0]["nodes"], "1")
+        self.assertEqual(payload["steps"][1]["nodes"], "1,2,4,8")
+        self.assertEqual(payload["steps"][2]["nodes"], "1,2,4,8")
+        self.assertEqual(payload["steps"][2]["compile_args"], "--distributed-db")
+
+    def test_all_enabled_megalarge_dry_run_job_shape_is_stable(self) -> None:
+        payload = json.loads((CONFIG_DIR / "all-enabled-megalarge.json").read_text())
+        enabled = _discover_enabled_benchmarks()
+
+        jobs_by_step = {
+            step["name"]: len(step["benchmarks"])
+            * len(_node_count_list(step))
+            * step["runs"]
+            for step in payload["steps"]
+        }
+
+        self.assertEqual(
+            jobs_by_step,
+            {
+                "single-node-reference": len(enabled),
+                "multinode-baseline": len(enabled) * 4,
+                "multinode-distributed-db": len(enabled) * 4,
+            },
+        )
+        self.assertEqual(sum(jobs_by_step.values()), len(enabled) * 9)
+
+        distributed = payload["steps"][2]
+        self.assertEqual(distributed["compile_args"], "--distributed-db")
+        self.assertIn(1, _node_count_list(distributed))
+        self.assertGreater(max(_node_count_list(distributed)), 1)
+
+    def test_all_enabled_1_to_2_validation_is_serial_gate_shape(self) -> None:
+        payload = json.loads(
+            (CONFIG_DIR / "all-enabled-1-to-2-64t-validation.json").read_text()
+        )
+        self.assertEqual(payload["name"], "all-enabled-1-to-2-64t-validation")
+        self.assertEqual(
+            [step["name"] for step in payload["steps"]],
+            [
+                "single-node-reference",
+                "two-node-baseline",
+                "two-node-distributed-db",
+            ],
+        )
+
+        enabled = _discover_enabled_benchmarks()
+        for step in payload["steps"]:
+            with self.subTest(step=step["name"]):
+                self.assertEqual(set(step["benchmarks"]), enabled)
+                self.assertEqual(step["size"], "extralarge")
+                self.assertEqual(step["threads"], "64")
+                self.assertEqual(step["launcher"], "slurm")
+                self.assertTrue(step["rdma"])
+                self.assertEqual(step["runs"], 1)
+                self.assertEqual(step.get("warmup_runs", 0), 0)
+                self.assertFalse(step.get("perf", False))
+                self.assertEqual(step["profile"], "profile-none.cfg")
+                self.assertEqual(step["timeout"], 270)
+
+        self.assertEqual(payload["steps"][0]["nodes"], "1")
+        self.assertEqual(payload["steps"][1]["nodes"], "2")
+        self.assertEqual(payload["steps"][2]["nodes"], "2")
+        self.assertEqual(payload["steps"][2]["compile_args"], "--distributed-db")
+
+        jobs_by_step = {
+            step["name"]: len(step["benchmarks"])
+            * len(_node_count_list(step))
+            * step["runs"]
+            for step in payload["steps"]
+        }
+        self.assertEqual(
+            jobs_by_step,
+            {
+                "single-node-reference": len(enabled),
+                "two-node-baseline": len(enabled),
+                "two-node-distributed-db": len(enabled),
+            },
+        )
+        self.assertEqual(sum(jobs_by_step.values()), len(enabled) * 3)
+
     def test_single_node_all_benchmarks_scaling_experiment_is_self_contained(self) -> None:
         payload = json.loads(
             (CONFIG_DIR / "single-node-all-benchmarks-scaling.json").read_text()

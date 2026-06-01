@@ -778,6 +778,106 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             ]
             self.assertEqual(arts_builds[0]["compile_args"], None)
 
+    def test_distributed_db_dry_run_is_node_specific_without_benchmark_special_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench_root = root / "benchmarks"
+            (bench_root / "suite" / "writer-reader").mkdir(parents=True)
+            base_cfg = root / "arts.cfg"
+            base_cfg.write_text(f"[ARTS]\nworker_threads=1\n{KEY_PROTOCOL}={PROTOCOL_TCP}\n")
+            carts_root = root / "carts"
+            (carts_root / ".install" / "arts" / "lib").mkdir(parents=True)
+            (carts_root / ".install" / "arts" / "lib" / "libarts.so.2").write_text(
+                "fake arts runtime\n"
+            )
+            (carts_root / ".install" / "carts" / "lib").mkdir(parents=True)
+            (carts_root / ".install" / "llvm" / "lib").mkdir(parents=True)
+            host = _FakeHost(bench_root)
+            am = ArtifactManager(root / "results", "ts")
+            deps = SlurmExecutorDependencies(
+                resolve_effective_arts_config=lambda bench_path, explicit: base_cfg,
+                parse_time_limit_seconds=lambda spec: 60,
+                get_carts_dir=lambda: carts_root,
+                get_benchmarks_dir=lambda: bench_root,
+                step_name_to_token=lambda step: step,
+            )
+            request = SlurmBatchRequest(
+                bench_list=["suite/writer-reader"],
+                node_counts=[1, 2],
+                size="small",
+                runs=1,
+                timeout=30,
+                partition=None,
+                time_limit="00:01:00",
+                account=None,
+                explicit_arts_config=base_cfg,
+                threads=1,
+                output_dir=root / "results",
+                max_jobs=1,
+                dry_run=True,
+                no_build=False,
+                verbose=False,
+                cflags=None,
+                compile_args="--distributed-db",
+                gdb=False,
+                profile=None,
+                perf=False,
+                perf_interval=0.1,
+                cpu_pinning="default",
+                exclude_nodes=None,
+                nodelist=None,
+                rdma=False,
+                artifact_manager=am,
+                step_name="distributed-db-writer-reader",
+                report_steps=None,
+                command_str="test",
+            )
+
+            SlurmBatchExecutor(host, request, deps).execute()
+
+            single_config = json.loads(
+                (
+                    am.experiment_dir
+                    / "distributed-db-writer-reader"
+                    / "suite"
+                    / "writer-reader"
+                    / "1t_1n"
+                    / "run_1"
+                    / "run_config.json"
+                ).read_text()
+            )
+            multinode_config = json.loads(
+                (
+                    am.experiment_dir
+                    / "distributed-db-writer-reader"
+                    / "suite"
+                    / "writer-reader"
+                    / "1t_2n"
+                    / "run_1"
+                    / "run_config.json"
+                ).read_text()
+            )
+            script = (
+                am.experiment_dir
+                / "scripts"
+                / "distributed-db-writer-reader__suite_writer-reader_1t_2n_run1.sbatch"
+            ).read_text()
+
+            self.assertNotIn("compile_args", single_config)
+            self.assertEqual(multinode_config["compile_args"], "--distributed-db")
+            self.assertEqual(multinode_config["nodes"], 2)
+            self.assertEqual(multinode_config["arts_transport"], PROTOCOL_TCP)
+            self.assertNotIn("reference", multinode_config)
+            self.assertIn("--arts-only", script)
+            self.assertIn("# OpenMP skipped (multi-node ARTS-only run)", script)
+
+            arts_build_args = [
+                call["compile_args"]
+                for call in host.build_calls
+                if call["variant"] == "arts"
+            ]
+            self.assertEqual(arts_build_args, [None, "--distributed-db"])
+
     def test_slurm_build_cache_tracks_effective_compile_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,10 +1,10 @@
 {
   "name": "cgo-single-node",
-  "description": "CGO '27 single-node evaluation: the 25 paper benchmarks across 8/16/32/64 threads at extralarge size, plus a 64-thread timing-counter pass for paper figure regeneration.",
+  "description": "CGO '27 single-node evaluation: currently enabled paper benchmarks across 8/16/32/64 threads at extralarge size, plus a 64-thread timing-counter pass for paper figure regeneration.",
   "steps": [
     {
       "name": "thread-sweep-extralarge",
-      "description": "25 paper benchmarks at extralarge size, 8/16/32/64 threads, single-node. Drives scaling-trends and scaling-results.",
+      "description": "Currently enabled paper benchmarks at extralarge size, 8/16/32/64 threads, single-node. Drives scaling-trends and scaling-results.",
       "benchmarks": [
         "polybench/gemm",
         "polybench/2mm",
@@ -15,11 +15,8 @@
         "polybench/convolution-2d",
         "polybench/convolution-3d",
         "polybench/jacobi2d",
-        "polybench/seidel-2d",
         "kastors-jacobi/jacobi-for",
-        "kastors-jacobi/jacobi-task-dep",
         "kastors-jacobi/poisson-for",
-        "kastors-jacobi/poisson-task",
         "ml-kernels/activations",
         "ml-kernels/batchnorm",
         "ml-kernels/layernorm",
@@ -27,9 +24,7 @@
         "seissol/volume-integral",
         "specfem3d/stress",
         "specfem3d/velocity",
-        "sw4lite/rhs4sg-base",
         "sw4lite/vel4sg-base",
-        "monte-carlo/ensemble",
         "stream"
       ],
       "size": "extralarge",
@@ -57,11 +52,8 @@
         "polybench/convolution-2d",
         "polybench/convolution-3d",
         "polybench/jacobi2d",
-        "polybench/seidel-2d",
         "kastors-jacobi/jacobi-for",
-        "kastors-jacobi/jacobi-task-dep",
         "kastors-jacobi/poisson-for",
-        "kastors-jacobi/poisson-task",
         "ml-kernels/activations",
         "ml-kernels/batchnorm",
         "ml-kernels/layernorm",
@@ -69,9 +61,7 @@
         "seissol/volume-integral",
         "specfem3d/stress",
         "specfem3d/velocity",
-        "sw4lite/rhs4sg-base",
         "sw4lite/vel4sg-base",
-        "monte-carlo/ensemble",
         "stream"
       ],
       "size": "extralarge",

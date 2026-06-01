@@ -1118,6 +1118,7 @@ class BenchmarkRunner:
             "medium": "MEDIUM_CFLAGS",
             "large": "LARGE_CFLAGS",
             "extralarge": "EXTRALARGE_CFLAGS",
+            "megalarge": "MEGALARGE_CFLAGS",
             "mini": "MINI_CFLAGS",
             "standard": "STANDARD_CFLAGS",
         }
@@ -1142,6 +1143,7 @@ class BenchmarkRunner:
             "medium": "MEDIUM_ARGS",
             "large": "LARGE_ARGS",
             "extralarge": "EXTRALARGE_ARGS",
+            "megalarge": "MEGALARGE_ARGS",
             "mini": "MINI_ARGS",
             "standard": "STANDARD_ARGS",
         }

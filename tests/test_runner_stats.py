@@ -24,6 +24,7 @@ from models import (  # noqa: E402
     VerificationResult,
 )
 from runner import (  # noqa: E402
+    BenchmarkRunner,
     annotate_startup_outliers,
     append_problem_size_cflags,
     detect_startup_outliers,
@@ -104,6 +105,37 @@ def _make_result(
 
 
 class BenchmarkRunnerStatsTest(unittest.TestCase):
+    def test_megalarge_size_metadata_uses_makefile_cflags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bench_dir = Path(tmp)
+            (bench_dir / "Makefile").write_text(
+                "MEGALARGE_CFLAGS ?= -DN=32768 -DTSTEPS=200\n",
+                encoding="utf-8",
+            )
+
+            runner = object.__new__(BenchmarkRunner)
+
+            self.assertEqual(
+                runner.get_size_params(bench_dir, "megalarge"),
+                "-DN=32768 -DTSTEPS=200",
+            )
+
+    def test_megalarge_run_args_use_specific_makefile_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bench_dir = Path(tmp)
+            (bench_dir / "Makefile").write_text(
+                "RUN_ARGS ?= --fallback\n"
+                "MEGALARGE_ARGS ?= --scale mega --iters 3\n",
+                encoding="utf-8",
+            )
+
+            runner = object.__new__(BenchmarkRunner)
+
+            self.assertEqual(
+                runner.get_run_args(bench_dir, "megalarge"),
+                ["--scale", "mega", "--iters", "3"],
+            )
+
     def test_problem_size_override_appends_benchmark_dimension_flags(self) -> None:
         cflags = append_problem_size_cflags(
             "polybench/gemm",
