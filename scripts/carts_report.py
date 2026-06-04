@@ -586,6 +586,52 @@ def _write_dat_gemm_strong(path: Path, rows: list[dict[str, Any]]) -> None:
     _write_dat(path, ["nodes", "speedup"], out_rows)
 
 
+def _declutter_log_labels(values: list[float], min_gap_dex: float = 0.13) -> list[float]:
+    """Spread endpoint-label y-positions so they stay legible on a log axis.
+
+    Per-series labels placed at each series' final value collide when several
+    series converge near one another (the Dense LA and ML panels are the worst
+    cases). This nudges the *label* positions apart while keeping the plotted
+    data untouched: positions are kept at least ``min_gap_dex`` apart in log10
+    space, order is preserved, and total displacement is minimized by grouping
+    overlapping labels and centering each group on its own mean. Non-positive
+    values (which a log axis cannot place) are returned unchanged.
+    """
+    if len(values) <= 1:
+        return list(values)
+    indexed = [(i, v) for i, v in enumerate(values) if v > 0.0]
+    if len(indexed) <= 1:
+        return list(values)
+    indexed.sort(key=lambda iv: iv[1])
+    order = [i for i, _ in indexed]
+    logs = [math.log10(v) for _, v in indexed]
+    groups: list[list[float]] = [[x] for x in logs]
+    changed = True
+    while changed:
+        changed = False
+        merged: list[list[float]] = []
+        for group in groups:
+            if merged:
+                prev = merged[-1]
+                prev_top = sum(prev) / len(prev) + (len(prev) - 1) / 2.0 * min_gap_dex
+                cur_bottom = sum(group) / len(group) - (len(group) - 1) / 2.0 * min_gap_dex
+                if cur_bottom < prev_top + min_gap_dex:
+                    merged[-1] = prev + group
+                    changed = True
+                    continue
+            merged.append(group)
+        groups = merged
+    spread: list[float] = []
+    for group in groups:
+        center = sum(group) / len(group)
+        start = center - (len(group) - 1) / 2.0 * min_gap_dex
+        spread.extend(start + offset * min_gap_dex for offset in range(len(group)))
+    result = list(values)
+    for sorted_pos, original_index in enumerate(order):
+        result[original_index] = 10.0 ** spread[sorted_pos]
+    return result
+
+
 def _write_labels_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None:
     endpoints: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for row in _paper_scaling_series_rows(rows):
@@ -628,11 +674,12 @@ def _write_labels_scaling_trends(path: Path, rows: list[dict[str, Any]]) -> None
             )
         lines.append("}")
         lines.append(rf"\providecommand{{\CartsScalingTrendLabels{token}}}{{%")
+        label_ys = _declutter_log_labels([float(item["speedup"]) for item in values])
         for idx, item in enumerate(values):
             color = _PAPER_SERIES_COLORS[idx % len(_PAPER_SERIES_COLORS)]
             label = _tex_escape(_paper_benchmark_label(str(item["benchmark"])))
             x_value = int(item["x"])
-            speedup = _fmt_tex_float(float(item["speedup"]))
+            speedup = _fmt_tex_float(label_ys[idx])
             lines.append(
                 rf"  \node[right, font=\tiny, {color}] at (axis cs:{x_value},{speedup}) {{{label}}};"
             )

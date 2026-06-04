@@ -11,7 +11,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = REPO_ROOT / "external" / "carts-benchmarks" / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from carts_report import generate_paper_figures  # noqa: E402
+import math  # noqa: E402
+
+from carts_report import _declutter_log_labels, generate_paper_figures  # noqa: E402
 
 
 class PaperFiguresGenerationTest(unittest.TestCase):
@@ -185,6 +187,37 @@ def _make_result(
         "artifacts": {},
         "diagnostics": {},
     }
+
+
+class DeclutterLogLabelsTest(unittest.TestCase):
+    GAP = 0.13
+
+    def test_single_and_empty_unchanged(self) -> None:
+        self.assertEqual(_declutter_log_labels([]), [])
+        self.assertEqual(_declutter_log_labels([2.5]), [2.5])
+
+    def test_already_separated_values_are_left_alone(self) -> None:
+        values = [10.0, 5.0, 2.0, 1.0]
+        out = _declutter_log_labels(values, min_gap_dex=self.GAP)
+        for original, adjusted in zip(values, out):
+            self.assertAlmostEqual(original, adjusted, places=9)
+
+    def test_colliding_values_are_spread_to_the_minimum_gap(self) -> None:
+        values = [2.31, 2.03, 1.78, 5.46, 3.21]
+        out = _declutter_log_labels(values, min_gap_dex=self.GAP)
+        self.assertEqual(
+            [i for i, _ in sorted(enumerate(values), key=lambda p: p[1])],
+            [i for i, _ in sorted(enumerate(out), key=lambda p: p[1])],
+        )
+        logs = sorted(math.log10(v) for v in out)
+        for lo, hi in zip(logs, logs[1:]):
+            self.assertGreaterEqual(hi - lo + 1e-9, self.GAP)
+
+    def test_nonpositive_values_pass_through_in_place(self) -> None:
+        out = _declutter_log_labels([2.0, 0.0, -1.0, 2.02], min_gap_dex=self.GAP)
+        self.assertEqual(out[1], 0.0)
+        self.assertEqual(out[2], -1.0)
+        self.assertGreater(abs(math.log10(out[3]) - math.log10(out[0])), 0.0)
 
 
 if __name__ == "__main__":
