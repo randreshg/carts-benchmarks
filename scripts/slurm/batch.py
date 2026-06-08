@@ -65,11 +65,13 @@ from arts_config import (
     KEY_COUNTER_CAPTURE_INTERVAL,
     KEY_WORKER_THREADS,
     PROTOCOL_RDMA,
+    TRANSPORT_GASNET,
     parse_arts_cfg,
     protocol_for_node_count,
     upsert_cfg_value as _set_cfg_key,
     comment_cfg_key as _comment_cfg_key,
 )
+from carts_paths import arts_build_transport_kind
 from arts_runtime_modes import apply_arts_cfg_overrides
 
 from rich.console import Console
@@ -764,12 +766,40 @@ check_carts_dynamic_deps() {{
     return section.rstrip(), env_prefix
 
 
+def _arts_build_is_gasnet() -> bool:
+    """Return True when the active ARTS build uses the GASNet-EX transport.
+
+    Drives the GASNet/PMI-safe Slurm launch path (PMI spawner env + srun
+    --mpi=pmi2). Best-effort: if the build/transport cannot be detected, fall
+    back to the rsocket/TCP launch behavior.
+    """
+    try:
+        return arts_build_transport_kind() == TRANSPORT_GASNET
+    except Exception:
+        return False
+
+
+def _gasnet_environment_section() -> str:
+    # GASNet-EX multinode launch env (UCX/RoCE conduit + PMI spawner). The PMI
+    # spawner does the rank exchange through Slurm (srun --mpi=pmi2), so there is
+    # no ssh fan-out / TCP connect-back race; UCX_TLS selects RoCE RDMA. Mirrors
+    # docs/gasnet_slurm_launch.sh in the ARTS tree.
+    return """export GASNET_UCX_SPAWNER="${GASNET_UCX_SPAWNER:-pmi}"
+export UCX_TLS="${UCX_TLS:-rc,ud,sm,self}"
+export GASNET_TMPDIR="${GASNET_TMPDIR:-/tmp}"
+export GASNET_HOST_DETECT="${GASNET_HOST_DETECT:-hostname}"
+export GASNET_SUPERNODE_MAXSIZE="${GASNET_SUPERNODE_MAXSIZE:-1}"
+    """
+
+
 def _rdma_environment_section(config: SlurmJobConfig) -> str:
     if config.arts_config_path is None:
         return ""
     protocol = parse_arts_cfg(config.arts_config_path).get(KEY_PROTOCOL)
     if protocol != PROTOCOL_RDMA:
         return ""
+    if _arts_build_is_gasnet():
+        return _gasnet_environment_section()
     return """export ARTS_CONNECT_TIMEOUT_MS="${ARTS_CONNECT_TIMEOUT_MS:-10000}"
 export ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS="${ARTS_RDMA_ACCEPT_HELLO_TIMEOUT_MS:-10000}"
 export ARTS_RDMA_SEND_MAX_BYTES="${ARTS_RDMA_SEND_MAX_BYTES:-0}"
@@ -935,9 +965,16 @@ def generate_sbatch_script(
     )
     strict_preflight_default = True
 
-    # Build srun command: gdb, perf, or plain (mutually exclusive)
+    # Build srun command: gdb, perf, or plain (mutually exclusive). GASNet-built
+    # ARTS uses the PMI spawner for rank wireup, so multinode GASNet runs launch
+    # with --mpi=pmi2 (Slurm does the rank exchange; no ssh fan-out). rsocket/TCP
+    # builds keep the plain srun launch unchanged.
+    gasnet_launch = (
+        config.run_arts and config.node_count > 1 and _arts_build_is_gasnet()
+    )
+    mpi_flag = " --mpi=pmi2" if gasnet_launch else ""
     srun_prefix = (
-        f"srun --exclusive -N{config.node_count} --ntasks={config.node_count} "
+        f"srun --exclusive{mpi_flag} -N{config.node_count} --ntasks={config.node_count} "
         f"--ntasks-per-node=1 --cpus-per-task={cpus_per_task} "
         f"--cpu-bind={srun_cpu_bind} --kill-on-bad-exit=1"
     )

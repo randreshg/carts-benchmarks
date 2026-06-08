@@ -90,6 +90,48 @@ def active_arts_cmake_cache(carts_dir: Optional[Path] = None) -> Path:
     return paths.arts_build_dir / "CMakeCache.txt"
 
 
+def _cmake_cache_bool(line: str) -> Optional[bool]:
+    """Parse a CMakeCache ``KEY:TYPE=VALUE`` boolean, or None if unrecognized."""
+    value = line.split("=", 1)[-1].strip().upper()
+    if value in {"ON", "TRUE", "1", "YES"}:
+        return True
+    if value in {"OFF", "FALSE", "0", "NO"}:
+        return False
+    return None
+
+
+def arts_build_transport_kind(carts_dir: Optional[Path] = None) -> Optional[str]:
+    """Return the ARTS build data-plane transport from its CMakeCache.
+
+    One of the ``arts_config.TRANSPORT_*`` tokens ("gasnet", "rdma-rsocket",
+    "tcp"), or None when the cache is unavailable or records no transport.
+    GASNet takes precedence over RDMA because ``ARTS_USE_GASNET=ON`` overrides
+    ``ARTS_USE_RDMA`` in the ARTS CMake. This is the single source of truth for
+    build-transport detection shared by the local runner and the Slurm launcher.
+    """
+    # Imported lazily to keep this module import-light and avoid any import cycle.
+    from arts_config import TRANSPORT_GASNET, TRANSPORT_RSOCKET, TRANSPORT_TCP
+
+    cache = active_arts_cmake_cache(carts_dir)
+    if not cache.is_file():
+        return None
+
+    use_gasnet: Optional[bool] = None
+    use_rdma: Optional[bool] = None
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith("ARTS_USE_GASNET:"):
+            use_gasnet = _cmake_cache_bool(line)
+        elif line.startswith("ARTS_USE_RDMA:"):
+            use_rdma = _cmake_cache_bool(line)
+    if use_gasnet:
+        return TRANSPORT_GASNET
+    if use_rdma is True:
+        return TRANSPORT_RSOCKET
+    if use_rdma is False:
+        return TRANSPORT_TCP
+    return None
+
+
 def managed_runtime_library_dirs(carts_dir: Optional[Path] = None) -> List[Path]:
     """Return Dekk/CARTS-managed shared-library dirs needed by binaries."""
     root = (carts_dir or get_carts_dir()).resolve()

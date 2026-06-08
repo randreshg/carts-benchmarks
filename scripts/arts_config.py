@@ -79,6 +79,23 @@ SUPPORTED_PROTOCOLS = frozenset(
 )
 
 
+# Build-time ARTS data-plane transport kinds, as read from the ARTS CMakeCache
+# (ARTS_USE_GASNET / ARTS_USE_RDMA). These are distinct from the runtime
+# ``protocol`` field above: GASNet ignores ``protocol`` and uses its conduit.
+# They let reporting and rebuild decisions tell TCP, the legacy rsocket RDMA
+# path, and GASNet-EX apart instead of collapsing every accelerated path to
+# "rdma". The names mirror ``arts_transport_kind_name()`` in the ARTS runtime.
+TRANSPORT_TCP = "tcp"
+TRANSPORT_RSOCKET = "rdma-rsocket"
+TRANSPORT_GASNET = "gasnet"
+ACCELERATED_TRANSPORTS = frozenset((TRANSPORT_RSOCKET, TRANSPORT_GASNET))
+
+
+def transport_kind_is_accelerated(kind: Optional[str]) -> bool:
+    """Return whether a build transport kind is an accelerated (non-TCP) path."""
+    return kind in ACCELERATED_TRANSPORTS
+
+
 def protocol_for_rdma(enabled: bool) -> str:
     """Return the benchmark runtime protocol for an RDMA toggle."""
     return PROTOCOL_RDMA if enabled else PROTOCOL_TCP

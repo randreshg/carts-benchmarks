@@ -61,6 +61,8 @@ from arts_config import (
     KEY_WORKER_THREADS,
     PROTOCOL_RDMA,
     PROTOCOL_TCP,
+    TRANSPORT_GASNET,
+    transport_kind_is_accelerated,
     compile_args_for_node_count,
     get_cfg_int as get_arts_cfg_int,
     get_cfg_str as get_arts_cfg_str,
@@ -197,7 +199,11 @@ from metadata import (
     get_git_hash, get_compiler_version, get_cpu_info,
     get_reproducibility_metadata, _serialize_parallel_task_timing,
 )
-from carts_paths import active_arts_cmake_cache, active_install_dir, get_carts_dir
+from carts_paths import (
+    active_install_dir,
+    arts_build_transport_kind,
+    get_carts_dir,
+)
 
 
 # ============================================================================
@@ -224,21 +230,19 @@ def arts_runtime_is_installed(carts_dir: Optional[Path] = None) -> bool:
     return cmake_config.is_file() and public_header.is_file() and has_library
 
 
-def arts_runtime_uses_rdma(carts_dir: Optional[Path] = None) -> Optional[bool]:
-    """Return the ARTS build transport from CMakeCache, or None if unknown."""
-    root = carts_dir or get_carts_dir()
-    cache = active_arts_cmake_cache(root)
-    if not cache.is_file():
-        return None
+# Build-transport detection is owned by carts_paths.arts_build_transport_kind
+# (single source of truth, shared with the Slurm launcher).
+arts_runtime_transport_kind = arts_build_transport_kind
 
-    for line in cache.read_text(errors="ignore").splitlines():
-        if line.startswith("ARTS_USE_RDMA:"):
-            value = line.split("=", 1)[-1].strip().upper()
-            if value in {"ON", "TRUE", "1", "YES"}:
-                return True
-            if value in {"OFF", "FALSE", "0", "NO"}:
-                return False
-    return None
+
+def arts_runtime_uses_rdma(carts_dir: Optional[Path] = None) -> Optional[bool]:
+    """Return whether the ARTS build uses an accelerated transport (gasnet or
+    rsocket), False for TCP, or None if unknown. GASNet counts as accelerated
+    even though it sets ``ARTS_USE_RDMA=OFF``."""
+    kind = arts_runtime_transport_kind(carts_dir)
+    if kind is None:
+        return None
+    return transport_kind_is_accelerated(kind)
 
 
 BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
@@ -4842,13 +4846,21 @@ def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
         for count in node_counts
     )
     runtime_missing = not arts_runtime_is_installed()
-    runtime_rdma = arts_runtime_uses_rdma()
-    transport_unknown = uses_multinode and runtime_rdma is None
+    runtime_kind = arts_runtime_transport_kind()
+    runtime_accelerated = (
+        transport_kind_is_accelerated(runtime_kind)
+        if runtime_kind is not None
+        else None
+    )
+    transport_unknown = uses_multinode and runtime_kind is None
+    # A GASNet or rsocket build both satisfy an "accelerated" (rdma) request, so
+    # compare accelerated-ness rather than an exact rdma/tcp label — otherwise a
+    # GASNet build (ARTS_USE_RDMA=OFF) would look like a TCP mismatch and loop.
     transport_mismatch = (
         uses_multinode
         and not runtime_missing
-        and runtime_rdma is not None
-        and runtime_rdma != requested_rdma
+        and runtime_accelerated is not None
+        and runtime_accelerated != requested_rdma
     )
     if (
         not step_config.should_rebuild_arts
@@ -4862,8 +4874,10 @@ def _rebuild_arts_for_step(step_config: ResolvedStepConfig) -> None:
     elif transport_unknown:
         print_warning("ARTS runtime transport is unknown; forcing rebuild before benchmark step")
     elif transport_mismatch:
-        current = protocol_for_rdma(runtime_rdma)
-        requested = protocol_for_rdma(requested_rdma)
+        current = runtime_kind or "unknown"
+        requested = (
+            f"accelerated ({TRANSPORT_GASNET})" if requested_rdma else PROTOCOL_TCP
+        )
         print_warning(
             f"ARTS runtime transport is {current}; rebuilding for requested {requested}"
         )
