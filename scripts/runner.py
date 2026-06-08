@@ -671,7 +671,7 @@ def generate_arts_config(
         base_path, KEY_NODE_COUNT) or 1
     protocol = protocol_for_launcher(rdma, node_count, launcher)
 
-    # CLI --threads maps to ARTS worker_threads in the v2 runtime schema.
+    # CLI --threads maps to the ARTS worker_threads runtime field.
     content = _upsert_arts_cfg_value(content, KEY_WORKER_THREADS, threads)
     content = _upsert_arts_cfg_value(content, KEY_PROTOCOL, protocol)
 
