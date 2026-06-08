@@ -48,7 +48,7 @@ ARTS_RUNTIME_ENV := ARTS_CONFIG=$(ARTS_CFG)
 # Compile flags for carts compile (cgeist flags like --raise-scf-to-affine, -O0, -S are handled internally)
 normalize_path_flag = $(if $(filter -I%,$(1)),$(if $(filter -I/%,$(1)),$(1),-I$(abspath $(patsubst -I%,%,$(1)))),$(if $(filter -L%,$(1)),$(if $(filter -L/%,$(1)),$(1),-L$(abspath $(patsubst -L%,%,$(1)))),$(1)))
 EXECUTE_FLAGS := $(foreach flag,$(INCLUDES) $(CFLAGS),$(call normalize_path_flag,$(flag)))
-# Extra carts compile flags (e.g., --distributed-db)
+# Extra carts compile flags (e.g., --no-distributed-db)
 COMPILE_ARGS ?=
 
 # Fingerprint for ARTS builds: CFLAGS + arts.cfg content + COMPILE_ARGS.

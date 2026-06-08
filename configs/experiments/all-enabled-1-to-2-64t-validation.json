@@ -1,6 +1,6 @@
 {
   "name": "all-enabled-1-to-2-64t-validation",
-  "description": "Serial triage gate for every enabled CARTS benchmark: 64 threads, 1-node reference, 2-node baseline, then 2-node --distributed-db. Each job uses a 270 second process timeout plus a 5 minute SLURM wall cap so failures expose compiler/runtime/blocking work before the final megalarge campaign.",
+  "description": "Serial triage gate for every enabled CARTS benchmark: 64 threads, 1-node reference, 2-node baseline, then 2-node distributed. Each job uses a 270 second process timeout plus a 5 minute SLURM wall cap so failures expose compiler/runtime/blocking work before the final megalarge campaign.",
   "steps": [
     {
       "name": "single-node-reference",
@@ -21,6 +21,7 @@
         "polybench/correlation",
         "polybench/gemm",
         "polybench/jacobi2d",
+        "polybench/seidel-2d",
         "seissol/volume-integral",
         "specfem3d/stress",
         "specfem3d/velocity",
@@ -57,6 +58,7 @@
         "polybench/correlation",
         "polybench/gemm",
         "polybench/jacobi2d",
+        "polybench/seidel-2d",
         "seissol/volume-integral",
         "specfem3d/stress",
         "specfem3d/velocity",
@@ -68,6 +70,7 @@
       "nodes": "2",
       "launcher": "slurm",
       "rdma": true,
+      "compile_args": "--no-distributed-db",
       "runs": 1,
       "warmup_runs": 0,
       "perf": false,
@@ -93,6 +96,7 @@
         "polybench/correlation",
         "polybench/gemm",
         "polybench/jacobi2d",
+        "polybench/seidel-2d",
         "seissol/volume-integral",
         "specfem3d/stress",
         "specfem3d/velocity",
@@ -104,7 +108,7 @@
       "nodes": "2",
       "launcher": "slurm",
       "rdma": true,
-      "compile_args": "--distributed-db",
+      "compile_args": null,
       "runs": 1,
       "warmup_runs": 0,
       "perf": false,

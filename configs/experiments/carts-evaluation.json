@@ -1,6 +1,6 @@
 {
   "name": "carts-evaluation",
-  "description": "Full CARTS evaluation: single-node thread sweep with OpenMP comparison, plus multinode extralarge node sweeps across TCP/RDMA x with/without --distributed-db. Step order minimizes ARTS rebuilds (RDMA is flipped exactly once).",
+  "description": "Full CARTS evaluation: single-node thread sweep with OpenMP comparison, plus multinode extralarge node sweeps across TCP/GASNet with distributed default and monolithic baseline variants. Step order minimizes ARTS rebuilds.",
   "steps": [
     {
       "name": "single-node-thread-sweep",
@@ -18,17 +18,18 @@
       "threads": "64",
       "nodes": "1,2,4,8,16,32,64",
       "rdma": false,
+      "compile_args": "--no-distributed-db",
       "runs": 3,
       "timeout": 1200
     },
     {
       "name": "multinode-tcp-ddb",
-      "description": "Multinode TCP node sweep, 64 threads/node, with --distributed-db (auto-stripped at 1 node).",
+      "description": "Multinode TCP node sweep, 64 threads/node, with default distributed compilation.",
       "size": "extralarge",
       "threads": "64",
       "nodes": "1,2,4,8,16,32,64",
       "rdma": false,
-      "compile_args": "--distributed-db",
+      "compile_args": null,
       "runs": 3,
       "timeout": 1200
     },
@@ -39,17 +40,18 @@
       "threads": "64",
       "nodes": "1,2,4,8,16,32,64",
       "rdma": true,
+      "compile_args": "--no-distributed-db",
       "runs": 3,
       "timeout": 1200
     },
     {
       "name": "multinode-rdma-ddb",
-      "description": "Multinode RDMA node sweep, 64 threads/node, with --distributed-db (auto-stripped at 1 node).",
+      "description": "Multinode GASNet node sweep, 64 threads/node, with default distributed compilation.",
       "size": "extralarge",
       "threads": "64",
       "nodes": "1,2,4,8,16,32,64",
       "rdma": true,
-      "compile_args": "--distributed-db",
+      "compile_args": null,
       "runs": 3,
       "timeout": 1200
     }

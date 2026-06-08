@@ -1,6 +1,6 @@
 {
   "name": "gemm-8n-pinpoint",
-  "description": "Minimal 8-node reproduction for GEMM extralarge at 64 threads: baseline vs distributed-db.",
+  "description": "Minimal 8-node reproduction for GEMM extralarge at 64 threads: baseline vs distributed.",
   "steps": [
     {
       "name": "8n-baseline",
@@ -11,7 +11,8 @@
       "debug": 2,
       "runs": 1,
       "perf": false,
-      "profile": "profile-workload.cfg"
+      "profile": "profile-workload.cfg",
+      "compile_args": "--no-distributed-db"
     },
     {
       "name": "8n-distributed-db",
@@ -23,7 +24,7 @@
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg",
-      "compile_args": "--distributed-db"
+      "compile_args": null
     }
   ]
 }

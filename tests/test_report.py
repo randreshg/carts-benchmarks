@@ -313,7 +313,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 nodes=2,
                 arts_e2e=110.0,
                 omp_e2e=None,
-                compile_args="--distributed-db",
                 artifacts=dist_2_artifacts,
             ),
             self._make_result(
@@ -323,7 +322,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 nodes=4,
                 arts_e2e=50.0,
                 omp_e2e=None,
-                compile_args="--distributed-db",
                 artifacts=dist_4_artifacts,
             ),
         ]
@@ -354,7 +352,6 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
                 nodes="2,4",
                 runs=1,
                 profile="profile-overhead.cfg",
-                compile_args="--distributed-db",
             ),
         ]
         setattr(steps[0], "_experiment_name", "report-fixture")
@@ -524,10 +521,7 @@ class BenchmarkReportWorkbookTest(unittest.TestCase):
         )
         self.assertEqual(_phase_variant("overhead-counters-baseline-mid-high", None), "baseline")
         self.assertEqual(_phase_variant("overhead-counters-ddb-mid-high", None), "distributed-db")
-        self.assertEqual(
-            _phase_variant("overhead-counters-mid-high", "--distributed-db"),
-            "distributed-db",
-        )
+        self.assertIsNone(_phase_variant("overhead-counters-mid-high", "--foo"))
 
     def test_generate_report_from_local_result_schema(self) -> None:
         report_path = generate_report_from_rows(

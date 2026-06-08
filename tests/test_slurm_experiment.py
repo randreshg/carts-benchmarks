@@ -693,7 +693,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             self.assertIn(runtime_lib_dir.resolve(), runtime_dirs)
             self.assertEqual(alpha_run_config["arts_transport"], PROTOCOL_TCP)
 
-    def test_single_node_slurm_dry_run_uses_tcp_and_strips_distributed_db(self) -> None:
+    def test_single_node_slurm_dry_run_uses_tcp_and_rejects_removed_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bench_root = root / "benchmarks"
@@ -748,37 +748,10 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 command_str="test",
             )
 
-            SlurmBatchExecutor(host, request, deps).execute()
+            with self.assertRaises(ValueError):
+                SlurmBatchExecutor(host, request, deps).execute()
 
-            run_config = json.loads(
-                (
-                    am.experiment_dir
-                    / "single"
-                    / "suite"
-                    / "a"
-                    / "1t_1n"
-                    / "run_1"
-                    / "run_config.json"
-                ).read_text()
-            )
-            arts_cfg = (
-                am.experiment_dir
-                / "single"
-                / "suite"
-                / "a"
-                / "1t_1n"
-                / "artifacts"
-                / "arts.cfg"
-            )
-            self.assertEqual(run_config["arts_transport"], PROTOCOL_TCP)
-            self.assertNotIn("compile_args", run_config)
-            self.assertEqual(parse_arts_cfg(arts_cfg)[KEY_PROTOCOL], PROTOCOL_TCP)
-            arts_builds = [
-                call for call in host.build_calls if call["variant"] == "arts"
-            ]
-            self.assertEqual(arts_builds[0]["compile_args"], None)
-
-    def test_distributed_db_dry_run_is_node_specific_without_benchmark_special_case(self) -> None:
+    def test_distributed_default_dry_run_is_node_specific_without_benchmark_special_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bench_root = root / "benchmarks"
@@ -818,7 +791,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 no_build=False,
                 verbose=False,
                 cflags=None,
-                compile_args="--distributed-db",
+                compile_args=None,
                 gdb=False,
                 profile=None,
                 perf=False,
@@ -828,7 +801,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 nodelist=None,
                 rdma=False,
                 artifact_manager=am,
-                step_name="distributed-db-writer-reader",
+                step_name="distributed-writer-reader",
                 report_steps=None,
                 command_str="test",
             )
@@ -838,7 +811,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             single_config = json.loads(
                 (
                     am.experiment_dir
-                    / "distributed-db-writer-reader"
+                    / "distributed-writer-reader"
                     / "suite"
                     / "writer-reader"
                     / "1t_1n"
@@ -849,7 +822,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             multinode_config = json.loads(
                 (
                     am.experiment_dir
-                    / "distributed-db-writer-reader"
+                    / "distributed-writer-reader"
                     / "suite"
                     / "writer-reader"
                     / "1t_2n"
@@ -860,11 +833,11 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             script = (
                 am.experiment_dir
                 / "scripts"
-                / "distributed-db-writer-reader__suite_writer-reader_1t_2n_run1.sbatch"
+                / "distributed-writer-reader__suite_writer-reader_1t_2n_run1.sbatch"
             ).read_text()
 
             self.assertNotIn("compile_args", single_config)
-            self.assertEqual(multinode_config["compile_args"], "--distributed-db")
+            self.assertNotIn("compile_args", multinode_config)
             self.assertEqual(multinode_config["nodes"], 2)
             self.assertEqual(multinode_config["arts_transport"], PROTOCOL_TCP)
             self.assertNotIn("reference", multinode_config)
@@ -876,7 +849,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 for call in host.build_calls
                 if call["variant"] == "arts"
             ]
-            self.assertEqual(arts_build_args, [None, "--distributed-db"])
+            self.assertEqual(arts_build_args, [None, None])
 
     def test_slurm_build_cache_tracks_effective_compile_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -912,7 +885,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 no_build=False,
                 verbose=False,
                 cflags=None,
-                compile_args="--distributed-db",
+                compile_args="--no-distributed-db",
                 gdb=False,
                 profile=None,
                 perf=False,
@@ -957,7 +930,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             ]
             self.assertEqual(
                 [call["compile_args"] for call in arts_builds],
-                ["--distributed-db", None],
+                ["--no-distributed-db", None],
             )
 
     def test_multinode_dry_run_is_arts_only_without_openmp_reference(self) -> None:

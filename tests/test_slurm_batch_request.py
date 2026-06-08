@@ -261,7 +261,7 @@ class SlurmBatchRequestConstructionTest(unittest.TestCase):
         rebuild.assert_called_once()
         self.assertTrue(rebuild.call_args.kwargs["rdma"])
         self.assertIn(
-            "ARTS runtime transport is tcp; rebuilding for requested rdma",
+            "ARTS runtime transport is tcp; rebuilding for requested accelerated (gasnet)",
             print_warning.call_args.args[0],
         )
 

@@ -77,16 +77,15 @@ carts benchmarks run [BENCHMARKS...] [OPTIONS]
 | `--weak-scaling` | | Enable weak scaling (auto-scale problem size) |
 | `--base-size` | | Base problem size for weak scaling |
 | `--arts-config` | | Custom arts.cfg file |
-| `--rdma/--no-rdma` | | Use RDMA/RoCE RSockets transport for multinode configs by default; opt out with `--no-rdma` for TCP fallback |
+| `--rdma/--no-rdma` | | Use the GASNet-EX production transport for multinode configs by default; opt out with `--no-rdma` for TCP fallback |
 
 ARTS rebuild notes:
 - Runner `--debug` controls benchmark-runner verbosity only: `0`=quiet, `1`=show commands, `2`=verbose console output.
 - Experiment-step `debug` values are raw ARTS runtime levels when a step rebuilds ARTS: `0`=errors only, `1`=warnings, `2`=info, `3`=debug.
 - Single-node benchmark configs use TCP. Multinode benchmark configs default to
-  RDMA/RoCE; use `--no-rdma` for multinode TCP fallback experiments.
-- `--distributed-db` is a multinode ownership mode. The runner strips that
-  compile arg from single-node benchmark builds, including the 1-node row of a
-  mixed node sweep.
+  GASNet-EX; use `--no-rdma` for multinode TCP fallback experiments.
+- Multinode `-O3` uses distributed DB ownership by default. Use
+  `--compile-args '--no-distributed-db'` only for the monolithic baseline.
 - If the installed ARTS runtime is missing, the benchmark runner now forces `carts build --arts` before executing the step, even when the step did not explicitly request a rebuild.
 - If the installed runtime transport is unknown, the runner rebuilds ARTS before the step. If the installed transport is known but does not match the requested benchmark transport, the runner fails early unless the step already requests an ARTS rebuild through a profile or ARTS debug setting.
 
@@ -187,8 +186,8 @@ carts benchmarks run polybench/gemm --threads 4 --nodes 2 --no-rdma
 
 Use the serial gate while compiler/runtime optimization work is still active.
 It runs one benchmark at a time, one phase at a time, at 64 threads and
-`size=extralarge`: 1-node reference, 2-node baseline, then 2-node
-`--distributed-db`. Each SLURM job uses a 270 second process timeout and a
+`size=extralarge`: 1-node reference, 2-node monolithic baseline, then 2-node
+distributed default. Each SLURM job uses a 270 second process timeout and a
 5 minute wall cap. The driver stops at the first failed phase, runtime warning,
 timeout-budget violation, or 1-node to 2-node non-scaling result.
 
@@ -210,7 +209,8 @@ For harness validation without submitting jobs:
 The checked-in `all-enabled-megalarge` experiment is the final
 single-node-to-multinode scaffold for every currently enabled benchmark. It
 uses `size=megalarge`, 64 worker threads per node, one single-node reference
-step, and paired RDMA multinode sweeps with and without `--distributed-db`.
+step, and paired GASNet multinode sweeps with default distribution and the
+monolithic baseline.
 
 Keep this as the final campaign. During optimization, run the serial 1-to-2
 gate first so failures are fixed one at a time before the broad megalarge

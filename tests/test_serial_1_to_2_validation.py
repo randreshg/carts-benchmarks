@@ -31,7 +31,7 @@ class SerialOneToTwoValidationTest(unittest.TestCase):
             timeout=270,
             runs=1,
             rdma=True,
-            compile_args="--distributed-db",
+            compile_args=None,
         )
 
         command = phase_command(
@@ -54,7 +54,7 @@ class SerialOneToTwoValidationTest(unittest.TestCase):
         self.assertEqual(command[command.index("--nodes") + 1], "2")
         self.assertEqual(command[command.index("--timeout") + 1], "270")
         self.assertEqual(command[command.index("--time-limit") + 1], "00:05:00")
-        self.assertIn("--distributed-db", command)
+        self.assertNotIn("--compile-args", command)
         self.assertIn("--quiet", command)
 
     def test_summarize_phase_fails_on_runtime_warning(self) -> None:

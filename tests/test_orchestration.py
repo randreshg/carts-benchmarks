@@ -73,7 +73,7 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             threads="4,8",
             nodes="2",
             cflags="-DTEST=1",
-            compile_args="--distributed-db",
+            compile_args="--no-distributed-db",
             exclude_nodes="j001",
             nodelist="b05u[01,07]",
             arts_config=arts_cfg,
@@ -95,7 +95,7 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             perf=True,
             perf_interval=0.5,
             cflags="-DTEST=1",
-            compile_args="--distributed-db",
+            compile_args="--no-distributed-db",
             debug=2,
             exclude_nodes="j001",
             nodelist="b05u[01,07]",
@@ -116,7 +116,7 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
         self.assertEqual(resolved.bench_list, ["polybench/gemm"])
         self.assertEqual(resolved.threads_list, [4, 8])
         self.assertEqual(resolved.node_counts, [2])
-        self.assertEqual(resolved.compile_args, "--distributed-db")
+        self.assertEqual(resolved.compile_args, "--no-distributed-db")
         self.assertEqual(resolved.nodelist, "b05u[01,07]")
         self.assertEqual(resolved.launcher, "slurm")
         self.assertEqual(resolved.arts_config, arts_cfg.resolve())
@@ -418,7 +418,7 @@ class BenchmarkOrchestrationTest(unittest.TestCase):
             perf=False,
             perf_interval=0.1,
             cflags=None,
-            compile_args="--distributed-db",
+            compile_args="--no-distributed-db",
             debug=0,
             exclude_nodes=None,
             nodelist=None,

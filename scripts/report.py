@@ -554,7 +554,6 @@ def _phase_variant(phase: Any, compile_args: Any) -> Optional[str]:
         phase_name.endswith("-distributed-db")
         or "-distributed-db-" in phase_name
         or "-ddb-" in phase_name
-        or compile_text == "--distributed-db"
     ):
         return "distributed-db"
     if phase_name.endswith("-baseline") or "-baseline-" in phase_name or not compile_text:
@@ -3748,7 +3747,7 @@ def _write_report(
         sheet_specs.append(
             (
                 "DistributedDbDelta",
-                "Baseline vs --distributed-db deltas, including balance and communication counters.",
+                "Baseline vs distributed-default deltas, including balance and communication counters.",
                 "Use this to decide whether distributed DB helps for a given node count.",
             )
         )

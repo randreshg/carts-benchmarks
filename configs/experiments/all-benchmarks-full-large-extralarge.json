@@ -31,7 +31,8 @@
       "nodes": "1,2,4,8,16,32,64",
       "debug": 0,
       "runs": 5,
-      "perf": false
+      "perf": false,
+      "compile_args": "--no-distributed-db"
     },
     {
       "name": "node-sweep-distributed-db",
@@ -42,7 +43,7 @@
       "debug": 0,
       "runs": 5,
       "perf": false,
-      "compile_args": "--distributed-db"
+      "compile_args": null
     },
     {
       "name": "multinode-overhead-baseline",
@@ -53,7 +54,8 @@
       "debug": 0,
       "runs": 5,
       "perf": false,
-      "profile": "profile-overhead.cfg"
+      "profile": "profile-overhead.cfg",
+      "compile_args": "--no-distributed-db"
     },
     {
       "name": "multinode-overhead-distributed-db",
@@ -65,7 +67,7 @@
       "runs": 5,
       "perf": false,
       "profile": "profile-overhead.cfg",
-      "compile_args": "--distributed-db"
+      "compile_args": null
     }
   ]
 }

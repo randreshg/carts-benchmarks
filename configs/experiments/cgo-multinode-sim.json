@@ -10,7 +10,7 @@
       "nodes": "2,4",
       "launcher": "slurm",
       "rdma": false,
-      "compile_args": "--distributed-db",
+      "compile_args": null,
       "runs": 3,
       "perf": false,
       "profile": "profile-timing.cfg",

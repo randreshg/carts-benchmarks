@@ -1,6 +1,6 @@
 {
   "name": "gemm-multinode-extralarge",
-  "description": "GEMM node sweep (1..64) baseline vs distributed-db. Run with --size extralarge.",
+  "description": "GEMM node sweep (1..64) baseline vs distributed. Run with --size extralarge.",
   "steps": [
     {
       "name": "node-sweep-without-distributed-db",
@@ -11,7 +11,8 @@
       "debug": 0,
       "runs": 1,
       "perf": false,
-      "profile": "profile-workload.cfg"
+      "profile": "profile-workload.cfg",
+      "compile_args": "--no-distributed-db"
     },
     {
       "name": "node-sweep-distributed-db",
@@ -23,7 +24,7 @@
       "runs": 1,
       "perf": false,
       "profile": "profile-workload.cfg",
-      "compile_args": "--distributed-db"
+      "compile_args": null
     }
   ]
 }

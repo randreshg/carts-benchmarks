@@ -132,7 +132,8 @@ class ExperimentConfigTest(unittest.TestCase):
         self.assertEqual(payload["steps"][0]["nodes"], "1")
         self.assertEqual(payload["steps"][1]["nodes"], "1,2,4,8")
         self.assertEqual(payload["steps"][2]["nodes"], "1,2,4,8")
-        self.assertEqual(payload["steps"][2]["compile_args"], "--distributed-db")
+        self.assertEqual(payload["steps"][1]["compile_args"], "--no-distributed-db")
+        self.assertIsNone(payload["steps"][2]["compile_args"])
 
     def test_all_enabled_megalarge_dry_run_job_shape_is_stable(self) -> None:
         payload = json.loads((CONFIG_DIR / "all-enabled-megalarge.json").read_text())
@@ -156,7 +157,8 @@ class ExperimentConfigTest(unittest.TestCase):
         self.assertEqual(sum(jobs_by_step.values()), len(enabled) * 9)
 
         distributed = payload["steps"][2]
-        self.assertEqual(distributed["compile_args"], "--distributed-db")
+        self.assertEqual(payload["steps"][1]["compile_args"], "--no-distributed-db")
+        self.assertIsNone(distributed["compile_args"])
         self.assertIn(1, _node_count_list(distributed))
         self.assertGreater(max(_node_count_list(distributed)), 1)
 
@@ -191,7 +193,8 @@ class ExperimentConfigTest(unittest.TestCase):
         self.assertEqual(payload["steps"][0]["nodes"], "1")
         self.assertEqual(payload["steps"][1]["nodes"], "2")
         self.assertEqual(payload["steps"][2]["nodes"], "2")
-        self.assertEqual(payload["steps"][2]["compile_args"], "--distributed-db")
+        self.assertEqual(payload["steps"][1]["compile_args"], "--no-distributed-db")
+        self.assertIsNone(payload["steps"][2]["compile_args"])
 
         jobs_by_step = {
             step["name"]: len(step["benchmarks"])
@@ -315,7 +318,8 @@ class ExperimentConfigTest(unittest.TestCase):
         self.assertEqual(payload["steps"][0]["nodes"], "1")
         self.assertEqual(payload["steps"][1]["nodes"], "1,2")
         self.assertEqual(payload["steps"][2]["nodes"], "1,2")
-        self.assertEqual(payload["steps"][2]["compile_args"], "--distributed-db")
+        self.assertEqual(payload["steps"][1]["compile_args"], "--no-distributed-db")
+        self.assertIsNone(payload["steps"][2]["compile_args"])
 
     def test_scalability_experiments_do_not_require_perf(self) -> None:
         for config_name in NO_PERF_SCALABILITY_CONFIGS:

@@ -7,7 +7,6 @@ Key names mirror the authoritative ``config_entries[]`` table in
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shlex
 from pathlib import Path
@@ -127,27 +126,19 @@ def compile_args_for_node_count(
     compile_args: Optional[str],
     node_count: int,
 ) -> Optional[str]:
-    """Remove multinode-only compiler flags for single-node benchmark builds.
-
-    Set CARTS_KEEP_DISTRIBUTED_DB_1N=1 to disable stripping --distributed-db at
-    1n. Needed for apples-to-apples 1n vs 2n scaling comparisons where both
-    runs must take the same compile path.
-    """
+    """Validate compile arguments for a benchmark node count."""
     if not compile_args:
-        return compile_args
-    if node_count > 1:
-        return compile_args
-    if os.environ.get("CARTS_KEEP_DISTRIBUTED_DB_1N", "").strip() in {"1", "true", "yes"}:
         return compile_args
 
     try:
         tokens = shlex.split(compile_args)
     except ValueError:
         tokens = compile_args.split()
-    filtered = [token for token in tokens if token != "--distributed-db"]
-    if not filtered:
-        return None
-    return shlex.join(filtered)
+    if "--distributed-db" in tokens:
+        raise ValueError(
+            "--distributed-db was removed; multinode -O3 is distributed by default"
+        )
+    return compile_args
 
 EMBEDDED_KEYS: List[str] = [
     KEY_WORKER_THREADS,

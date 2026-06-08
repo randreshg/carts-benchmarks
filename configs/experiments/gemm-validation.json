@@ -22,7 +22,8 @@
       "debug": 0,
       "runs": 1,
       "perf": false,
-      "timeout": 900
+      "timeout": 900,
+      "compile_args": "--no-distributed-db"
     },
     {
       "name": "one-to-two-distributed-db",
@@ -34,7 +35,7 @@
       "runs": 1,
       "perf": false,
       "timeout": 900,
-      "compile_args": "--distributed-db"
+      "compile_args": null
     }
   ]
 }

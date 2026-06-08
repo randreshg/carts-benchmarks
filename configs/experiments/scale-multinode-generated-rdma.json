@@ -28,7 +28,7 @@
       "runs": 1,
       "rdma": true,
       "perf": false,
-      "compile_args": "--distributed-db",
+      "compile_args": null,
       "timeout": 1200
     }
   ]

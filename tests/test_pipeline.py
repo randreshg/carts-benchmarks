@@ -597,15 +597,18 @@ class BenchmarkPipelineTest(unittest.TestCase):
                 rdma_cfg.unlink(missing_ok=True)
                 tcp_cfg.unlink(missing_ok=True)
 
-    def test_single_node_compile_args_strip_distributed_db(self) -> None:
-        self.assertIsNone(compile_args_for_node_count("--distributed-db", 1))
+    def test_compile_args_reject_removed_distributed_flag(self) -> None:
+        with self.assertRaises(ValueError):
+            compile_args_for_node_count("--distributed-db", 1)
+        with self.assertRaises(ValueError):
+            compile_args_for_node_count("--distributed-db --foo=bar", 2)
         self.assertEqual(
-            compile_args_for_node_count("--distributed-db --foo=bar", 1),
-            "--foo=bar",
+            compile_args_for_node_count("--no-distributed-db --foo=bar", 1),
+            "--no-distributed-db --foo=bar",
         )
         self.assertEqual(
-            compile_args_for_node_count("--distributed-db --foo=bar", 2),
-            "--distributed-db --foo=bar",
+            compile_args_for_node_count("--foo=bar", 2),
+            "--foo=bar",
         )
 
     def test_size_build_passes_user_cflags_as_extra_cflags(self) -> None:
@@ -639,7 +642,7 @@ class BenchmarkPipelineTest(unittest.TestCase):
                     "extralarge",
                     arts_config=cfg,
                     cflags="-DNREPS=1",
-                    compile_args="--distributed-db",
+                    compile_args="--no-distributed-db",
                     build_output_dir=build_dir,
                 )
 
