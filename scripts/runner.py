@@ -5233,6 +5233,8 @@ def run(
         command=command_str,
         mode="slurm" if slurm else "local",
         cwd=Path.cwd(),
+        node_lock=not slurm,
+        results_lock=not slurm,
     )
     try:
         run_locks.acquire()

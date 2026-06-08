@@ -232,6 +232,19 @@ carts benchmarks run --experiment all-enabled-megalarge \
     --results-dir external/carts-benchmarks/results/megalarge-final
 ```
 
+### SLURM Concurrency
+
+Local benchmark execution keeps a host-wide run lock so multiple local runs do
+not compete for login-node CPU and benchmark output paths. SLURM execution does
+not take that host lock: each driver creates a timestamped experiment directory
+and submits compute work to the scheduler. Use `--max-jobs N` to cap the number
+of active SLURM jobs for one driver; independent worktrees may submit their own
+SLURM-backed runs at the same time.
+
+Avoid running two drivers in the same worktree when either one may rebuild ARTS
+with a different profile, debug level, or transport. Build the worktree runtime
+once first, then launch Slurm benchmark runs.
+
 ### Multiple Runs for Statistics
 
 ```bash

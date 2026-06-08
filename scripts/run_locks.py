@@ -167,6 +167,7 @@ class BenchmarkRunLocks:
     mode: str
     cwd: Path
     node_lock: bool = True
+    results_lock: bool = True
     node_lock_dir: Optional[Path] = None
     _locks: List[_AtomicRunLock] = field(default_factory=list, init=False)
     _atexit_registered: bool = field(default=False, init=False)
@@ -193,13 +194,14 @@ class BenchmarkRunLocks:
                     metadata=metadata,
                 )
             )
-        requested.append(
-            _AtomicRunLock(
-                path=self.results_dir / RESULTS_LOCK_FILENAME,
-                scope="this results directory",
-                metadata=metadata,
+        if self.results_lock:
+            requested.append(
+                _AtomicRunLock(
+                    path=self.results_dir / RESULTS_LOCK_FILENAME,
+                    scope="this results directory",
+                    metadata=metadata,
+                )
             )
-        )
 
         acquired: List[_AtomicRunLock] = []
         try:
