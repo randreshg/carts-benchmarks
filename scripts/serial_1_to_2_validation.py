@@ -297,7 +297,7 @@ def check_scaling(
         return "missing single-node reference timing"
 
     failures: list[str] = []
-    for phase_name in ("two-node-baseline", "two-node-distributed-db"):
+    for phase_name in ("two-node-distributed-db",):
         candidate = by_phase.get(phase_name)
         if candidate is None or candidate.metric_time_sec is None:
             failures.append(f"{phase_name}: missing 2-node timing")

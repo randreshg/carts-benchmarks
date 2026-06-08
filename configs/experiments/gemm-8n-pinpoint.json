@@ -3,20 +3,10 @@
   "description": "Minimal 8-node reproduction for GEMM extralarge at 64 threads: baseline vs distributed.",
   "steps": [
     {
-      "name": "8n-baseline",
-      "benchmarks": ["polybench/gemm"],
-      "size": "extralarge",
-      "threads": "64",
-      "nodes": "8",
-      "debug": 2,
-      "runs": 1,
-      "perf": false,
-      "profile": "profile-workload.cfg",
-      "compile_args": "--no-distributed-db"
-    },
-    {
       "name": "8n-distributed-db",
-      "benchmarks": ["polybench/gemm"],
+      "benchmarks": [
+        "polybench/gemm"
+      ],
       "size": "extralarge",
       "threads": "64",
       "nodes": "8",

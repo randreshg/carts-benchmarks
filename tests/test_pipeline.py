@@ -597,15 +597,13 @@ class BenchmarkPipelineTest(unittest.TestCase):
                 rdma_cfg.unlink(missing_ok=True)
                 tcp_cfg.unlink(missing_ok=True)
 
-    def test_compile_args_reject_removed_distributed_flag(self) -> None:
+    def test_compile_args_reject_removed_distribution_flags(self) -> None:
         with self.assertRaises(ValueError):
             compile_args_for_node_count("--distributed-db", 1)
         with self.assertRaises(ValueError):
             compile_args_for_node_count("--distributed-db --foo=bar", 2)
-        self.assertEqual(
-            compile_args_for_node_count("--no-distributed-db --foo=bar", 1),
-            "--no-distributed-db --foo=bar",
-        )
+        with self.assertRaises(ValueError):
+            compile_args_for_node_count("--no-distributed-db --foo=bar", 1)
         self.assertEqual(
             compile_args_for_node_count("--foo=bar", 2),
             "--foo=bar",
@@ -642,7 +640,7 @@ class BenchmarkPipelineTest(unittest.TestCase):
                     "extralarge",
                     arts_config=cfg,
                     cflags="-DNREPS=1",
-                    compile_args="--no-distributed-db",
+                    compile_args=None,
                     build_output_dir=build_dir,
                 )
 

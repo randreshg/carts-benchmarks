@@ -885,7 +885,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
                 no_build=False,
                 verbose=False,
                 cflags=None,
-                compile_args="--no-distributed-db",
+                compile_args=None,
                 gdb=False,
                 profile=None,
                 perf=False,
@@ -930,7 +930,7 @@ class SlurmExperimentHelpersTest(unittest.TestCase):
             ]
             self.assertEqual(
                 [call["compile_args"] for call in arts_builds],
-                ["--no-distributed-db", None],
+                [None],
             )
 
     def test_multinode_dry_run_is_arts_only_without_openmp_reference(self) -> None:

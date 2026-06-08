@@ -14,18 +14,6 @@
       "timeout": 900
     },
     {
-      "name": "one-to-two-baseline",
-      "size": "extralarge",
-      "threads": "64",
-      "nodes": "1,2",
-      "rdma": true,
-      "debug": 0,
-      "runs": 1,
-      "perf": false,
-      "timeout": 900,
-      "compile_args": "--no-distributed-db"
-    },
-    {
       "name": "one-to-two-distributed-db",
       "size": "extralarge",
       "threads": "64",

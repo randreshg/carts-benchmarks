@@ -3,17 +3,6 @@
   "description": "Full 64-node x 64-worker Slurm/RDMA sweep across all benchmarks at extralarge size, baseline + distributed, with overhead counters.",
   "steps": [
     {
-      "name": "64n-baseline",
-      "size": "extralarge",
-      "threads": "64",
-      "nodes": "64",
-      "runs": 1,
-      "rdma": true,
-      "perf": false,
-      "compile_args": "--no-distributed-db",
-      "timeout": 1200
-    },
-    {
       "name": "64n-distributed-db",
       "size": "extralarge",
       "threads": "64",
@@ -22,18 +11,6 @@
       "rdma": true,
       "perf": false,
       "compile_args": null,
-      "timeout": 1200
-    },
-    {
-      "name": "64n-overhead-baseline",
-      "size": "extralarge",
-      "threads": "64",
-      "nodes": "64",
-      "runs": 1,
-      "rdma": true,
-      "perf": false,
-      "profile": "profile-overhead.cfg",
-      "compile_args": "--no-distributed-db",
       "timeout": 1200
     },
     {

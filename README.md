@@ -84,8 +84,8 @@ ARTS rebuild notes:
 - Experiment-step `debug` values are raw ARTS runtime levels when a step rebuilds ARTS: `0`=errors only, `1`=warnings, `2`=info, `3`=debug.
 - Single-node benchmark configs use TCP. Multinode benchmark configs default to
   GASNet-EX; use `--no-rdma` for multinode TCP fallback experiments.
-- Multinode `-O3` uses distributed DB ownership by default. Use
-  `--compile-args '--no-distributed-db'` only for the monolithic baseline.
+- Multinode `-O3` uses distributed DB ownership by default and has no
+  distribution compiler toggle.
 - If the installed ARTS runtime is missing, the benchmark runner now forces `carts build --arts` before executing the step, even when the step did not explicitly request a rebuild.
 - If the installed runtime transport is unknown, the runner rebuilds ARTS before the step. If the installed transport is known but does not match the requested benchmark transport, the runner fails early unless the step already requests an ARTS rebuild through a profile or ARTS debug setting.
 

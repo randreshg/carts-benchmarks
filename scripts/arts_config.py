@@ -134,9 +134,11 @@ def compile_args_for_node_count(
         tokens = shlex.split(compile_args)
     except ValueError:
         tokens = compile_args.split()
-    if "--distributed-db" in tokens:
+    removed = {"--distributed-db", "--no-distributed-db"}
+    if any(token in removed for token in tokens):
         raise ValueError(
-            "--distributed-db was removed; multinode -O3 is distributed by default"
+            "distributed DB compiler toggles were removed; multinode -O3 is "
+            "distributed by default"
         )
     return compile_args
 

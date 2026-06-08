@@ -101,7 +101,7 @@ class SerialOneToTwoValidationTest(unittest.TestCase):
         self.assertEqual(result.metric_time_sec, 12.5)
         self.assertTrue(result.runtime_warning)
 
-    def test_scaling_check_requires_both_two_node_phases(self) -> None:
+    def test_scaling_check_requires_two_node_distributed_phase(self) -> None:
         rows = [
             PhaseResult(
                 benchmark="polybench/gemm",
@@ -113,23 +113,16 @@ class SerialOneToTwoValidationTest(unittest.TestCase):
             ),
             PhaseResult(
                 benchmark="polybench/gemm",
-                phase="two-node-baseline",
-                status="pass",
-                metric_time_sec=80.0,
-                result_dir=Path("base"),
-                results_json=None,
-            ),
-            PhaseResult(
-                benchmark="polybench/gemm",
                 phase="two-node-distributed-db",
                 status="pass",
-                metric_time_sec=40.0,
+                metric_time_sec=80.0,
                 result_dir=Path("ddb"),
                 results_json=None,
             ),
         ]
 
         self.assertIsNotNone(check_scaling("polybench/gemm", rows, 1.5))
+        rows[1].metric_time_sec = 40.0
         self.assertIsNone(check_scaling("polybench/gemm", rows, 1.2))
 
 
