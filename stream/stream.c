@@ -120,7 +120,9 @@ int main(void) {
     times_triad[k] = carts_bench_get_time() - times_triad[k];
   }
 
-  /* Print per-kernel timing (parsed by Python framework) */
+  /* Per-operation min-time diagnostics. The prefix must not be `kernel.`: the
+   * runner sums every `kernel.*` line into one kernel time, so these would be
+   * double-counted on top of the single `kernel.stream` wall-clock. */
   const char *kernel_names[NUM_KERNELS] = {"copy", "scale", "add", "triad"};
   double *times_arr[NUM_KERNELS] = {times_copy, times_scale, times_add, times_triad};
   for (int j = 0; j < NUM_KERNELS; j++) {
@@ -128,7 +130,7 @@ int main(void) {
     for (int k = 1; k < ntimes; k++) {
       mintime = (times_arr[j][k] < mintime) ? times_arr[j][k] : mintime;
     }
-    printf("kernel.%s: %.6fs\n", kernel_names[j], mintime);
+    printf("stream-phase.%s: %.6fs\n", kernel_names[j], mintime);
   }
 
   CARTS_KERNEL_TIMER_STOP("stream");
