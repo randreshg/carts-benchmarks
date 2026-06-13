@@ -53,7 +53,6 @@ from arts_config import (
     KEY_DEFAULT_PORTS,
     KEY_LAUNCHER,
     KEY_MASTER_NODE,
-    KEY_MIN_DISTRIBUTED_TILE_BYTES,
     KEY_MIN_ITERATIONS_PER_WORKER,
     KEY_NODE_COUNT,
     KEY_NODES,
@@ -500,27 +499,6 @@ def _default_port_count(node_count: int, *, rdma: bool) -> int:
     if node_count <= 1:
         return 1
     return 1 if rdma else 2
-
-
-def _default_min_distributed_tile_bytes(node_count: int) -> Optional[int]:
-    """Return the min_distributed_tile_bytes compiler hint to embed in arts.cfg.
-
-    0 (disabled) keeps the pre-existing fine-grained plan.  For multinode runs
-    a 4 MiB floor coarsens the matmul tile from ~64 KB (per-EDT overhead) to
-    ~1 MB+ per EDT, reducing remote DB-acquire round-trips by 4-16x without
-    leaving workers idle on a 7680x7680 extralarge gemm.
-
-    Override via CARTS_SLURM_MIN_DISTRIBUTED_TILE_BYTES (non-negative integer
-    in bytes, or 0 to disable).
-    """
-    override = _env_nonnegative_int("CARTS_SLURM_MIN_DISTRIBUTED_TILE_BYTES")
-    if override is not None:
-        return override
-    if node_count <= 1:
-        return None
-    # 4 MiB: empirically gives 4-16x fewer remote acquires on extralarge gemm
-    # (7680x7680 float32) while retaining enough tiles for node-level balance.
-    return 4 * 1024 * 1024
 
 
 def _worker_threads_for_budget(
@@ -1154,21 +1132,6 @@ def generate_arts_config_for_node(
         content = _set_cfg_key(content, KEY_WORKER_THREADS, str(threads))
         content = _set_cfg_key(content, KEY_SENDER_THREADS, "0")
         content = _set_cfg_key(content, KEY_RECEIVER_THREADS, "0")
-
-    # Compiler hint: coarsen matmul EDT tiles to reduce remote DB-acquire count.
-    # This value is read at compile time by the arts.cfg parser and forwarded
-    # to SDECostModel.getMinDistributedTileBytes().  0 leaves the plan as-is.
-    min_tile_bytes = _default_min_distributed_tile_bytes(node_count)
-    if min_tile_bytes is not None and min_tile_bytes > 0:
-        content = _set_cfg_key(
-            content, KEY_MIN_DISTRIBUTED_TILE_BYTES, str(min_tile_bytes)
-        )
-    elif min_tile_bytes == 0:
-        content = _comment_cfg_key(
-            content,
-            KEY_MIN_DISTRIBUTED_TILE_BYTES,
-            "disabled by CARTS_SLURM_MIN_DISTRIBUTED_TILE_BYTES=0",
-        )
 
     # Clear nodes and master_node - SLURM launcher ignores these.
     # (ARTS reads SLURM_NNODES and SLURM_STEP_NODELIST instead)
